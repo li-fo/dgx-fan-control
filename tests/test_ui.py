@@ -216,7 +216,7 @@ def test_resize_redraw_is_deferred_coalesced_and_uses_latest_state(monkeypatch) 
     renders: list[tuple[ControlSnapshot, float]] = []
 
     monkeypatch.setattr(
-        FanAppUI, "call_after_refresh", lambda _self, callback: callbacks.append(callback)
+        FanAppUI, "call_after_refresh", lambda _self, callback: callbacks.append(callback) or True
     )
     monkeypatch.setattr(
         ui, "_render_dashboard", lambda snapshot, now: renders.append((snapshot, now))
@@ -232,14 +232,30 @@ def test_resize_redraw_is_deferred_coalesced_and_uses_latest_state(monkeypatch) 
     assert renders == [(latest, 2)] and not ui._resize_redraw_pending
 
 
-def test_resize_redraw_clears_pending_when_scheduling_is_unavailable(monkeypatch) -> None:
+def test_resize_redraw_retries_when_scheduling_is_refused(monkeypatch) -> None:
     ui = FanAppUI("config.toml", lambda: None, 75, 2)
     ui.snapshot, ui.last_render_time = _single_gpu_snapshot(), 1
+    scheduled: list[bool] = []
+    callbacks: list[object] = []
 
-    def unavailable(_self, _callback) -> None:
+    def refusing_then_accepting(_self, callback) -> bool:
+        scheduled.append(True)
+        if len(scheduled) == 1:
+            return False
+        callbacks.append(callback)
+        return True
+
+    monkeypatch.setattr(FanAppUI, "call_after_refresh", refusing_then_accepting)
+    ui.on_resize()
+    assert not ui._resize_redraw_pending and len(scheduled) == 1
+    ui.on_resize()
+    assert ui._resize_redraw_pending and len(scheduled) == 2 and len(callbacks) == 1
+
+    def unavailable(_self, _callback) -> bool:
         raise RuntimeError("closing")
 
     monkeypatch.setattr(FanAppUI, "call_after_refresh", unavailable)
+    ui._resize_redraw_pending = False
     ui.on_resize()
     assert not ui._resize_redraw_pending
 

@@ -414,7 +414,8 @@ class FanAppUI(Static):
             return
         self._resize_redraw_pending = True
         try:
-            self.call_after_refresh(self._redraw_after_resize)
+            if not self.call_after_refresh(self._redraw_after_resize):
+                self._resize_redraw_pending = False
         except RuntimeError:
             # A closing/unmounted message pump cannot accept deferred work.
             self._resize_redraw_pending = False
