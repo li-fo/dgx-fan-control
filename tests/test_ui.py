@@ -4,12 +4,12 @@ from pathlib import Path
 from rich.cells import cell_len
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
-from textual.widgets import Button
+from textual.widgets import Button, Static, TabbedContent
 
 from dgx_fan.app import DGXFanApp
 from dgx_fan.config import DashboardColors, load_config
 from dgx_fan.models import ControlSnapshot, EndpointSnapshot, FanReading, GPUStat
-from dgx_fan.ui import DashboardHistory, FanAppUI, HistoryPoint
+from dgx_fan.ui import DashboardHistory, FanAppUI, FanGauge, HistoryPoint
 
 
 def test_ui_has_tabs_and_power_toggle() -> None:
@@ -35,6 +35,95 @@ def test_control_tick_is_bounded_below_dcgm_poll_interval() -> None:
     config = load_config(Path("config.example.toml"))
     assert config.collection.interval_seconds > DGXFanApp.CONTROL_TICK_SECONDS
     assert DGXFanApp.CONTROL_TICK_SECONDS <= 0.25
+
+
+def test_fan_gauge_ring_fill_boundaries_are_monotonic() -> None:
+    previous = -1
+    for duty in (0, 20, 50, 80, 100):
+        rendered = FanGauge._content(1, duty, 1234, "RUNNING").plain
+        ring = rendered.splitlines()[0]
+        assert f"{duty}%" in rendered and "RPM: 1234 RPM" in rendered and "RUNNING" in rendered
+        assert ring.count("●") >= previous
+        assert ring.count("●") == round(duty / 10)
+        previous = ring.count("●")
+    assert FanGauge._content(2, None, None, "WAITING").plain.startswith("Fan 2 ╭○")
+    assert "--" in FanGauge._content(2, None, None, "WAITING").plain
+
+
+def test_fan_control_panel_updates_gauges_and_buttons_without_side_effects() -> None:
+    calls: list[str] = []
+
+    class FanPanelApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FanAppUI("config.toml", lambda: calls.append("toggle"), 75, 2)
+
+    app = FanPanelApp()
+    snapshot = ControlSnapshot(
+        50,
+        "curve",
+        "AUTO ON",
+        63,
+        2,
+        (FanReading(1234, "RUNNING"), FanReading(None, "NO TACH")),
+        (),
+    )
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 30)) as pilot:
+            ui = app.query_one(FanAppUI)
+            app.query_one(TabbedContent).active = "fan-control"
+            ui.update_snapshot(snapshot, 1)
+            await pilot.pause()
+            status = app.query_one("#fan-status", Static).render().plain
+            one = app.query_one("#fan-1-gauge", FanGauge).render().plain
+            two = app.query_one("#fan-2-gauge", FanGauge).render().plain
+            assert "Shared PWM: 50%" in status and "Fan 1" not in status
+            assert "50%" in one and "RPM: 1234 RPM" in one and "RUNNING" in one
+            assert "50%" in two and "RPM: N/A" in two and "NO TACH" in two
+            refreshed = ControlSnapshot(
+                80,
+                "curve",
+                "AUTO ON",
+                70,
+                3,
+                (FanReading(1500, "RUNNING"), FanReading(900, "STOPPED")),
+                (),
+            )
+            ui.update_snapshot(refreshed, 2)
+            assert "80%" in app.query_one("#fan-1-gauge", FanGauge).render().plain
+            assert "RPM: 1500 RPM" in app.query_one("#fan-1-gauge", FanGauge).render().plain
+            assert "RPM: 900 RPM" in app.query_one("#fan-2-gauge", FanGauge).render().plain
+            assert "STOPPED" in app.query_one("#fan-2-gauge", FanGauge).render().plain
+            app.query_one("#power-toggle", Button).press()
+            assert calls == ["toggle"]
+            setting = app.query_one("#fan-settings", Button)
+            setting.press()
+            assert calls == ["toggle"] and ui.snapshot is refreshed
+            app.query_one("#power-toggle", Button).action_press()
+            assert calls == ["toggle", "toggle"]
+
+    asyncio.run(exercise())
+
+
+def test_fan_control_two_row_geometry_survives_resize() -> None:
+    app = _DashboardApp()
+
+    async def exercise() -> None:
+        async with app.run_test(size=(79, 25)) as pilot:
+            app.query_one(TabbedContent).active = "fan-control"
+            await pilot.pause()
+            top = app.query_one("#fan-top-row")
+            gauges = app.query_one("#fan-gauge-row")
+            one = app.query_one("#fan-1-gauge", FanGauge)
+            two = app.query_one("#fan-2-gauge", FanGauge)
+            assert top.region.bottom <= gauges.region.y
+            assert one.region.right <= two.region.x and one.region.height == two.region.height == 5
+            await pilot.resize_terminal(100, 30)
+            await pilot.pause()
+            assert top.region.bottom <= gauges.region.y
+            assert one.region.right <= two.region.x and one.region.height == two.region.height == 5
+
+    asyncio.run(exercise())
 
 
 def test_poll_exception_is_supervised_and_unmount_cleans_up(monkeypatch) -> None:

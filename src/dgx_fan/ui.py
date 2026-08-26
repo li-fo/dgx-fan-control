@@ -8,7 +8,7 @@ from typing import Self
 from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Footer, Header, Static, TabbedContent, TabPane
 
 from .config import DashboardColors
@@ -165,15 +165,53 @@ class DashboardHistory:
 
 class PowerButton(Button):
     def __init__(self, callback: Callable[[], None]) -> None:
-        super().__init__("Toggle fan power", id="power-toggle")
+        super().__init__("Turn On / Off", id="power-toggle")
         self.callback = callback
 
     def press(self) -> Self:
         self.callback()
         return super().press()
 
+    def action_press(self) -> None:
+        self.press()
+
+
+class FanGauge(Static):
+    """A compact terminal-safe ring for one fan's shared PWM and own tach state."""
+
+    SEGMENTS = 10
+
+    def __init__(self, number: int) -> None:
+        self.number = number
+        super().__init__(self._content(number, None, None, "WAITING"), id=f"fan-{number}-gauge")
+
+    @classmethod
+    def _content(cls, number: int, duty_percent: int | None, rpm: float | None, state: str) -> Text:
+        percentage = "--" if duty_percent is None else f"{duty_percent}%"
+        filled = (
+            0
+            if duty_percent is None
+            else round(max(0, min(100, duty_percent)) / 100 * cls.SEGMENTS)
+        )
+        ring = "●" * filled + "○" * (cls.SEGMENTS - filled)
+        rpm_text = "N/A" if rpm is None else f"{rpm:.0f} RPM"
+        return Text(
+            f"Fan {number} ╭{ring}╮\n│ {percentage:^10} │\n╰{'─' * cls.SEGMENTS}╯\nRPM: {rpm_text}\n{state}"
+        )
+
+    def set_reading(self, duty_percent: int, rpm: float | None, state: str) -> None:
+        self.update(self._content(self.number, duty_percent, rpm, state))
+
 
 class FanAppUI(Static):
+    DEFAULT_CSS = """
+    #fan-top-row { height: 5; }
+    #fan-status { width: 1fr; height: 5; }
+    #power-toggle, #fan-settings { width: 15; height: 3; }
+    #fan-gauge-row { height: 5; }
+    #fan-1-gauge, #fan-2-gauge { width: 1fr; height: 5; content-align: center middle; }
+    """
+
     def __init__(
         self,
         config_path: str,
@@ -206,13 +244,13 @@ class FanAppUI(Static):
                 yield Static(id="dashboard-warning")
                 yield VerticalScroll(id="dashboard-scroll")
             with TabPane("Fan Control", id="fan-control"), Vertical():
-                yield Static(id="fan-status")
-                yield PowerButton(self.toggle)
-                yield Static(
-                    f"Edit {_safe_display_text(self.config_path)} and restart to change settings.",
-                    id="config-hint",
-                    markup=False,
-                )
+                with Horizontal(id="fan-top-row"):
+                    yield Static("Waiting for fan controller…", id="fan-status", markup=False)
+                    yield PowerButton(self.toggle)
+                    yield Button("Setting", id="fan-settings")
+                with Horizontal(id="fan-gauge-row"):
+                    yield FanGauge(1)
+                    yield FanGauge(2)
         yield Footer()
 
     def update_snapshot(self, snapshot: ControlSnapshot, now: float) -> None:
@@ -237,18 +275,19 @@ class FanAppUI(Static):
             self._layout_convergence_passes = 0
             self._render_dashboard(snapshot, now)
             self.last_signature = signature
-        fan_text = ", ".join(
-            f"Fan {i + 1}: {fan.state} {fan.rpm or 0:.0f} RPM"
-            for i, fan in enumerate(snapshot.fans)
-        )
         maximum = (
             "N/A"
             if snapshot.max_temperature_celsius is None
             else f"{snapshot.max_temperature_celsius:.1f} C"
         )
         self.query_one("#fan-status", Static).update(
-            f"{snapshot.state} — {snapshot.duty_percent}% PWM ({snapshot.reason})\nMax GPU temp: {maximum}; stage: {snapshot.active_stage}\n{fan_text}"
+            f"{snapshot.state}\nShared PWM: {snapshot.duty_percent}% ({snapshot.reason})\nMax GPU temp: {maximum}; stage: {snapshot.active_stage}"
         )
+        for number in (1, 2):
+            fan = snapshot.fans[number - 1]
+            self.query_one(f"#fan-{number}-gauge", FanGauge).set_reading(
+                snapshot.duty_percent, fan.rpm, fan.state
+            )
 
     def _render_dashboard(self, snapshot: ControlSnapshot, now: float) -> None:
         scroll = self.query_one("#dashboard-scroll", VerticalScroll)
