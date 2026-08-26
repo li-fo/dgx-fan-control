@@ -276,6 +276,28 @@ def test_layout_convergence_scheduling_is_bounded(monkeypatch) -> None:
     assert len(callbacks) == 2 and ui._layout_convergence_passes == 2
 
 
+def test_resize_resets_convergence_before_a_pending_second_check(monkeypatch) -> None:
+    ui = FanAppUI("config.toml", lambda: None, 75, 2)
+    ui.snapshot, ui.last_render_time = _single_gpu_snapshot(), 1
+    callbacks: list[object] = []
+    monkeypatch.setattr(
+        FanAppUI, "call_after_refresh", lambda _self, callback: callbacks.append(callback) or True
+    )
+    ui._dashboard_layout_signature = (1, 1, 1, 1, 1, 1)
+    ui._layout_convergence_passes = 2
+    ui._resize_redraw_pending = True
+    ui.on_resize()
+    assert ui._layout_convergence_passes == 0 and ui._resize_redraw_pending
+
+    monkeypatch.setattr(ui, "query_one", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(ui, "_layout_signature", lambda _scroll: (2, 2, 2, 2, 2, 2))
+    monkeypatch.setattr(
+        ui, "_render_dashboard", lambda _snapshot, _time: ui._schedule_layout_check()
+    )
+    ui._converge_dashboard_layout()
+    assert len(callbacks) == 1 and ui._layout_convergence_passes == 1 and ui._resize_redraw_pending
+
+
 def test_panels_are_ordered_retained_and_deduplicated() -> None:
     app = _DashboardApp()
     gpu = GPUStat(

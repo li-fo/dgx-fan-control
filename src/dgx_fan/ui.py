@@ -411,9 +411,11 @@ class FanAppUI(Static):
             rendered.append(value, style=Style(color=color))
 
     def on_resize(self) -> None:
-        if self.snapshot is None or self.last_render_time is None or self._resize_redraw_pending:
+        if self.snapshot is None or self.last_render_time is None:
             return
         self._layout_convergence_passes = 0
+        if self._resize_redraw_pending:
+            return
         self._schedule_after_refresh(self._redraw_after_resize)
 
     def _schedule_layout_check(self) -> None:
