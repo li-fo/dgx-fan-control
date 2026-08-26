@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 
+from textual.app import App, ComposeResult
 from textual.widgets import Button
 
 from dgx_fan.app import DGXFanApp
@@ -72,22 +73,37 @@ def test_memory_history_is_normalized_and_zero_is_not_a_gap() -> None:
     assert history.graph("one", "GPU-a", "util", 250, 1, 100) == " "
 
 
-def test_two_panels_follow_snapshot_order_and_show_memory_total() -> None:
-    config = load_config(Path("config.example.toml"))
-    app = DGXFanApp(config)
+class _DashboardApp(App[None]):
+    def compose(self) -> ComposeResult:
+        yield FanAppUI("config.toml", lambda: None, 75)
+
+
+def test_panels_are_ordered_retained_and_deduplicated() -> None:
+    app = _DashboardApp()
     gpu = GPUStat("GPU-a", "A100", memory_used_mib=50, memory_total_mib=100, utilization_percent=20, temperature_celsius=40)
-    snapshot = ControlSnapshot(20, "curve", "AUTO ON", 40, 0, (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING")), (
-        EndpointSnapshot("z", "Z endpoint", True, 0, gpus=(gpu,), sample_revision=1),
-        EndpointSnapshot("a", "A endpoint", False, 1, error="timeout", sample_revision=1),
+    incomplete = GPUStat("GPU-z", "H100", memory_used_mib=50, utilization_percent=0, temperature_celsius=0)
+    first = ControlSnapshot(20, "curve", "AUTO ON", 40, 0, (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING")), (
+        EndpointSnapshot("z", "Z endpoint", True, 0, gpus=(incomplete,), sample_revision=1),
+        EndpointSnapshot("a", "A endpoint", True, 0, gpus=(gpu,), sample_revision=1),
+    ))
+    second = ControlSnapshot(20, "curve", "AUTO ON", 40, 0, (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING")), (
+        EndpointSnapshot("z", "Z endpoint", True, 0, gpus=(incomplete,), sample_revision=1),
+        EndpointSnapshot("a", "A endpoint", True, 0, gpus=(), sample_revision=2),
     ))
 
     async def exercise() -> None:
         async with app.run_test() as _:
             ui = app.query_one(FanAppUI)
-            ui.update_snapshot(snapshot, 1)
-            ui.update_snapshot(snapshot, 1.25)
+            ui.update_snapshot(first, 1)
+            await asyncio.sleep(0)
+            ui.update_snapshot(second, 2)
+            ui.update_snapshot(second, 2.25)
+            await asyncio.sleep(0)
             rendered = [str(panel.render()) for panel in ui.query(".dgx-panel")]
-            assert "Z endpoint" in rendered[-2] and "A endpoint" in rendered[-1]
-            assert "50/100 MiB (50%)" in rendered[-2]
+            assert len(rendered) == 2
+            assert "Z endpoint" in rendered[0] and "A endpoint" in rendered[1]
+            assert "N/A" in rendered[0]
+            assert "GPU-a (last seen)" in rendered[1]
+            assert len(ui.history.points[("a", "GPU-a", "util")]) == 1
 
     asyncio.run(exercise())

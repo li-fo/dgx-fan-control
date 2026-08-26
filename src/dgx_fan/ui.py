@@ -110,21 +110,14 @@ class FanAppUI(Static):
         for endpoint in snapshot.endpoint_snapshots:
             self.history.append(endpoint.endpoint_id, endpoint.sample_revision, endpoint.gpus, now)
         errors = [f"{e.name}: {e.error or 'stale'} (sample age: {'N/A' if e.age_seconds is None else f'{e.age_seconds:.1f}s'})" for e in snapshot.endpoint_snapshots if not e.healthy]
-        try:
-            self.query_one("#error-banner", Static).update(" | ".join(errors) if errors else "All configured DGX endpoints are healthy.")
-            self._render_dashboard(snapshot, now)
-        except NoMatches:
-            return
+        self.query_one("#error-banner", Static).update(" | ".join(errors) if errors else "All configured DGX endpoints are healthy.")
+        self._render_dashboard(snapshot, now)
         fan_text = ", ".join(f"Fan {i + 1}: {fan.state} {fan.rpm or 0:.0f} RPM" for i, fan in enumerate(snapshot.fans))
         maximum = "N/A" if snapshot.max_temperature_celsius is None else f"{snapshot.max_temperature_celsius:.1f} C"
-        try:
-            self.query_one("#fan-status", Static).update(f"{snapshot.state} — {snapshot.duty_percent}% PWM ({snapshot.reason})\nMax GPU temp: {maximum}; stage: {snapshot.active_stage}\n{fan_text}")
-        except NoMatches:
-            pass
+        self.query_one("#fan-status", Static).update(f"{snapshot.state} — {snapshot.duty_percent}% PWM ({snapshot.reason})\nMax GPU temp: {maximum}; stage: {snapshot.active_stage}\n{fan_text}")
 
     def _render_dashboard(self, snapshot: ControlSnapshot, now: float) -> None:
         scroll = self.query_one("#dashboard-scroll", VerticalScroll)
-        scroll.remove_children()
         current = {(endpoint.endpoint_id, gpu.key): gpu for endpoint in snapshot.endpoint_snapshots for gpu in endpoint.gpus}
         for endpoint in snapshot.endpoint_snapshots:
             lines = [f"[b]{endpoint.name}[/b]  {'HEALTHY' if endpoint.healthy else 'UNHEALTHY'}"]
@@ -138,4 +131,10 @@ class FanAppUI(Static):
                 util = "N/A" if gpu is None or gpu.utilization_percent is None else f"{gpu.utilization_percent:.0f}%"
                 temp = "N/A" if gpu is None or gpu.temperature_celsius is None else f"{gpu.temperature_celsius:.1f} C"
                 lines.extend((label, f"MEM  {mem:>9} {self.history.graph(endpoint.endpoint_id, key, 'mem', now, 36, 100)}", f"UTIL {util:>9} {self.history.graph(endpoint.endpoint_id, key, 'util', now, 36, 100)}", f"TEMP {temp:>9} {self.history.graph(endpoint.endpoint_id, key, 'temp', now, 36, max(100, self.emergency_temperature))}"))
-            scroll.mount(Static("\n".join(lines), classes="dgx-panel"))
+            panel_id = f"panel-{endpoint.endpoint_id}"
+            try:
+                panel = scroll.query_one(f"#{panel_id}", Static)
+            except NoMatches:
+                panel = Static(id=panel_id, classes="dgx-panel")
+                scroll.mount(panel)
+            panel.update("\n".join(lines))
