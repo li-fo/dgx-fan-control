@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 
+from rich.cells import cell_len
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Button
@@ -260,6 +261,21 @@ def test_resize_redraw_retries_when_scheduling_is_refused(monkeypatch) -> None:
     assert not ui._resize_redraw_pending
 
 
+def test_layout_convergence_scheduling_is_bounded(monkeypatch) -> None:
+    ui = FanAppUI("config.toml", lambda: None, 75, 2)
+    ui.snapshot, ui.last_render_time = _single_gpu_snapshot(), 1
+    callbacks: list[object] = []
+    monkeypatch.setattr(
+        FanAppUI, "call_after_refresh", lambda _self, callback: callbacks.append(callback) or True
+    )
+
+    for _ in range(3):
+        ui._resize_redraw_pending = False
+        ui._schedule_layout_check()
+
+    assert len(callbacks) == 2 and ui._layout_convergence_passes == 2
+
+
 def test_panels_are_ordered_retained_and_deduplicated() -> None:
     app = _DashboardApp()
     gpu = GPUStat(
@@ -415,9 +431,10 @@ def test_dashboard_signature_gates_charts_but_not_fast_status_updates(monkeypatc
             before_resize_renders = len(renders)
             await pilot.resize_terminal(120, 24)
             await pilot.pause()
-            assert len(renders) == before_resize_renders + 1
+            assert before_resize_renders + 1 <= len(renders) <= before_resize_renders + 2
+            final_resize_renders = len(renders)
             ui.update_snapshot(snapshot((a2,)), 5.25)
-            assert len(renders) == before_resize_renders + 1
+            assert len(renders) == final_resize_renders
             assert len(ui.history.points[("a", "GPU-a", "util")]) == before_resize_count
 
     asyncio.run(exercise())
@@ -827,5 +844,92 @@ def test_rapid_resize_redraw_uses_final_viewport_without_growing_history() -> No
             await pilot.pause()
             assert scroll.display and len(ui.query(".dgx-panel")) == 1
             assert history_count == len(ui.history.points[("one", "GPU-a", "util")])
+
+    asyncio.run(exercise())
+
+
+def test_scrollbar_width_converges_after_resize_without_wrapping_rows() -> None:
+    app = _DashboardApp()
+    gpu = GPUStat(
+        "GPU-a",
+        "A100",
+        memory_used_mib=50,
+        memory_total_mib=100,
+        utilization_percent=20,
+        temperature_celsius=40,
+    )
+    fit = ControlSnapshot(
+        20,
+        "curve",
+        "AUTO ON",
+        40,
+        0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (
+            EndpointSnapshot("one", "One", True, 0, gpus=(gpu,), sample_revision=1),
+            EndpointSnapshot("two", "Two", True, 0, gpus=(gpu,), sample_revision=1),
+        ),
+    )
+
+    async def exercise() -> None:
+        async with app.run_test(size=(120, 60)) as pilot:
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(fit, 1)
+            await pilot.pause()
+            history_count = len(ui.history.points[("one", "GPU-a", "util")])
+            for width, height in ((98, 32), (85, 25)):
+                await pilot.resize_terminal(width, height)
+                await pilot.pause()
+                await pilot.pause()
+                scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
+                usable = scroll.scrollable_content_region.width
+                assert usable == scroll.size.width and scroll.max_scroll_y == 0
+                assert all(
+                    cell_len(line) <= usable
+                    for panel in ui.query(".dgx-panel")
+                    for line in panel.render().plain.splitlines()
+                )
+                assert history_count == len(ui.history.points[("one", "GPU-a", "util")])
+
+    asyncio.run(exercise())
+
+
+def test_true_overflow_uses_reduced_scrollable_content_width() -> None:
+    app = _DashboardApp()
+    gpus = tuple(
+        GPUStat(
+            f"GPU-{index}",
+            "A100",
+            memory_used_mib=50,
+            memory_total_mib=100,
+            utilization_percent=20,
+            temperature_celsius=40,
+        )
+        for index in range(5)
+    )
+    snapshot = ControlSnapshot(
+        20,
+        "curve",
+        "AUTO ON",
+        40,
+        0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (EndpointSnapshot("one", "One", True, 0, gpus=gpus, sample_revision=1),),
+    )
+
+    async def exercise() -> None:
+        async with app.run_test(size=(98, 32)) as pilot:
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 1)
+            await pilot.pause()
+            await pilot.pause()
+            scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
+            usable = scroll.scrollable_content_region.width
+            assert scroll.max_scroll_y > 0 and usable < scroll.size.width
+            assert all(
+                cell_len(line) <= usable
+                for panel in ui.query(".dgx-panel")
+                for line in panel.render().plain.splitlines()
+            )
 
     asyncio.run(exercise())

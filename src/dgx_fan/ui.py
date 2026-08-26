@@ -17,6 +17,7 @@ from .models import ControlSnapshot, GPUStat
 HISTORY_SECONDS = 120.0
 MIN_DASHBOARD_WIDTH = 79
 PLOT_HEIGHT = 5
+MAX_LAYOUT_CONVERGENCE_PASSES = 2
 
 
 def _safe_display_text(value: object) -> str:
@@ -194,6 +195,8 @@ class FanAppUI(Static):
         self.last_render_time: float | None = None
         self.last_signature: tuple[tuple[str, int], ...] | None = None
         self._resize_redraw_pending = False
+        self._dashboard_layout_signature: tuple[int, int, int, int, int, int] | None = None
+        self._layout_convergence_passes = 0
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -231,6 +234,7 @@ class FanAppUI(Static):
             for endpoint in snapshot.endpoint_snapshots
         )
         if signature != self.last_signature:
+            self._layout_convergence_passes = 0
             self._render_dashboard(snapshot, now)
             self.last_signature = signature
         fan_text = ", ".join(
@@ -279,12 +283,7 @@ class FanAppUI(Static):
             len(snapshot.endpoint_snapshots),
             sum(len(keys) for keys in keys_by_endpoint.values()),
         )
-        gpu_count = sum(len(keys) for keys in keys_by_endpoint.values())
-        content_lines = len(snapshot.endpoint_snapshots) + gpu_count * (6 + plot_height * 2)
-        # Textual reserves two cells for a visible vertical scrollbar. Reserve
-        # the same width before composing when the minimum content genuinely
-        # overflows, so chart rows never wrap underneath it.
-        available = max(1, scroll.size.width - (2 if content_lines > scroll.size.height else 0))
+        available = max(1, scroll.scrollable_content_region.width)
         previous: Static | None = None
         for endpoint in snapshot.endpoint_snapshots:
             # Health changes on the fast control tick. Keep them in the banner so
@@ -358,6 +357,8 @@ class FanAppUI(Static):
             else:
                 scroll.move_child(panel, after=previous)
             previous = panel
+        self._dashboard_layout_signature = self._layout_signature(scroll)
+        self._schedule_layout_check()
 
     @staticmethod
     def _plot_height(viewport_height: int, endpoint_count: int, gpu_count: int) -> int:
@@ -412,15 +413,50 @@ class FanAppUI(Static):
     def on_resize(self) -> None:
         if self.snapshot is None or self.last_render_time is None or self._resize_redraw_pending:
             return
+        self._layout_convergence_passes = 0
+        self._schedule_after_refresh(self._redraw_after_resize)
+
+    def _schedule_layout_check(self) -> None:
+        if self.snapshot is None or self.last_render_time is None or self._resize_redraw_pending:
+            return
+        if (
+            self._layout_convergence_passes < MAX_LAYOUT_CONVERGENCE_PASSES
+            and self._schedule_after_refresh(self._converge_dashboard_layout)
+        ):
+            self._layout_convergence_passes += 1
+
+    def _schedule_after_refresh(self, callback: Callable[[], None]) -> bool:
         self._resize_redraw_pending = True
         try:
-            if not self.call_after_refresh(self._redraw_after_resize):
+            if not self.call_after_refresh(callback):
                 self._resize_redraw_pending = False
+                return False
         except RuntimeError:
             # A closing/unmounted message pump cannot accept deferred work.
             self._resize_redraw_pending = False
+            return False
+        return True
 
     def _redraw_after_resize(self) -> None:
         self._resize_redraw_pending = False
         if self.snapshot is not None and self.last_render_time is not None:
             self._render_dashboard(self.snapshot, self.last_render_time)
+
+    def _converge_dashboard_layout(self) -> None:
+        self._resize_redraw_pending = False
+        if self.snapshot is None or self.last_render_time is None:
+            return
+        scroll = self.query_one("#dashboard-scroll", VerticalScroll)
+        if self._dashboard_layout_signature != self._layout_signature(scroll):
+            self._render_dashboard(self.snapshot, self.last_render_time)
+
+    def _layout_signature(self, scroll: VerticalScroll) -> tuple[int, int, int, int, int, int]:
+        region = scroll.scrollable_content_region
+        return (
+            self.screen.size.width,
+            self.screen.size.height,
+            scroll.size.width,
+            scroll.size.height,
+            region.width,
+            region.height,
+        )
