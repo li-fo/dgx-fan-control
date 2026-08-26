@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import os
-import pty
 import select
 import signal
 import struct
 import subprocess
 import sys
-import termios
 import time
 from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX PTY APIs are required")
+
+if os.name == "posix":
+    import pty
+    import termios
 
 
 def _config() -> str:
