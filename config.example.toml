@@ -1,0 +1,44 @@
+version = 1
+
+[[dgx]]
+id = "dgx-1"
+name = "DGX-1"
+url = "http://192.168.1.10:9400/metrics"
+
+[collection]
+interval_seconds = 2.0
+timeout_seconds = 1.5
+stale_after_seconds = 6.0
+
+[control]
+enabled_at_startup = true
+max_speed_percent = 100
+hysteresis_celsius = 2.0
+emergency_temperature_celsius = 75.0
+recovery_seconds = 10.0
+
+[[control.stages]]
+max_temperature_celsius = 45.0
+speed_percent = 20
+
+[[control.stages]]
+max_temperature_celsius = 55.0
+speed_percent = 50
+
+[[control.stages]]
+max_temperature_celsius = 70.0
+speed_percent = 80
+
+[[control.stages]]
+speed_percent = 100
+
+[hardware]
+# Use fake on development machines. raspberry-pi imports pigpio lazily at runtime.
+backend = "fake"
+pwm_gpio_bcm = 18
+pwm_frequency_hz = 25000
+pwm_inverted = true
+tach_gpio_bcm = [23, 24]
+pulses_per_revolution = [2, 2]
+startup_boost_seconds = 1.0
+stall_timeout_seconds = 5.0

@@ -127,3 +127,6 @@ docs/tmp/*
 !docs/tmp/*/
 !docs/tmp/*/**
 # END AI agents docs/tmp policy
+
+# Local MVP configuration
+config.toml
