@@ -49,7 +49,7 @@ This app drives **one shared PWM signal** and reads **two separate tach signals*
 
 \* Never trust a generic wire colour or connector number over the exact fan data sheet. Never connect the fan PWM line (which may have an internal 5 V pull-up), or a 5 V tach signal, directly to a Pi GPIO.
 
-`BCM18` / physical pin 12 is the only PWM output used by this application. `BCM19` / physical pin 35 remains unused even if `dtoverlay=pwm-2chan` enables it. Connecting Fan 2 PWM to BCM19 will not control it; independent PWM requires code and configuration changes.
+`BCM18` / physical pin 12 is the only PWM output used by this application. `BCM19` / physical pin 35 is unused by this application. Connecting Fan 2 PWM to BCM19 will not control it; independent PWM requires code and configuration changes.
 
 ### PWM level shifting
 
@@ -57,8 +57,11 @@ The Pi GPIO is 3.3 V logic. Drive the joined fan PWM input with an open-collecto
 
 ```text
 Pi BCM18 / physical pin 12 -- 2.2 kΩ–4.7 kΩ -- Base (NPN)
+                                            o  base node
                                             |
-                                  10 kΩ to GND (recommended pull-down)
+                                     10 kΩ (recommended pull-down)
+                                            |
+                                           GND
 
 Fan 1 PWM (typical pin 4) ---+--- Collector (NPN)
 Fan 2 PWM (typical pin 4) ---+
@@ -74,23 +77,24 @@ The supplied `pwm_inverted = true` compensates for this low-side NPN/N-MOSFET in
 Do not join tach wires. Typical open-collector/open-drain tach wiring is:
 
 ```text
-Pi 3.3 V ---- 4.7 kΩ–10 kΩ ---- Fan 1 tach ---- BCM23 / physical pin 16
-Pi 3.3 V ---- 4.7 kΩ–10 kΩ ---- Fan 2 tach ---- BCM24 / physical pin 18
+Pi 3.3 V ---- 4.7 kΩ–10 kΩ ----+---- BCM23 / physical pin 16
+                                |
+Fan 1 tach ---------------------+
+
+Pi 3.3 V ---- 4.7 kΩ–10 kΩ ----+---- BCM24 / physical pin 18
+                                |
+Fan 2 tach ---------------------+
 ```
 
 Confirm the tach output type in the fan data sheet. A 5 V push-pull tach needs a level shifter; the Pi internal pull-up is not a substitute and BCM23/24 must never receive 5 V. Set `pulses_per_revolution` to the fan's documented value (often 2, but not always).
 
 Physical pins 2 and 4 are one Pi 5 V rail, not separate supplies. Add both fans' normal and startup current to the Pi/USB load and verify that the supply, cabling, and connector are rated for the total before using header power. If uncertain, use a separately rated 5 V fan supply. Its ground must connect to Pi ground for PWM/tach reference, but do **not** connect that supply's +5 V back to Pi physical pin 2/4 while the Pi has another supply: that can backfeed the Pi.
 
-### Overlay, daemon, and first bring-up
+### pigpio ownership, daemon, and first bring-up
 
-The code calls pigpio hardware PWM on BCM18 at the configured 25 kHz. For the one channel this app uses, configure this overlay in `/boot/firmware/config.txt` (the boot path can vary by OS) and reboot:
+The code calls pigpio `hardware_PWM` on BCM18 at the configured 25 kHz. For this pigpio backend, do **not** add `dtoverlay=pwm` or `dtoverlay=pwm-2chan`. If either PWM overlay is inherited from an image or another project, remove/disable it before live use unless an operator has independently established exclusive ownership and compatibility. Do not run analogue audio or another PWM consumer concurrently: the PWM peripheral/channel is a shared hardware resource. The Raspberry Pi overlay documentation is linked below for pin/channel/resource facts, not as a setup requirement for this backend.
 
-```ini
-dtoverlay=pwm,pin=18,func=2
-```
-
-`dtoverlay=pwm-2chan` may remain if already configured; it enables the GPIO18/GPIO19 pair, but channel 2 is unused by this app. Verify the physical mapping, install the Pi extra, start `pigpiod`, and check the configuration before selecting the real backend:
+Verify the physical mapping, install the Pi extra, start `pigpiod`, and check the configuration before selecting the real backend:
 
 ```bash
 pinout
@@ -115,8 +119,9 @@ Stop and remove power if any GPIO, cable, transistor, connector, or supply becom
 ### Electrical references
 
 - [Raspberry Pi GPIO and 40-pin header documentation](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#gpio-and-the-40-pin-header)
+- [Raspberry Pi 4 Model B datasheet and pinout](https://datasheets.raspberrypi.com/rpi4/raspberry-pi-4-datasheet.pdf)
 - [Official Raspberry Pi firmware overlay README](https://github.com/raspberrypi/firmware/blob/master/boot/overlays/README)
-- [pigpio documentation and source](https://github.com/joan2937/pigpio)
+- [pigpio `gpioHardwarePWM` implementation (sets GPIO mode and PWM clock)](https://github.com/joan2937/pigpio/blob/master/pigpio.c#L12319-L12410)
 - [Intel four-wire fan electrical guidance (reference topology)](https://www.intel.com.tr/content/dam/www/public/us/en/documents/design-guides/celeron-400-guide.pdf)
 
 The Intel guide describes a common four-wire PWM electrical topology. It does not certify an unknown 5 V fan's connector order, voltage, current, or behaviour.

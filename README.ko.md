@@ -49,7 +49,7 @@ uv run dgx-fan --config config.toml
 
 \* 일반 배선도의 선 색/핀 번호보다 정확한 팬 데이터시트를 우선하세요. 팬 PWM선(내부 5 V pull-up이 있을 수 있음) 또는 5 V tach 신호를 Pi GPIO에 직접 연결하면 안 됩니다.
 
-`BCM18` / 물리 핀 12가 이 앱이 사용하는 유일한 PWM 출력입니다. `dtoverlay=pwm-2chan`이 활성화해도 `BCM19` / 물리 핀 35는 사용하지 않습니다. Fan 2 PWM을 BCM19에 연결해도 제어되지 않습니다. 독립 PWM에는 코드와 설정 변경이 필요합니다.
+`BCM18` / 물리 핀 12가 이 앱이 사용하는 유일한 PWM 출력입니다. `BCM19` / 물리 핀 35는 이 앱에서 사용하지 않습니다. Fan 2 PWM을 BCM19에 연결해도 제어되지 않습니다. 독립 PWM에는 코드와 설정 변경이 필요합니다.
 
 ### PWM 레벨 시프터
 
@@ -57,8 +57,11 @@ Pi GPIO는 3.3 V 로직입니다. BCM18을 팬 PWM 입력에 직접 연결하지
 
 ```text
 Pi BCM18 / 물리 핀 12 -- 2.2 kΩ–4.7 kΩ -- Base (NPN)
+                                            o  base node
                                             |
-                                  10 kΩ -> GND (권장 pull-down)
+                                     10 kΩ (권장 pull-down)
+                                            |
+                                           GND
 
 Fan 1 PWM (일반적으로 pin 4) ---+--- Collector (NPN)
 Fan 2 PWM (일반적으로 pin 4) ---+
@@ -74,23 +77,24 @@ Fan 2 PWM (일반적으로 pin 4) ---+
 tach 선은 서로 합치지 마세요. 일반적인 open-collector/open-drain tach 배선은 다음과 같습니다.
 
 ```text
-Pi 3.3 V ---- 4.7 kΩ–10 kΩ ---- Fan 1 tach ---- BCM23 / 물리 핀 16
-Pi 3.3 V ---- 4.7 kΩ–10 kΩ ---- Fan 2 tach ---- BCM24 / 물리 핀 18
+Pi 3.3 V ---- 4.7 kΩ–10 kΩ ----+---- BCM23 / 물리 핀 16
+                                |
+Fan 1 tach ---------------------+
+
+Pi 3.3 V ---- 4.7 kΩ–10 kΩ ----+---- BCM24 / 물리 핀 18
+                                |
+Fan 2 tach ---------------------+
 ```
 
 팬 데이터시트에서 tach 출력 타입을 확인하세요. 5 V push-pull tach에는 level shifter가 필요합니다. Pi 내부 pull-up으로 대체할 수 없고 BCM23/24에 5 V를 인가하면 안 됩니다. `pulses_per_revolution`은 팬 데이터시트 값으로 설정하세요(흔히 2지만 항상 그렇지 않음).
 
 물리 핀 2와 4는 서로 다른 전원이 아니라 같은 Pi 5 V rail입니다. 두 팬의 정상/기동 전류를 Pi/USB 부하에 더하고, 사용 중인 전원, 케이블, 커넥터가 총 전류 정격을 만족하는지 확인한 뒤에만 헤더 전원을 사용하세요. 확실하지 않으면 정격이 확인된 별도 5 V 팬 전원을 사용합니다. PWM/tach 기준을 위해 그 전원의 GND는 Pi GND와 공통이어야 하지만, Pi가 다른 전원으로 켜진 상태에서 별도 팬 전원의 +5 V를 Pi 물리 핀 2/4에 연결하면 역급전될 수 있으므로 하지 마세요.
 
-### Overlay, daemon, 첫 가동
+### pigpio 소유권, daemon, 첫 가동
 
-코드는 설정한 25 kHz로 BCM18에 pigpio hardware PWM을 호출합니다. 이 한 채널에는 `/boot/firmware/config.txt`(OS에 따라 경로 다름)에 다음을 설정하고 재부팅하면 충분합니다.
+코드는 설정한 25 kHz로 BCM18에 pigpio `hardware_PWM`을 호출합니다. 이 pigpio backend에는 `dtoverlay=pwm` 또는 `dtoverlay=pwm-2chan`을 추가하지 마세요. OS 이미지나 다른 프로젝트에서 PWM overlay를 물려받았다면, 운영자가 배타적 소유권과 호환성을 별도로 확인한 경우가 아니면 실제 가동 전에 제거/비활성화하세요. PWM peripheral/channel은 공유 하드웨어 자원이므로 analogue audio나 다른 PWM 소비자를 동시에 실행하지 마세요. 아래 Raspberry Pi overlay 문서는 이 backend의 설정 요구 사항이 아니라 핀/channel/resource 사실을 확인하기 위한 참고 자료입니다.
 
-```ini
-dtoverlay=pwm,pin=18,func=2
-```
-
-`dtoverlay=pwm-2chan`을 이미 사용 중이면 그대로 둘 수 있습니다. GPIO18/GPIO19 쌍을 활성화하지만 이 앱에서는 2번 채널을 사용하지 않습니다. 실제 backend 전환 전 물리 매핑, Pi extra, `pigpiod`, 설정을 확인하세요.
+실제 backend 전환 전 물리 매핑, Pi extra, `pigpiod`, 설정을 확인하세요.
 
 ```bash
 pinout
@@ -115,8 +119,9 @@ GPIO, 케이블, 트랜지스터, 커넥터, 전원이 뜨거워지거나, GPIO�
 ### 전기 참고 자료
 
 - [Raspberry Pi GPIO 및 40핀 헤더 문서](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#gpio-and-the-40-pin-header)
+- [Raspberry Pi 4 Model B 데이터시트 및 핀아웃](https://datasheets.raspberrypi.com/rpi4/raspberry-pi-4-datasheet.pdf)
 - [공식 Raspberry Pi firmware overlay README](https://github.com/raspberrypi/firmware/blob/master/boot/overlays/README)
-- [pigpio 문서 및 소스](https://github.com/joan2937/pigpio)
+- [pigpio `gpioHardwarePWM` 구현(GPIO mode와 PWM clock 설정)](https://github.com/joan2937/pigpio/blob/master/pigpio.c#L12319-L12410)
 - [Intel 4선 팬 전기 가이드(참조 토폴로지)](https://www.intel.com.tr/content/dam/www/public/us/en/documents/design-guides/celeron-400-guide.pdf)
 
 Intel 가이드는 일반적인 4선 PWM 전기 토폴로지를 설명하는 참고 자료이며, 알 수 없는 5 V 팬의 커넥터 순서, 전압, 전류, 동작을 인증하지는 않습니다.
