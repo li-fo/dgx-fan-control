@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tomllib
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -69,9 +70,12 @@ def _mapping(value: object, name: str) -> dict[str, object]:
 
 
 def _number(value: object, name: str, *, minimum: float = 0) -> float:
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or float(value) < minimum:
-        raise ConfigError(f"{name} must be a number >= {minimum}")
-    return float(value)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ConfigError(f"{name} must be a finite number >= {minimum}")
+    numeric = float(value)
+    if not isfinite(numeric) or numeric < minimum:
+        raise ConfigError(f"{name} must be a finite number >= {minimum}")
+    return numeric
 
 
 def _integer(value: object, name: str, *, minimum: int = 0, maximum: int | None = None) -> int:
@@ -155,7 +159,7 @@ def load_config(path: Path) -> AppConfig:
     tach = hardware.get("tach_gpio_bcm")
     ppr = hardware.get("pulses_per_revolution")
     if not isinstance(tach, list) or not isinstance(ppr, list) or len(tach) != 2 or len(ppr) != 2:
-        raise ConfigError("hardware tach_gpio_bcm and pulses_per_revolution must each contain two values")
+        raise ConfigError("hardware tach_gpio_bcm and pulses_per_revolution must each contain two finite integer values")
     tach_pair = tuple(_integer(value, f"hardware.tach_gpio_bcm[{i}]") for i, value in enumerate(tach))
     ppr_pair = tuple(_integer(value, f"hardware.pulses_per_revolution[{i}]", minimum=1) for i, value in enumerate(ppr))
     pwm = _integer(hardware.get("pwm_gpio_bcm"), "hardware.pwm_gpio_bcm")

@@ -46,7 +46,10 @@ class FanAppUI(Static):
     def update_snapshot(self, snapshot: ControlSnapshot) -> None:
         self.snapshot = snapshot
         banner = self.query_one("#error-banner", Static)
-        errors = [f"{endpoint.name}: {endpoint.error or 'stale'}" for endpoint in snapshot.endpoint_snapshots if not endpoint.healthy]
+        errors = [
+            f"{endpoint.name}: {endpoint.error or 'stale'} (sample age: {'N/A' if endpoint.age_seconds is None else f'{endpoint.age_seconds:.1f}s'})"
+            for endpoint in snapshot.endpoint_snapshots if not endpoint.healthy
+        ]
         banner.update(" | ".join(errors) if errors else "All configured DGX endpoints are healthy.")
         table = self.query_one("#gpu-table", DataTable)
         table.clear()

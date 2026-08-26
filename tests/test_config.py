@@ -65,3 +65,24 @@ def test_rejects_wrong_stage_count(tmp_path: Path) -> None:
     path.write_text(_config().replace('[[control.stages]]\nspeed_percent = 100\n', ""))
     with pytest.raises(ConfigError, match="exactly four"):
         load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "existing"),
+    [
+        ("interval_seconds", "2"), ("timeout_seconds", "1"), ("stale_after_seconds", "6"),
+        ("max_speed_percent", "90"), ("hysteresis_celsius", "2"),
+        ("emergency_temperature_celsius", "75"), ("recovery_seconds", "10"),
+        ("max_temperature_celsius", "45"), ("speed_percent", "20"),
+        ("pwm_gpio_bcm", "18"), ("pwm_frequency_hz", "25000"),
+        ("pulses_per_revolution", "[2, 2]"), ("startup_boost_seconds", "1"),
+        ("stall_timeout_seconds", "5"),
+    ],
+)
+@pytest.mark.parametrize("nonfinite", ["nan", "+inf", "-inf"])
+def test_rejects_nonfinite_numeric_values(tmp_path: Path, field: str, existing: str, nonfinite: str) -> None:
+    path = tmp_path / "config.toml"
+    content = _config().replace(f"{field} = {existing}", f"{field} = {nonfinite}", 1)
+    path.write_text(content)
+    with pytest.raises(ConfigError, match="finite|integer"):
+        load_config(path)

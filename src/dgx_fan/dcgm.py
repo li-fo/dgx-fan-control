@@ -11,7 +11,12 @@ from prometheus_client.parser import text_string_to_metric_families
 from .config import EndpointConfig
 from .models import EndpointSnapshot, GPUStat
 
-_SENTINELS = {-9223372036854775808, 9223372036854775807}
+_SENTINELS = {
+    -9223372036854775808,
+    -9223372036854775807,
+    9223372036854775807,
+    9223372036854775808,
+}
 _METRICS = {
     "DCGM_FI_DEV_GPU_TEMP": "temperature_celsius",
     "DCGM_FI_DEV_GPU_UTIL": "utilization_percent",
@@ -22,7 +27,13 @@ _METRICS = {
 
 
 def _valid(value: float, metric: str) -> bool:
-    return math.isfinite(value) and value not in _SENTINELS and (metric != "temperature_celsius" or -20 <= value <= 150)
+    if not math.isfinite(value) or value in _SENTINELS:
+        return False
+    if metric == "temperature_celsius":
+        return -20 <= value <= 150
+    if metric == "utilization_percent":
+        return 0 <= value <= 100
+    return 0 <= value < 1_000_000_000_000
 
 
 def parse_metrics(endpoint_id: str, name: str, text: str) -> tuple[GPUStat, ...]:
@@ -70,9 +81,10 @@ class DCGMCollector:
             response.raise_for_status()
             gpus = parse_metrics(endpoint.id, endpoint.name, response.text)
             self._last_good[endpoint.id] = (now, gpus)
-            return EndpointSnapshot(endpoint.id, endpoint.name, True, 0.0, gpus=gpus)
+            return EndpointSnapshot(endpoint.id, endpoint.name, True, 0.0, False, gpus=gpus)
         except (httpx.HTTPError, ValueError) as error:
             prior = self._last_good.get(endpoint.id)
             age = None if prior is None else now - prior[0]
-            # A cached sample remains observable, but a failed configured endpoint is never normal-mode healthy.
-            return EndpointSnapshot(endpoint.id, endpoint.name, False, age, str(error), () if prior is None else prior[1])
+            stale = age is None or age > self.stale_after
+            # A cached sample remains observable only until stale; any failed endpoint is unsafe immediately.
+            return EndpointSnapshot(endpoint.id, endpoint.name, False, age, stale, str(error), () if prior is None or stale else prior[1])

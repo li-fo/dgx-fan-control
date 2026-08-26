@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from .config import ControlConfig, HardwareConfig
 from .models import ControlSnapshot, EndpointSnapshot, FanReading
 
@@ -15,17 +17,17 @@ class FanController:
         self._previous_duty = 100
         self._no_tach_since: list[float | None] = [None, None]
         self._restart_attempted = [False, False]
-        self._stalled = False
+        self._stalled = [False, False]
 
     def set_power(self, enabled: bool) -> None:
         self.power = enabled
 
     def update(self, endpoints: tuple[EndpointSnapshot, ...], fans: tuple[FanReading, FanReading], now: float) -> ControlSnapshot:
-        self._observe_tach(fans, now)
+        fans = self._observe_tach(fans, now)
         temperatures = [gpu.temperature_celsius for endpoint in endpoints for gpu in endpoint.gpus if gpu.temperature_celsius is not None]
         maximum = max(temperatures) if temperatures else None
         unhealthy = not endpoints or any(not endpoint.healthy for endpoint in endpoints)
-        stalled = self._stalled or any(fan.state == "STALLED" for fan in fans)
+        stalled = any(self._stalled) or any(fan.state == "STALLED" for fan in fans)
         safety_reason = "endpoint unavailable" if unhealthy else "no valid GPU temperature" if maximum is None else "fan stalled" if stalled else "emergency temperature" if maximum >= self.config.emergency_temperature_celsius else None
         if safety_reason:
             self._safety_active = True
@@ -67,10 +69,14 @@ class FanController:
         self._stage = candidate
         return candidate
 
-    def _observe_tach(self, fans: tuple[FanReading, FanReading], now: float) -> None:
-        if self._previous_duty <= 0 or self._stalled:
-            return
+    def _observe_tach(self, fans: tuple[FanReading, FanReading], now: float) -> tuple[FanReading, FanReading]:
+        readings = list(fans)
+        if self._previous_duty <= 0:
+            return fans
         for index, fan in enumerate(fans):
+            if self._stalled[index]:
+                readings[index] = replace(fan, state="STALLED")
+                continue
             if fan.state == "RUNNING":
                 self._no_tach_since[index] = None
                 self._restart_attempted[index] = False
@@ -83,8 +89,10 @@ class FanController:
                 if now - started_at < self.hardware.stall_timeout_seconds:
                     continue
                 if self._restart_attempted[index]:
-                    self._stalled = True
+                    self._stalled[index] = True
+                    readings[index] = replace(fan, state="STALLED")
                 else:
                     self._restart_attempted[index] = True
                     self._no_tach_since[index] = now
                     self._boost_until = now + self.hardware.startup_boost_seconds
+        return (readings[0], readings[1])

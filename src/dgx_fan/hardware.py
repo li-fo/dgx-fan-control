@@ -18,14 +18,23 @@ class FakeHardware:
     def __init__(self) -> None:
         self.duty = 100
         self.released = False
-        self._readings = (FanReading(None, "NO TACH"), FanReading(None, "NO TACH"))
+        self._readings: tuple[FanReading, FanReading] | None = None
 
     def set_duty(self, percent: int) -> None:
         self.released = False
         self.duty = max(0, min(100, percent))
 
     def readings(self, now: float) -> tuple[FanReading, FanReading]:
-        return self._readings
+        if self._readings is not None:
+            return self._readings
+        if self.duty > 0:
+            rpm = float(1200 * self.duty / 100)
+            return (FanReading(rpm, "RUNNING"), FanReading(rpm, "RUNNING"))
+        return (FanReading(0, "STOPPED"), FanReading(0, "STOPPED"))
+
+    def set_readings(self, readings: tuple[FanReading, FanReading] | None) -> None:
+        """Set deterministic tach data for tests; None restores plausible simulated fans."""
+        self._readings = readings
 
     def release(self) -> None:
         self.released = True

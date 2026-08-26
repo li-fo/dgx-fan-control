@@ -43,4 +43,15 @@ def test_safety_recovery_and_stall_latch() -> None:
     no_tach = (FanReading(None, "NO TACH"), FanReading(1000, "RUNNING"))
     controller.update(_endpoints(40), no_tach, 16)
     controller.update(_endpoints(40), no_tach, 21)
-    assert controller.update(_endpoints(40), no_tach, 26).reason == "fan stalled"
+    snapshot = controller.update(_endpoints(40), no_tach, 26)
+    assert snapshot.reason == "fan stalled"
+    assert snapshot.fans[0].state == "STALLED"
+    assert snapshot.fans[1].state == "RUNNING"
+
+
+def test_short_control_ticks_latch_stall_without_collection_interval() -> None:
+    controller = _controller()
+    no_tach = (FanReading(None, "NO TACH"), FanReading(1000, "RUNNING"))
+    controller.update(_endpoints(40), no_tach, 0)
+    controller.update(_endpoints(40), no_tach, 5)
+    assert controller.update(_endpoints(40), no_tach, 10).fans[0].state == "STALLED"

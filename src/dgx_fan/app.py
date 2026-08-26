@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from asyncio import CancelledError, Task, create_task, sleep
 
 from textual.app import App, ComposeResult
 
@@ -15,6 +16,7 @@ from .ui import FanAppUI
 
 class DGXFanApp(App[None]):
     TITLE = "DGX Fan Controller"
+    CONTROL_TICK_SECONDS = 0.25
 
     def __init__(self, config: AppConfig) -> None:
         super().__init__()
@@ -24,6 +26,7 @@ class DGXFanApp(App[None]):
         self.collector = DCGMCollector(config.endpoints, config.collection.timeout_seconds, config.collection.stale_after_seconds)
         self.endpoints: tuple[EndpointSnapshot, ...] = ()
         self.latest: ControlSnapshot | None = None
+        self._poll_task: Task[None] | None = None
 
     def compose(self) -> ComposeResult:
         yield FanAppUI(str(self.config.path), self.toggle_power)
@@ -31,23 +34,34 @@ class DGXFanApp(App[None]):
     async def on_mount(self) -> None:
         self.hardware = create_hardware(self.config.hardware)
         self.hardware.set_duty(100)  # Safe-full before any external read.
-        self.set_interval(self.config.collection.interval_seconds, self.refresh_state)
-        await self.refresh_state()
+        self.set_interval(self.CONTROL_TICK_SECONDS, self.control_tick)
+        self._poll_task = create_task(self._poll_loop())
+        self.control_tick()
 
-    async def refresh_state(self) -> None:
-        now = time.monotonic()
-        self.endpoints = await self.collector.collect(now)
+    async def _poll_loop(self) -> None:
+        while True:
+            self.endpoints = await self.collector.collect(time.monotonic())
+            await sleep(self.config.collection.interval_seconds)
+
+    def control_tick(self, now: float | None = None) -> None:
+        current = time.monotonic() if now is None else now
         if self.hardware is None:
             return
-        fans = self.hardware.readings(now)
-        self.latest = self.controller.update(self.endpoints, fans, now)
+        fans = self.hardware.readings(current)
+        self.latest = self.controller.update(self.endpoints, fans, current)
         self.hardware.set_duty(self.latest.duty_percent)
         self.query_one(FanAppUI).update_snapshot(self.latest)
 
     def toggle_power(self) -> None:
         self.controller.set_power(not self.controller.power)
 
-    def on_unmount(self) -> None:
+    async def on_unmount(self) -> None:
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            try:
+                await self._poll_task
+            except CancelledError:
+                pass
         if self.hardware is not None:
             self.hardware.release()
 

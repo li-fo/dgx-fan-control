@@ -26,6 +26,7 @@ class EndpointSnapshot:
     name: str
     healthy: bool
     age_seconds: float | None
+    stale: bool = False
     error: str | None = None
     gpus: tuple[GPUStat, ...] = ()
 

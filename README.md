@@ -15,11 +15,11 @@ python -m dgx_fan --config config.toml
 
 The console entry point is also available as `dgx-fan --config config.toml`. Configuration lookup is `--config`, then `DGX_FAN_CONFIG`, then `./config.toml`. Edit the file and restart the application; the MVP intentionally has no settings UI or hot reload.
 
-Start with `hardware.backend = "fake"` on a development machine. For a Pi install `.[raspberry-pi]`, run `pigpiod`, and change the backend to `raspberry-pi` only after wiring has been checked.
+Start with `hardware.backend = "fake"` on a development machine. Its default tach simulation reports plausible running RPM while PWM is nonzero; tests can explicitly inject `NO TACH` readings for stall probes. For a Pi install `.[raspberry-pi]`, run `pigpiod`, and change the backend to `raspberry-pi` only after wiring has been checked.
 
 ## Configuration and safety
 
-`config.example.toml` documents schema v1: one or two DCGM URLs, four ascending control stages (the fourth is unbounded), maximum fan speed, emergency threshold, and GPIO configuration. All endpoints must be fresh and healthy for normal curve control. Endpoint failures, stale/no-valid temperature data, emergency temperature, or a reported fan stall force 100% PWM. A runtime UI Off is ignored by those safety states. Normal recovery has a dwell period; restarting from zero applies a short full-speed boost.
+`config.example.toml` documents schema v1: one or two DCGM URLs, four ascending control stages (the fourth is unbounded), maximum fan speed, emergency threshold, and GPIO configuration. All numeric values must be finite; `nan`, `+inf`, and `-inf` are rejected before hardware construction. All endpoints must be fresh and healthy for normal curve control. Endpoint failures, stale/no-valid temperature data, emergency temperature, or a reported fan stall force 100% PWM. A runtime UI Off is ignored by those safety states. Normal recovery has a dwell period; restarting from zero applies a short full-speed boost. DCGM polls use the configured interval while a separate 250 ms control tick continues tach/stall checks from cached snapshots.
 
 ## Raspberry Pi 4 wiring
 

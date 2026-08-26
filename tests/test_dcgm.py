@@ -12,6 +12,8 @@ DCGM_FI_DEV_FB_FREE{UUID="GPU-a"} 200
 DCGM_FI_DEV_FB_RESERVED{UUID="GPU-a"} 10
 DCGM_FI_DEV_GPU_TEMP{UUID="GPU-mig",GPU_I_ID="1"} 90
 DCGM_FI_DEV_GPU_TEMP{UUID="GPU-b"} -9223372036854775808
+DCGM_FI_DEV_GPU_UTIL{UUID="GPU-c"} 9223372036854775807
+DCGM_FI_DEV_FB_USED{UUID="GPU-c"} 9223372036854775807
 '''
 
 
@@ -40,3 +42,9 @@ async def test_collector_retains_fresh_sample_then_expires(monkeypatch: pytest.M
     assert (await collector.collect(10))[0].healthy
     assert not (await collector.collect(11))[0].healthy
     assert not (await collector.collect(13))[0].healthy
+    assert (await collector.collect(13))[0].stale
+
+
+def test_parse_rejects_positive_sentinels_and_out_of_range_util() -> None:
+    gpus = parse_metrics("one", "One", METRICS + 'DCGM_FI_DEV_GPU_UTIL{UUID="GPU-d"} 101\n')
+    assert all(gpu.key not in {"GPU-c", "GPU-d"} for gpu in gpus)

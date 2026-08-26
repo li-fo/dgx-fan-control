@@ -18,3 +18,9 @@ def test_ui_has_tabs_and_power_toggle() -> None:
             assert not app.controller.power
     import asyncio
     asyncio.run(exercise())
+
+
+def test_control_tick_is_bounded_below_dcgm_poll_interval() -> None:
+    config = load_config(Path("config.example.toml"))
+    assert config.collection.interval_seconds > DGXFanApp.CONTROL_TICK_SECONDS
+    assert DGXFanApp.CONTROL_TICK_SECONDS <= 0.25
