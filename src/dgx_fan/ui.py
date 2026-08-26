@@ -58,24 +58,6 @@ class DashboardHistory:
             if seen < cutoff:
                 del self.last_seen[identity]
 
-    def graph(self, endpoint_id: str, gpu: str, metric: str, now: float, width: int, maximum: float) -> str:
-        width = max(1, width)
-        bins: list[list[float]] = [[] for _ in range(width)]
-        cutoff = now - HISTORY_SECONDS
-        for point in self.points.get((endpoint_id, gpu, metric), []):
-            if point.at >= cutoff:
-                index = min(width - 1, int((point.at - cutoff) / HISTORY_SECONDS * width))
-                bins[index].append(point.value)
-        glyphs = "▁▂▃▄▅▆▇█"
-        rendered: list[str] = []
-        for values in bins:
-            if not values:
-                rendered.append(" ")
-                continue
-            value = max(values) if metric == "temp" else sum(values) / len(values) if metric == "util" else values[-1]
-            rendered.append(glyphs[min(7, max(0, round(value / maximum * 7)))])
-        return "".join(rendered)
-
     def area(self, endpoint_id: str, gpu: str, metric: str, now: float, width: int, maximum: float) -> list[str]:
         bins: list[list[float]] = [[] for _ in range(width)]
         cutoff = now - HISTORY_SECONDS

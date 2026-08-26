@@ -57,7 +57,7 @@ def test_history_deduplicates_revisions_preserves_gaps_and_prunes_missing_gpu() 
     history.append("one", 1, (gpu,), 0)
     history.append("one", 1, (gpu,), 0.25)
     assert len(history.points[("one", "GPU-a", "util")]) == 1
-    graph = history.graph("one", "GPU-a", "util", 60, 12, 100)
+    graph = history.area("one", "GPU-a", "util", 60, 12, 100)[4][5:]
     assert graph.count(" ") == 11
     history.append("one", 2, (), 60)
     assert ("one", "GPU-a") in history.last_seen
@@ -70,8 +70,8 @@ def test_memory_history_is_normalized_and_zero_is_not_a_gap() -> None:
     gpu = GPUStat("GPU-a", "A100", memory_used_mib=50, memory_total_mib=100, utilization_percent=0, temperature_celsius=0)
     history.append("one", 1, (gpu,), 120)
     assert history.points[("one", "GPU-a", "mem")][0].value == 50
-    assert history.graph("one", "GPU-a", "util", 120, 1, 100) == "▁"
-    assert history.graph("one", "GPU-a", "util", 250, 1, 100) == " "
+    assert history.area("one", "GPU-a", "util", 120, 1, 100)[4][5:] == "▁"
+    assert history.area("one", "GPU-a", "util", 250, 1, 100)[4][5:] == " "
 
 
 def test_area_renderer_has_five_rows_axis_gaps_zero_and_width_scaling() -> None:
