@@ -7,7 +7,6 @@ from typing import Self
 
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
-from textual.css.query import NoMatches
 from textual.widgets import Button, Footer, Header, Static, TabbedContent, TabPane
 
 from .models import ControlSnapshot, GPUStat
@@ -92,6 +91,7 @@ class FanAppUI(Static):
         self.config_path, self.toggle, self.emergency_temperature = config_path, toggle, emergency_temperature
         self.snapshot: ControlSnapshot | None = None
         self.history = DashboardHistory()
+        self.panels: dict[str, Static] = {}
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -118,7 +118,13 @@ class FanAppUI(Static):
 
     def _render_dashboard(self, snapshot: ControlSnapshot, now: float) -> None:
         scroll = self.query_one("#dashboard-scroll", VerticalScroll)
+        active_ids = {endpoint.endpoint_id for endpoint in snapshot.endpoint_snapshots}
+        for endpoint_id, stale_panel in list(self.panels.items()):
+            if endpoint_id not in active_ids:
+                stale_panel.remove()
+                del self.panels[endpoint_id]
         current = {(endpoint.endpoint_id, gpu.key): gpu for endpoint in snapshot.endpoint_snapshots for gpu in endpoint.gpus}
+        previous: Static | None = None
         for endpoint in snapshot.endpoint_snapshots:
             lines = [f"[b]{endpoint.name}[/b]  {'HEALTHY' if endpoint.healthy else 'UNHEALTHY'}"]
             keys = sorted(key for source, key in self.history.last_seen if source == endpoint.endpoint_id)
@@ -131,10 +137,15 @@ class FanAppUI(Static):
                 util = "N/A" if gpu is None or gpu.utilization_percent is None else f"{gpu.utilization_percent:.0f}%"
                 temp = "N/A" if gpu is None or gpu.temperature_celsius is None else f"{gpu.temperature_celsius:.1f} C"
                 lines.extend((label, f"MEM  {mem:>9} {self.history.graph(endpoint.endpoint_id, key, 'mem', now, 36, 100)}", f"UTIL {util:>9} {self.history.graph(endpoint.endpoint_id, key, 'util', now, 36, 100)}", f"TEMP {temp:>9} {self.history.graph(endpoint.endpoint_id, key, 'temp', now, 36, max(100, self.emergency_temperature))}"))
-            panel_id = f"panel-{endpoint.endpoint_id}"
-            try:
-                panel = scroll.query_one(f"#{panel_id}", Static)
-            except NoMatches:
-                panel = Static(id=panel_id, classes="dgx-panel")
+            panel = self.panels.get(endpoint.endpoint_id)
+            if panel is None:
+                panel = Static(classes="dgx-panel")
+                self.panels[endpoint.endpoint_id] = panel
                 scroll.mount(panel)
+            assert panel is not None
             panel.update("\n".join(lines))
+            if previous is None:
+                scroll.move_child(panel, before=0)
+            else:
+                scroll.move_child(panel, after=previous)
+            previous = panel

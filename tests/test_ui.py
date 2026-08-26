@@ -83,12 +83,12 @@ def test_panels_are_ordered_retained_and_deduplicated() -> None:
     gpu = GPUStat("GPU-a", "A100", memory_used_mib=50, memory_total_mib=100, utilization_percent=20, temperature_celsius=40)
     incomplete = GPUStat("GPU-z", "H100", memory_used_mib=50, utilization_percent=0, temperature_celsius=0)
     first = ControlSnapshot(20, "curve", "AUTO ON", 40, 0, (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING")), (
-        EndpointSnapshot("z", "Z endpoint", True, 0, gpus=(incomplete,), sample_revision=1),
-        EndpointSnapshot("a", "A endpoint", True, 0, gpus=(gpu,), sample_revision=1),
+        EndpointSnapshot("rack/1", "Z endpoint", True, 0, gpus=(incomplete,), sample_revision=1),
+        EndpointSnapshot("dgx:one", "A endpoint", True, 0, gpus=(gpu,), sample_revision=1),
     ))
     second = ControlSnapshot(20, "curve", "AUTO ON", 40, 0, (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING")), (
-        EndpointSnapshot("z", "Z endpoint", True, 0, gpus=(incomplete,), sample_revision=1),
-        EndpointSnapshot("a", "A endpoint", True, 0, gpus=(), sample_revision=2),
+        EndpointSnapshot("dgx:one", "A endpoint", True, 0, gpus=(), sample_revision=2),
+        EndpointSnapshot("rack/1", "Z endpoint", True, 0, gpus=(incomplete,), sample_revision=1),
     ))
 
     async def exercise() -> None:
@@ -96,14 +96,16 @@ def test_panels_are_ordered_retained_and_deduplicated() -> None:
             ui = app.query_one(FanAppUI)
             ui.update_snapshot(first, 1)
             await asyncio.sleep(0)
+            present = [str(panel.render()) for panel in ui.query(".dgx-panel")]
+            assert "50/100 MiB (50%)" in present[1] and "20%" in present[1] and "40.0 C" in present[1]
             ui.update_snapshot(second, 2)
             ui.update_snapshot(second, 2.25)
             await asyncio.sleep(0)
             rendered = [str(panel.render()) for panel in ui.query(".dgx-panel")]
             assert len(rendered) == 2
-            assert "Z endpoint" in rendered[0] and "A endpoint" in rendered[1]
-            assert "N/A" in rendered[0]
-            assert "GPU-a (last seen)" in rendered[1]
-            assert len(ui.history.points[("a", "GPU-a", "util")]) == 1
+            assert "A endpoint" in rendered[0] and "Z endpoint" in rendered[1]
+            assert "N/A" in rendered[1]
+            assert "GPU-a (last seen)" in rendered[0]
+            assert len(ui.history.points[("dgx:one", "GPU-a", "util")]) == 1
 
     asyncio.run(exercise())
