@@ -306,9 +306,24 @@ install_managed_file() {
 }
 
 preflight_managed_destinations() {
-    ensure_managed_destination "$(target_path "/usr/local/libexec/$HELPER_NAME")" "$HELPER_MARKER"
-    ensure_managed_destination "$(target_path "/etc/sudoers.d/$SUDOERS_NAME")" "$SUDOERS_MARKER"
-    ensure_managed_destination "$(target_path "/etc/profile.d/$PROFILE_NAME")" "$PROFILE_MARKER"
+    local helper sudoers hook
+    helper=$(target_path "/usr/local/libexec/$HELPER_NAME")
+    sudoers=$(target_path "/etc/sudoers.d/$SUDOERS_NAME")
+    hook=$(target_path "/etc/profile.d/$PROFILE_NAME")
+    ensure_destination_parent "$helper"
+    ensure_destination_parent "$sudoers"
+    ensure_destination_parent "$hook"
+    ensure_managed_destination "$helper" "$HELPER_MARKER"
+    ensure_managed_destination "$sudoers" "$SUDOERS_MARKER"
+    ensure_managed_destination "$hook" "$PROFILE_MARKER"
+}
+
+ensure_destination_parent() {
+    local destination=$1 parent
+    parent=$(dirname -- "$destination")
+    if [[ -e "$parent" || -L "$parent" ]]; then
+        [[ -d "$parent" && ! -L "$parent" ]] || fail "refusing unsafe parent directory: $parent"
+    fi
 }
 
 configure_console_autologin() {

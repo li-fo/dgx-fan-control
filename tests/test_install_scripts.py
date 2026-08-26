@@ -212,6 +212,25 @@ def test_non_regular_destination_fails_closed(tmp_path: Path) -> None:
     assert "dtoverlay=pwm-2chan" not in (sandbox / "boot/firmware/config.txt").read_text()
 
 
+def test_unsafe_destination_parent_fails_before_any_system_mutation(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    parent = sandbox / "etc/sudoers.d"
+    parent.parent.mkdir(parents=True)
+    parent.write_text("not a directory\n")
+
+    result = _run(clone / "install.sh", "--reboot", sandbox=sandbox)
+
+    assert result.returncode == 1
+    assert "unsafe parent directory" in result.stderr
+    assert "dtoverlay=pwm-2chan" not in (sandbox / "boot/firmware/config.txt").read_text()
+    assert not (sandbox / "usr/local/libexec/dgx-fan-prepare-hardware").exists()
+    assert not (sandbox / "etc/profile.d/dgx-fan-autostart.sh").exists()
+    command_log = (sandbox / "command.log").read_text()
+    assert "usermod" not in command_log
+    assert not any(line.startswith("reboot ") for line in command_log.splitlines())
+
+
 def test_non_raspberry_pi_backend_fails_before_boot_or_privilege_changes(tmp_path: Path) -> None:
     clone = _clone(tmp_path)
     sandbox = _sandbox(tmp_path)
@@ -311,6 +330,13 @@ def test_uninstall_preserves_unmanaged_or_symlink_destinations(tmp_path: Path) -
     assert helper.is_symlink() and helper_target.read_text() == "keep\n"
     assert "preserving unmanaged" in result.stderr
     assert "preserving unsafe" in result.stderr
+
+
+def test_uninstall_uses_root_marker_inspection_for_production_sudoers() -> None:
+    source = (ROOT / "uninstall.sh").read_text()
+
+    assert 'marker_check=( run_root grep -Fxq "$MARKER" "$path" )' in source
+    assert 'can_read=( run_root test -r "$path" )' in source
 
 
 def test_start_dry_run_uses_fixed_helper_and_clone_local_configuration() -> None:

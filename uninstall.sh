@@ -52,7 +52,19 @@ for path in \
         printf 'dgx-fan uninstall: preserving unsafe destination: %s\n' "$path" >&2
         status=1
     elif [[ -f "$path" ]]; then
-        if ! grep -Fxq "$MARKER" "$path"; then
+        if [[ -n "$TEST_ROOT" ]]; then
+            can_read=( test -r "$path" )
+            marker_check=( grep -Fxq "$MARKER" "$path" )
+        else
+            can_read=( run_root test -r "$path" )
+            marker_check=( run_root grep -Fxq "$MARKER" "$path" )
+        fi
+        if ! "${can_read[@]}"; then
+            printf 'dgx-fan uninstall: preserving unreadable destination: %s\n' "$path" >&2
+            status=1
+            continue
+        fi
+        if ! "${marker_check[@]}"; then
             printf 'dgx-fan uninstall: preserving unmanaged destination: %s\n' "$path" >&2
             status=1
             continue
