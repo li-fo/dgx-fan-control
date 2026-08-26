@@ -187,6 +187,63 @@ class _DashboardApp(App[None]):
         yield FanAppUI("config.toml", lambda: None, 75, 2)
 
 
+def _single_gpu_snapshot(name: str = "One") -> ControlSnapshot:
+    gpu = GPUStat(
+        "GPU-a",
+        "A100",
+        memory_used_mib=50,
+        memory_total_mib=100,
+        utilization_percent=20,
+        temperature_celsius=40,
+    )
+    return ControlSnapshot(
+        20,
+        "curve",
+        "AUTO ON",
+        40,
+        0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (EndpointSnapshot("one", name, True, 0, gpus=(gpu,), sample_revision=1),),
+    )
+
+
+def test_resize_redraw_is_deferred_coalesced_and_uses_latest_state(monkeypatch) -> None:
+    ui = FanAppUI("config.toml", lambda: None, 75, 2)
+    first = _single_gpu_snapshot("First")
+    latest = _single_gpu_snapshot("Latest")
+    ui.snapshot, ui.last_render_time = first, 1
+    callbacks: list[object] = []
+    renders: list[tuple[ControlSnapshot, float]] = []
+
+    monkeypatch.setattr(
+        FanAppUI, "call_after_refresh", lambda _self, callback: callbacks.append(callback)
+    )
+    monkeypatch.setattr(
+        ui, "_render_dashboard", lambda snapshot, now: renders.append((snapshot, now))
+    )
+
+    ui.on_resize()
+    ui.on_resize()
+    assert renders == [] and len(callbacks) == 1 and ui._resize_redraw_pending
+    ui.snapshot, ui.last_render_time = latest, 2
+    callback = callbacks[0]
+    assert callable(callback)
+    callback()
+    assert renders == [(latest, 2)] and not ui._resize_redraw_pending
+
+
+def test_resize_redraw_clears_pending_when_scheduling_is_unavailable(monkeypatch) -> None:
+    ui = FanAppUI("config.toml", lambda: None, 75, 2)
+    ui.snapshot, ui.last_render_time = _single_gpu_snapshot(), 1
+
+    def unavailable(_self, _callback) -> None:
+        raise RuntimeError("closing")
+
+    monkeypatch.setattr(FanAppUI, "call_after_refresh", unavailable)
+    ui.on_resize()
+    assert not ui._resize_redraw_pending
+
+
 def test_panels_are_ordered_retained_and_deduplicated() -> None:
     app = _DashboardApp()
     gpu = GPUStat(
@@ -718,5 +775,41 @@ def test_two_single_gpu_endpoints_fit_short_viewports_and_expand_when_tall() -> 
             assert tall_lines > compact_lines
             assert ui._plot_height(scroll.size.height, 2, 2) == 5
             assert compact_points == len(ui.history.points[("one", "GPU-a", "util")])
+
+    asyncio.run(exercise())
+
+
+def test_rapid_resize_redraw_uses_final_viewport_without_growing_history() -> None:
+    app = _DashboardApp()
+    snapshot = _single_gpu_snapshot()
+
+    async def exercise() -> None:
+        async with app.run_test(size=(120, 40)) as pilot:
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 1)
+            await pilot.pause()
+            history_count = len(ui.history.points[("one", "GPU-a", "util")])
+            await pilot.resize_terminal(78, 20)
+            await pilot.resize_terminal(85, 25)
+            await pilot.resize_terminal(100, 30)
+            await pilot.pause()
+            scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
+            panel = next(iter(ui.query(".dgx-panel"))).render().plain.splitlines()
+            pair = next(line for line in panel if line.startswith("┌ MEM "))
+            assert (
+                scroll.display
+                and "Dashboard width" not in ui.query_one("#dashboard-warning").render().plain
+            )
+            assert len(pair) == scroll.size.width and len(panel) == 17
+            assert ui._plot_height(scroll.size.height, 1, 1) == 5
+            assert scroll.max_scroll_y == 0
+            assert history_count == len(ui.history.points[("one", "GPU-a", "util")])
+            await pilot.resize_terminal(78, 20)
+            await pilot.pause()
+            assert not scroll.display and "78" in ui.query_one("#dashboard-warning").render().plain
+            await pilot.resize_terminal(79, 25)
+            await pilot.pause()
+            assert scroll.display and len(ui.query(".dgx-panel")) == 1
+            assert history_count == len(ui.history.points[("one", "GPU-a", "util")])
 
     asyncio.run(exercise())

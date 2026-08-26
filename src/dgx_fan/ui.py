@@ -193,6 +193,7 @@ class FanAppUI(Static):
         self.panels: dict[str, Static] = {}
         self.last_render_time: float | None = None
         self.last_signature: tuple[tuple[str, int], ...] | None = None
+        self._resize_redraw_pending = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -409,5 +410,16 @@ class FanAppUI(Static):
             rendered.append(value, style=Style(color=color))
 
     def on_resize(self) -> None:
+        if self.snapshot is None or self.last_render_time is None or self._resize_redraw_pending:
+            return
+        self._resize_redraw_pending = True
+        try:
+            self.call_after_refresh(self._redraw_after_resize)
+        except RuntimeError:
+            # A closing/unmounted message pump cannot accept deferred work.
+            self._resize_redraw_pending = False
+
+    def _redraw_after_resize(self) -> None:
+        self._resize_redraw_pending = False
         if self.snapshot is not None and self.last_render_time is not None:
             self._render_dashboard(self.snapshot, self.last_render_time)
