@@ -174,14 +174,14 @@ def test_mounted_responsive_width_reuses_history() -> None:
             await pilot.resize_terminal(79, 24); await pilot.pause()
             assert scroll.display and len(ui.query(".dgx-panel")) == 1
             narrow_lines = str(next(iter(ui.query(".dgx-panel"))).render()).splitlines()
-            mem_index = next(index for index, line in enumerate(narrow_lines) if line.startswith("MEM"))
+            mem_index = next(index for index, line in enumerate(narrow_lines) if line.startswith("┌ MEM"))
             narrow_rows = narrow_lines[mem_index + 1:mem_index + 7]
             assert len(narrow_rows) == 6 and all(len(line) <= scroll.size.width for line in narrow_rows)
             narrow = len(narrow_rows[0]) - 5
             assert narrow > 36 and len(narrow_rows[-1]) == len(narrow_rows[0])
             await pilot.resize_terminal(120, 24); await pilot.pause()
             wide_lines = str(next(iter(ui.query(".dgx-panel"))).render()).splitlines()
-            wide_index = next(index for index, line in enumerate(wide_lines) if line.startswith("MEM"))
+            wide_index = next(index for index, line in enumerate(wide_lines) if line.startswith("┌ MEM"))
             wide_rows = wide_lines[wide_index + 1:wide_index + 7]
             wide = len(wide_rows[0]) - 5
             assert all(len(line) <= scroll.size.width for line in wide_rows) and len(wide_rows[-1]) == len(wide_rows[0])

@@ -94,6 +94,7 @@ class FanAppUI(Static):
         self.history = DashboardHistory()
         self.panels: dict[str, Static] = {}
         self.last_render_time: float | None = None
+        self.last_signature: tuple[tuple[str, int], ...] | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -115,7 +116,10 @@ class FanAppUI(Static):
             self.history.append(endpoint.endpoint_id, endpoint.sample_revision, endpoint.gpus, now)
         errors = [f"{e.name}: {e.error or 'stale'} (sample age: {'N/A' if e.age_seconds is None else f'{e.age_seconds:.1f}s'})" for e in snapshot.endpoint_snapshots if not e.healthy]
         self.query_one("#error-banner", Static).update(" | ".join(errors) if errors else "All configured DGX endpoints are healthy.")
-        self._render_dashboard(snapshot, now)
+        signature = tuple((endpoint.endpoint_id, endpoint.sample_revision) for endpoint in snapshot.endpoint_snapshots)
+        if signature != self.last_signature:
+            self._render_dashboard(snapshot, now)
+            self.last_signature = signature
         fan_text = ", ".join(f"Fan {i + 1}: {fan.state} {fan.rpm or 0:.0f} RPM" for i, fan in enumerate(snapshot.fans))
         maximum = "N/A" if snapshot.max_temperature_celsius is None else f"{snapshot.max_temperature_celsius:.1f} C"
         self.query_one("#fan-status", Static).update(f"{snapshot.state} — {snapshot.duty_percent}% PWM ({snapshot.reason})\nMax GPU temp: {maximum}; stage: {snapshot.active_stage}\n{fan_text}")
@@ -150,7 +154,13 @@ class FanAppUI(Static):
                 util = "N/A" if gpu is None or gpu.utilization_percent is None else f"{gpu.utilization_percent:.0f}%"
                 temp = "N/A" if gpu is None or gpu.temperature_celsius is None else f"{gpu.temperature_celsius:.1f} C"
                 plot_width = max(1, available - 7)
-                lines.extend((label, f"MEM  {mem:>9}", *self.history.area(endpoint.endpoint_id, key, 'mem', now, plot_width, 100), f"UTIL {util:>9}", *self.history.area(endpoint.endpoint_id, key, 'util', now, plot_width, 100), f"TEMP {temp:>9}", *self.history.area(endpoint.endpoint_id, key, 'temp', now, plot_width, max(100, self.emergency_temperature))))
+                lines.append(label)
+                for metric, value, maximum in (("MEM", mem, 100), ("UTIL", util, 100), ("TEMP", temp, max(100, self.emergency_temperature))):
+                    chart = self.history.area(endpoint.endpoint_id, key, metric.lower(), now, max(1, plot_width - 2), maximum)
+                    inner = max(len(row) for row in chart)
+                    lines.append(f"┌ {metric} {value}"[:inner + 1].ljust(inner + 1, "─") + "┐")
+                    lines.extend(f"│{row.ljust(inner)}│" for row in chart)
+                    lines.append("└" + "─" * inner + "┘")
             panel = self.panels.get(endpoint.endpoint_id)
             if panel is None:
                 panel = Static(classes="dgx-panel")
@@ -166,4 +176,5 @@ class FanAppUI(Static):
 
     def on_resize(self) -> None:
         if self.snapshot is not None and self.last_render_time is not None:
+            self.last_signature = None
             self._render_dashboard(self.snapshot, self.last_render_time)
