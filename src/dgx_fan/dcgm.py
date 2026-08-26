@@ -69,6 +69,7 @@ class DCGMCollector:
         self.endpoints, self.timeout, self.stale_after = endpoints, timeout_seconds, stale_after_seconds
         self._last_good: dict[str, tuple[float, tuple[GPUStat, ...]]] = {}
         self._errors: dict[str, str | None] = {}
+        self._revisions: dict[str, int] = defaultdict(int)
 
     async def collect(self, now: float | None = None) -> tuple[EndpointSnapshot, ...]:
         current = time.monotonic() if now is None else now
@@ -89,7 +90,7 @@ class DCGMCollector:
                 error = "awaiting first sample"
             snapshots.append(EndpointSnapshot(
                 endpoint.id, endpoint.name, prior is not None and not stale and error is None,
-                age, stale, error, () if prior is None or stale else prior[1],
+                age, stale, error, () if prior is None or stale else prior[1], self._revisions[endpoint.id],
             ))
         return tuple(snapshots)
 
@@ -106,5 +107,6 @@ class DCGMCollector:
             gpus = parse_metrics(endpoint.id, endpoint.name, response.text)
             self._last_good[endpoint.id] = (now, gpus)
             self._errors[endpoint.id] = None
+            self._revisions[endpoint.id] += 1
         except (httpx.HTTPError, ValueError) as error:
             self._errors[endpoint.id] = str(error)

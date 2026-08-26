@@ -29,6 +29,7 @@ class EndpointSnapshot:
     stale: bool = False
     error: str | None = None
     gpus: tuple[GPUStat, ...] = ()
+    sample_revision: int = 0
 
 
 @dataclass(frozen=True)

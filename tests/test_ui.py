@@ -5,6 +5,8 @@ from textual.widgets import Button
 
 from dgx_fan.app import DGXFanApp
 from dgx_fan.config import load_config
+from dgx_fan.models import GPUStat
+from dgx_fan.ui import DashboardHistory
 
 
 def test_ui_has_tabs_and_power_toggle() -> None:
@@ -45,3 +47,17 @@ def test_poll_exception_is_supervised_and_unmount_cleans_up(monkeypatch) -> None
         assert getattr(app.hardware, "released", False)
 
     asyncio.run(exercise())
+
+
+def test_history_deduplicates_revisions_preserves_gaps_and_prunes_missing_gpu() -> None:
+    history = DashboardHistory()
+    gpu = GPUStat("GPU-a", "A100", memory_used_mib=40, utilization_percent=50, temperature_celsius=60)
+    history.append("one", 1, (gpu,), 0)
+    history.append("one", 1, (gpu,), 0.25)
+    assert len(history.points[("one", "GPU-a", "util")]) == 1
+    graph = history.graph("one", "GPU-a", "util", 60, 12, 100)
+    assert graph.count(" ") == 11
+    history.append("one", 2, (), 60)
+    assert ("one", "GPU-a") in history.last_seen
+    history.prune(121)
+    assert ("one", "GPU-a") not in history.last_seen

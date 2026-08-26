@@ -41,7 +41,9 @@ async def test_collector_retains_fresh_sample_then_expires(monkeypatch: pytest.M
         raise httpx.ConnectTimeout("nope")
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
-    assert (await collector.collect(10))[0].healthy
+    first = (await collector.collect(10))[0]
+    assert first.healthy and first.sample_revision == 1
+    assert collector.snapshots(10.25)[0].sample_revision == 1
     assert not (await collector.collect(11))[0].healthy
     assert not (await collector.collect(13))[0].healthy
     assert (await collector.collect(13))[0].stale

@@ -29,7 +29,7 @@ class DGXFanApp(App[None]):
         self._poll_task: Task[None] | None = None
 
     def compose(self) -> ComposeResult:
-        yield FanAppUI(str(self.config.path), self.toggle_power)
+        yield FanAppUI(str(self.config.path), self.toggle_power, self.config.control.emergency_temperature_celsius)
 
     async def on_mount(self) -> None:
         self.hardware = create_hardware(self.config.hardware)
@@ -59,7 +59,7 @@ class DGXFanApp(App[None]):
         fans = self.hardware.readings(current)
         self.latest = self.controller.update(self.endpoints, fans, current)
         self.hardware.set_duty(self.latest.duty_percent)
-        self.query_one(FanAppUI).update_snapshot(self.latest)
+        self.query_one(FanAppUI).update_snapshot(self.latest, current)
 
     def toggle_power(self) -> None:
         self.controller.set_power(not self.controller.power)
