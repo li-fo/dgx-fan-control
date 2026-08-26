@@ -48,57 +48,31 @@ pwm_gpio_bcm = [18, 19] # Fan 1 -> BCM18, Fan 2 -> BCM19
 
 ## Raspberry Pi 4 wiring
 
-This app drives **two independent PWM signals** and reads **two separate tach signals**. The exact fan data sheet always wins. The connector positions below are the usual four-wire PWM convention only: fan connector order, wire colours, voltage, and tach type can vary. Disconnect power before wiring or changing a connection.
+This direct-wiring guide is for **Noctua NF-A6x25 5V PWM only**. Do not apply it to another fan merely because it has four wires: confirm that model's connector, logic, tach, voltage, and current requirements in its own data sheet. Disconnect power before wiring.
 
-| Function | Typical fan connector position* | Fan 1 | Fan 2 | Raspberry Pi 4 |
+| Function | NF-A6x25 wire / pin* | Fan 1 | Fan 2 | Raspberry Pi 4 |
 | --- | --- | --- | --- | --- |
-| Ground | Pin 1 | GND | GND | Any Pi GND, for example physical pin 6 or 9; all supplies share this ground |
-| Fan power | Pin 2 | +5 V | +5 V | Physical pin 2 or 4 **only when its supply budget is safe**; otherwise use a separate 5 V fan supply |
-| Tach / RPM | Pin 3 | Tach 1 | Tach 2 | Fan 1: BCM23 / physical pin 16; Fan 2: BCM24 / physical pin 18. Each has its own external 4.7 kΩ–10 kΩ pull-up to Pi 3.3 V |
-| PWM control | Pin 4 | PWM 1 | PWM 2 | Fan 1: an isolated open-collector/open-drain driver from BCM18 / physical pin 12 (PWM0); Fan 2: a separate driver from BCM19 / physical pin 35 (PWM1) |
+| Ground | black / pin 1 | black | black | Pi GND (for example physical pin 6 or 9); all supplies share ground |
+| Fan power | yellow / pin 2 | yellow +5 V | yellow +5 V | Pi physical pin 2/4 only with proven supply headroom, otherwise a regulated external 5 V supply |
+| Tach / RPM | green / pin 3 | green → BCM23 / physical 16 | green → BCM24 / physical 18 | Keep green tach wires separate |
+| PWM control | blue / pin 4 | blue → BCM18 / physical 12 (PWM0) | blue → BCM19 / physical 35 (PWM1) | Direct, independent GPIO connections |
 
-\* Never trust a generic wire colour or connector number over the exact fan data sheet. Never connect the fan PWM line (which may have an internal 5 V pull-up), or a 5 V tach signal, directly to a Pi GPIO.
+\* Colour/pin mapping is specific to this exact Noctua model.
 
-The configuration must use one GPIO from PWM0 (`BCM12` or `BCM18`) and one from PWM1 (`BCM13` or `BCM19`); the supported default is Fan 1 `BCM18` / physical 12 and Fan 2 `BCM19` / physical 35. Do not use two pins from the same PWM channel, and do not share a fan PWM line or its transistor driver between the fans.
-
-### PWM level shifting
-
-The Pi GPIO is 3.3 V logic. Drive each fan PWM input with its own open-collector/open-drain circuit, not directly from a Pi GPIO. Use two suitable NPN circuits such as 2N3904/2N2222:
-
-```text
-Fan 1: Pi BCM18 / physical pin 12 -- 2.2 kΩ–4.7 kΩ -- Base (NPN #1)
-                                            o  base node
-                                            |
-                                     10 kΩ (recommended pull-down)
-                                            |
-                                           GND
-
-Fan 1 PWM (typical pin 4) -------- Collector (NPN #1); emitter --- common GND
-Fan 2: Pi BCM19 / physical pin 35 -- 2.2 kΩ–4.7 kΩ -- Base (NPN #2)
-Fan 2 PWM (typical pin 4) -------- Collector (NPN #2); emitter --- common GND
-```
-
-A 3.3 V logic-level N-channel MOSFET can be used instead for each fan: gate from its own BCM18/BCM19 GPIO through about 100 Ω–1 kΩ, a 10 kΩ gate-to-ground pull-down, source to common ground, and drain to that fan's PWM input. Select a component specified to turn on with a 3.3 V gate drive. Do not add a Pi-side pull-up to a fan PWM line; use the fan's documented input circuit.
-
-The supplied `pwm_inverted = true` compensates for this low-side NPN/N-MOSFET inversion: a higher requested duty creates the corresponding active-low duty at the fan input. Keep it unless a changed physical circuit has been measured and its polarity verified.
+Connect each blue PWM line directly to its GPIO. For this model, do **not** add an NPN/MOSFET, level shifter, or external PWM pull-up; do not join the blue wires. The Noctua input accepts 3.3 V CMOS logic. Use 25 kHz non-inverted PWM and set `pwm_inverted = false` for this direct connection.
 
 ### Tach, power, and grounding
 
-Do not join tach wires. Typical open-collector/open-drain tach wiring is:
+Do not join tach wires. The NF-A6x25 green tach output is open collector:
 
 ```text
-Pi 3.3 V ---- 4.7 kΩ–10 kΩ ----+---- BCM23 / physical pin 16
-                                |
-Fan 1 tach ---------------------+
-
-Pi 3.3 V ---- 4.7 kΩ–10 kΩ ----+---- BCM24 / physical pin 18
-                                |
-Fan 2 tach ---------------------+
+Fan 1 green tach ---------------- BCM23 / physical pin 16
+Fan 2 green tach ---------------- BCM24 / physical pin 18
 ```
 
-Confirm the tach output type in the fan data sheet. A 5 V push-pull tach needs a level shifter; the Pi internal pull-up is not a substitute and BCM23/24 must never receive 5 V. Set `pulses_per_revolution` to the fan's documented value (often 2, but not always).
+The app enables the Pi's internal 3.3 V pull-up (`PUD_UP`) on these open-collector tach inputs; this is the baseline direct connection, not a floating input. Set `pulses_per_revolution = [2, 2]`. For noisy/long wiring, Noctua documents an optional 1 kΩ pull-up to **3.3 V** and an optional 1 µF non-polar capacitor; never pull tach up to 5 V.
 
-Physical pins 2 and 4 are one Pi 5 V rail, not separate supplies. Add both fans' normal and startup current to the Pi/USB load and verify that the supply, cabling, and connector are rated for the total before using header power. If uncertain, use a separately rated 5 V fan supply. Its ground must connect to Pi ground for PWM/tach reference, but do **not** connect that supply's +5 V back to Pi physical pin 2/4 while the Pi has another supply: that can backfeed the Pi.
+Each fan is 0.187 A typical and 0.26 A maximum; two are 0.374 A typical and 0.52 A maximum. Physical pins 2/4 are one Pi 5 V rail: include this load with the Pi and USB load, and verify supply/cable/connector headroom. With an external 5 V fan supply, connect ground to Pi ground but never connect its +5 V back to Pi pins 2/4 while the Pi has another supply (backfeed risk).
 
 ### pigpio ownership, daemon, and first bring-up
 
@@ -118,25 +92,23 @@ uv run dgx-fan --config config.toml
 backend = "raspberry-pi"
 pwm_gpio_bcm = [18, 19]
 pwm_frequency_hz = 25000
-pwm_inverted = true
+pwm_inverted = false
 tach_gpio_bcm = [23, 24]
 ```
 
-Bring up one fan at a time: first inspect powered-off wiring against the fan data sheet, then verify voltage/common ground with PWM and tach disconnected. Add the driver and first fan. The app commands full speed before receiving DCGM data, so expect a full-speed fail-safe output; power off if this is not expected. Confirm approximately 25 kHz PWM, active-low polarity, stage duty changes, and minimum stable duty. Then validate each tach/RPM separately, add the second fan, and exercise endpoint loss, a disconnected tach/stall, and app exit. Safety states should force full speed; PWM release should return the external driver/fan input to its documented pull-up/default full-speed state.
+Bring up one fan at a time: inspect unpowered wiring, verify 5 V/common ground, connect Fan 1, then confirm approximately 25 kHz non-inverted duty, RPM, and curve response before adding Fan 2. Exercise endpoint loss, disconnected tach/stall, and app exit. The software commands 100% duty for its documented safety states. Current release calls `hardware_PWM(gpio, 0, 0)` and does **not** prove a GPIO input/Hi-Z transition or full-speed-after-quit on live hardware; measure that behavior before unattended use.
 
-Stop and remove power if any GPIO, cable, transistor, connector, or supply becomes hot; a Pi GPIO is above 3.3 V; polarity is uncertain; a fan will not start; or measured current exceeds a supply/cable rating. This project cannot validate an unknown fan, assembled circuit, or live DGX data.
+Stop and remove power if any GPIO, cable, connector, or supply becomes hot; a Pi GPIO is above 3.3 V; polarity is uncertain; a fan will not start; or measured current exceeds a supply/cable rating. This project cannot validate an unknown fan, assembled circuit, or live DGX data.
 
 ### Electrical references
 
-- [Raspberry Pi GPIO and 40-pin header documentation](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#gpio-and-the-40-pin-header)
+- [Noctua microcontroller PWM and RPM guide](https://www.noctua.at/en/support/faqs/microcontroller-guide-pwm-setup-and-rpm-monitoring)
+- [Noctua NF-A6x25 5V PWM specifications](https://www.noctua.at/en/products/nf-a6x25-5v-pwm/specifications)
+- [Noctua PWM specifications white paper](https://cdn.noctua.at/media/Noctua_PWM_specifications_white_paper.pdf)
 - [Raspberry Pi 4 Model B datasheet and pinout](https://datasheets.raspberrypi.com/rpi4/raspberry-pi-4-datasheet.pdf)
 - [Official Raspberry Pi firmware overlay README](https://github.com/raspberrypi/firmware/blob/master/boot/overlays/README)
 - [pigpio `gpioHardwarePWM` implementation (sets GPIO mode and PWM clock)](https://github.com/joan2937/pigpio/blob/master/pigpio.c#L12319-L12410)
-- [Intel four-wire fan electrical guidance (reference topology)](https://www.intel.com.tr/content/dam/www/public/us/en/documents/design-guides/celeron-400-guide.pdf)
-
-The Intel guide describes a common four-wire PWM electrical topology. It does not certify an unknown 5 V fan's connector order, voltage, current, or behaviour.
-
-On startup the app sets a safe full-speed output before reading the network. On normal exit or error it releases PWM; the external open-collector circuit should leave the fan's control input at its pull-up/default full-speed behavior.
+The primary sources above support only the stated Noctua model. They do not verify this assembled circuit or the current release behavior.
 
 ## MVP limitations
 
