@@ -68,23 +68,43 @@ class DCGMCollector:
     def __init__(self, endpoints: tuple[EndpointConfig, ...], timeout_seconds: float, stale_after_seconds: float) -> None:
         self.endpoints, self.timeout, self.stale_after = endpoints, timeout_seconds, stale_after_seconds
         self._last_good: dict[str, tuple[float, tuple[GPUStat, ...]]] = {}
+        self._errors: dict[str, str | None] = {}
 
     async def collect(self, now: float | None = None) -> tuple[EndpointSnapshot, ...]:
         current = time.monotonic() if now is None else now
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            results = await asyncio.gather(*(self._fetch(client, endpoint, current) for endpoint in self.endpoints))
-        return tuple(results)
+            await asyncio.gather(*(self._fetch(client, endpoint, current) for endpoint in self.endpoints))
+        return self.snapshots(current)
 
-    async def _fetch(self, client: httpx.AsyncClient, endpoint: EndpointConfig, now: float) -> EndpointSnapshot:
+    def snapshots(self, now: float | None = None) -> tuple[EndpointSnapshot, ...]:
+        """Recompute freshness between polls; controller consumers must call this every tick."""
+        current = time.monotonic() if now is None else now
+        snapshots: list[EndpointSnapshot] = []
+        for endpoint in self.endpoints:
+            prior = self._last_good.get(endpoint.id)
+            age = None if prior is None else max(0.0, current - prior[0])
+            stale = age is None or age > self.stale_after
+            error = self._errors.get(endpoint.id)
+            if prior is None and error is None:
+                error = "awaiting first sample"
+            snapshots.append(EndpointSnapshot(
+                endpoint.id, endpoint.name, prior is not None and not stale and error is None,
+                age, stale, error, () if prior is None or stale else prior[1],
+            ))
+        return tuple(snapshots)
+
+    def mark_unhealthy(self, error: Exception | str) -> None:
+        """Publish unexpected poll-loop failures as unsafe without discarding fresh diagnostics."""
+        message = str(error) or type(error).__name__
+        for endpoint in self.endpoints:
+            self._errors[endpoint.id] = f"collector failure: {message}"
+
+    async def _fetch(self, client: httpx.AsyncClient, endpoint: EndpointConfig, now: float) -> None:
         try:
             response = await client.get(endpoint.url)
             response.raise_for_status()
             gpus = parse_metrics(endpoint.id, endpoint.name, response.text)
             self._last_good[endpoint.id] = (now, gpus)
-            return EndpointSnapshot(endpoint.id, endpoint.name, True, 0.0, False, gpus=gpus)
+            self._errors[endpoint.id] = None
         except (httpx.HTTPError, ValueError) as error:
-            prior = self._last_good.get(endpoint.id)
-            age = None if prior is None else now - prior[0]
-            stale = age is None or age > self.stale_after
-            # A cached sample remains observable only until stale; any failed endpoint is unsafe immediately.
-            return EndpointSnapshot(endpoint.id, endpoint.name, False, age, stale, str(error), () if prior is None or stale else prior[1])
+            self._errors[endpoint.id] = str(error)

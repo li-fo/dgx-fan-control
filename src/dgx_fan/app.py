@@ -40,13 +40,22 @@ class DGXFanApp(App[None]):
 
     async def _poll_loop(self) -> None:
         while True:
-            self.endpoints = await self.collector.collect(time.monotonic())
+            await self._poll_once(time.monotonic())
             await sleep(self.config.collection.interval_seconds)
+
+    async def _poll_once(self, now: float) -> None:
+        try:
+            await self.collector.collect(now)
+        except CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - a supervisor must convert unexpected poll failures to fail-safe state.
+            self.collector.mark_unhealthy(error)
 
     def control_tick(self, now: float | None = None) -> None:
         current = time.monotonic() if now is None else now
         if self.hardware is None:
             return
+        self.endpoints = self.collector.snapshots(current)
         fans = self.hardware.readings(current)
         self.latest = self.controller.update(self.endpoints, fans, current)
         self.hardware.set_duty(self.latest.duty_percent)
