@@ -91,7 +91,7 @@ def _stop_process_group(process: subprocess.Popen[bytes]) -> None:
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
-        return
+        pass
     try:
         process.wait(timeout=2)
         return
@@ -102,6 +102,85 @@ def _stop_process_group(process: subprocess.Popen[bytes]) -> None:
     except ProcessLookupError:
         pass
     process.wait(timeout=2)
+
+
+def test_stop_process_group_reaps_after_term() -> None:
+    calls: list[object] = []
+
+    class Process:
+        pid = 17
+
+        def poll(self) -> None:
+            calls.append("poll")
+
+        def wait(self, timeout: float) -> int:
+            calls.append(("wait", timeout))
+            return 0
+
+    process = Process()
+    original_killpg = os.killpg
+    try:
+        os.killpg = lambda pid, sig: calls.append(("kill", pid, sig))
+        _stop_process_group(process)  # type: ignore[arg-type]
+    finally:
+        os.killpg = original_killpg
+
+    assert calls == ["poll", ("kill", 17, signal.SIGTERM), ("wait", 2)]
+
+
+def test_stop_process_group_kills_and_reaps_after_term_timeout() -> None:
+    calls: list[object] = []
+
+    class Process:
+        pid = 17
+
+        def poll(self) -> None:
+            pass
+
+        def wait(self, timeout: float) -> int:
+            calls.append(("wait", timeout))
+            if len(calls) == 2:
+                raise subprocess.TimeoutExpired("test", timeout)
+            return 0
+
+    process = Process()
+    original_killpg = os.killpg
+    try:
+        os.killpg = lambda pid, sig: calls.append(("kill", pid, sig))
+        _stop_process_group(process)  # type: ignore[arg-type]
+    finally:
+        os.killpg = original_killpg
+
+    assert calls == [
+        ("kill", 17, signal.SIGTERM),
+        ("wait", 2),
+        ("kill", 17, signal.SIGKILL),
+        ("wait", 2),
+    ]
+
+
+def test_stop_process_group_reaps_when_term_races_with_child_exit() -> None:
+    calls: list[object] = []
+
+    class Process:
+        pid = 17
+
+        def poll(self) -> None:
+            calls.append("poll")
+
+        def wait(self, timeout: float) -> int:
+            calls.append(("wait", timeout))
+            return 0
+
+    process = Process()
+    original_killpg = os.killpg
+    try:
+        os.killpg = lambda pid, sig: (_ for _ in ()).throw(ProcessLookupError())
+        _stop_process_group(process)  # type: ignore[arg-type]
+    finally:
+        os.killpg = original_killpg
+
+    assert calls == ["poll", ("wait", 2)]
 
 
 def test_capture_restore_restores_complete_state_and_closes_duplicate(monkeypatch: pytest.MonkeyPatch) -> None:
