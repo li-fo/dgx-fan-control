@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 
 from textual.app import App, ComposeResult
+from textual.containers import VerticalScroll
 from textual.widgets import Button
 
 from dgx_fan.app import DGXFanApp
@@ -121,4 +122,40 @@ def test_panels_are_ordered_retained_and_deduplicated() -> None:
             assert "GPU-a (last seen)" in rendered[0]
             assert len(ui.history.points[("dgx:one", "GPU-a", "util")]) == 1
 
+    asyncio.run(exercise())
+
+
+def test_mounted_responsive_width_reuses_history() -> None:
+    app = _DashboardApp()
+    gpu = GPUStat("GPU-a", "A100", memory_used_mib=50, memory_total_mib=100, utilization_percent=20, temperature_celsius=40)
+    snapshot = ControlSnapshot(20, "curve", "AUTO ON", 40, 0, (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")), (EndpointSnapshot("one", "One", True, 0, gpus=(gpu,), sample_revision=1),))
+    async def exercise() -> None:
+        async with app.run_test(size=(78, 24)) as pilot:
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 1)
+            scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
+            assert "78" in str(ui.query_one("#dashboard-warning").render()) and not scroll.display
+            count = len(ui.history.points[("one", "GPU-a", "util")])
+            await pilot.resize_terminal(79, 24); await pilot.pause()
+            assert scroll.display and len(ui.query(".dgx-panel")) == 1
+            narrow = scroll.size.width
+            await pilot.resize_terminal(120, 24); await pilot.pause()
+            wide = scroll.size.width
+            assert wide > narrow and count == len(ui.history.points[("one", "GPU-a", "util")])
+            await pilot.resize_terminal(78, 24); await pilot.resize_terminal(79, 24); await pilot.pause()
+            assert scroll.display and len(ui.query(".dgx-panel")) == 1
+    asyncio.run(exercise())
+
+
+def test_dashboard_scrolls_with_keyboard() -> None:
+    app = _DashboardApp()
+    gpus = tuple(GPUStat(f"GPU-{i}", "A100", memory_used_mib=50, memory_total_mib=100, utilization_percent=20, temperature_celsius=40) for i in range(5))
+    snapshot = ControlSnapshot(20, "curve", "AUTO ON", 40, 0, (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")), (EndpointSnapshot("z", "Z", True, 0, gpus=gpus, sample_revision=1), EndpointSnapshot("a", "A", True, 0, gpus=gpus, sample_revision=1)))
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 12)) as pilot:
+            ui = app.query_one(FanAppUI); ui.update_snapshot(snapshot, 1); await pilot.pause()
+            scroll = ui.query_one("#dashboard-scroll", VerticalScroll); scroll.focus()
+            assert scroll.can_focus and scroll.max_scroll_y > 0
+            before = scroll.scroll_y; await pilot.press("down"); await pilot.pause()
+            assert scroll.scroll_y > before
     asyncio.run(exercise())
