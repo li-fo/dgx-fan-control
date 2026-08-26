@@ -83,7 +83,12 @@ def test_fan_control_panel_updates_gauges_and_buttons_without_side_effects() -> 
             status = app.query_one("#fan-status", Static).render().plain
             one = app.query_one("#fan-1-gauge", FanGauge).render().plain
             two = app.query_one("#fan-2-gauge", FanGauge).render().plain
-            assert "Fan Status / Control" in status
+            assert status.splitlines() == [
+                "Fan Status / Control · AUTO ON",
+                "Shared PWM: 50% (curve)",
+                "Max GPU temp: 63.0 C; stage: 2",
+            ]
+            assert not any(glyph in status for glyph in "┌┐└┘│")
             assert "Shared PWM: 50%" in status and "Fan 1" not in status
             assert "50%" in one and "RPM: 1234 RPM" in one and "RUNNING" in one
             assert "50%" in two and "RPM: N/A" in two and "NO TACH" in two
@@ -148,20 +153,30 @@ def test_fan_control_two_row_geometry_survives_resize() -> None:
             pane = app.query_one("#fan-control")
             one = app.query_one("#fan-1-gauge", FanGauge)
             two = app.query_one("#fan-2-gauge", FanGauge)
+            status = app.query_one("#fan-status", Static)
             assert top.region.bottom <= gauges.region.y
-            assert one.region.right <= two.region.x and one.region.height == two.region.height == 7
+            assert one.region.right <= two.region.x and one.region.height == two.region.height == 9
             assert _contained_in(pane, top) and _contained_in(pane, gauges)
-            assert _contained_in(pane, one) and _contained_in(pane, two)
+            assert _contained_in(pane, status) and _contained_in(pane, one) and _contained_in(pane, two)
+            _assert_complete_fan_panel_borders(status, one, two)
+            _assert_gauge_content_fits(one)
+            _assert_gauge_content_fits(two)
             await pilot.resize_terminal(100, 30)
             await pilot.pause()
             assert top.region.bottom <= gauges.region.y
-            assert one.region.right <= two.region.x and one.region.height == two.region.height == 7
+            assert one.region.right <= two.region.x and one.region.height == two.region.height == 9
             assert _contained_in(pane, top) and _contained_in(pane, gauges)
-            assert _contained_in(pane, one) and _contained_in(pane, two)
+            assert _contained_in(pane, status) and _contained_in(pane, one) and _contained_in(pane, two)
+            _assert_complete_fan_panel_borders(status, one, two)
+            _assert_gauge_content_fits(one)
+            _assert_gauge_content_fits(two)
             await pilot.resize_terminal(79, 25)
             await pilot.pause()
             assert _contained_in(pane, top) and _contained_in(pane, gauges)
-            assert _contained_in(pane, one) and _contained_in(pane, two)
+            assert _contained_in(pane, status) and _contained_in(pane, one) and _contained_in(pane, two)
+            _assert_complete_fan_panel_borders(status, one, two)
+            _assert_gauge_content_fits(one)
+            _assert_gauge_content_fits(two)
 
     asyncio.run(exercise())
 
@@ -173,6 +188,21 @@ def _contained_in(parent: Static, child: Static) -> bool:
         and child.region.right <= parent.region.right
         and child.region.bottom <= parent.region.bottom
     )
+
+
+def _assert_complete_fan_panel_borders(*widgets: Static) -> None:
+    for widget in widgets:
+        top, right, bottom, left = widget.styles.border
+        assert all(edge[0] for edge in (top, right, bottom, left))
+
+
+def _assert_gauge_content_fits(gauge: FanGauge) -> None:
+    lines = gauge.render().plain.splitlines()
+    assert len(lines) == 7
+    assert lines[0].startswith("Fan ")
+    assert all(cell_len(line) == FanGauge.RING_WIDTH for line in lines[1:6])
+    assert lines[-1].startswith("RPM: ")
+    assert gauge.content_region.height >= len(lines)
 
 
 def test_poll_exception_is_supervised_and_unmount_cleans_up(monkeypatch) -> None:

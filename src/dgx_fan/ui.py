@@ -212,10 +212,15 @@ class FanGauge(Static):
 class FanAppUI(Static):
     DEFAULT_CSS = """
     #fan-top-row { height: 5; }
-    #fan-status { width: 1fr; height: 5; }
+    #fan-status { width: 1fr; height: 5; border: round $primary; }
     #power-toggle, #fan-settings { width: 15; height: 3; }
-    #fan-gauge-row { height: 7; }
-    #fan-1-gauge, #fan-2-gauge { width: 1fr; height: 7; content-align: center middle; }
+    #fan-gauge-row { height: 9; }
+    #fan-1-gauge, #fan-2-gauge {
+        width: 1fr;
+        height: 9;
+        border: round $primary;
+        content-align: center middle;
+    }
     """
 
     def __init__(
@@ -252,7 +257,7 @@ class FanAppUI(Static):
             with TabPane("Fan Control", id="fan-control"), Vertical():
                 with Horizontal(id="fan-top-row"):
                     yield Static(
-                        "┌ Fan Status / Control ┐\n│ Waiting for controller │\n└───────────────────────┘",
+                        "Fan Status / Control · WAITING\nShared PWM: --\nMax GPU temp: N/A; stage: N/A",
                         id="fan-status",
                         markup=False,
                     )
@@ -291,11 +296,9 @@ class FanAppUI(Static):
             else f"{snapshot.max_temperature_celsius:.1f} C"
         )
         self.query_one("#fan-status", Static).update(
-            f"┌ Fan Status / Control ┐\n"
-            f"│ {snapshot.state}\n"
-            f"│ Shared PWM: {snapshot.duty_percent}% ({snapshot.reason})\n"
-            f"│ Max GPU temp: {maximum}; stage: {snapshot.active_stage}\n"
-            f"└───────────────────────┘"
+            f"Fan Status / Control · {snapshot.state}\n"
+            f"Shared PWM: {snapshot.duty_percent}% ({snapshot.reason})\n"
+            f"Max GPU temp: {maximum}; stage: {snapshot.active_stage}"
         )
         for number in (1, 2):
             fan = snapshot.fans[number - 1]
