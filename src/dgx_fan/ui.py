@@ -141,9 +141,9 @@ class DashboardHistory:
                 " "
                 if value is None
                 else "▁"
-                if value == 0 and row == PLOT_HEIGHT - 1
+                if value == 0 and row == plot_height - 1
                 else "█"
-                if value > 0 and (row == PLOT_HEIGHT - 1 or value >= threshold)
+                if value > 0 and (row == plot_height - 1 or value >= threshold)
                 else " "
                 for value in values
             )

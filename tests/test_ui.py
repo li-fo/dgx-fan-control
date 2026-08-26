@@ -159,6 +159,29 @@ def test_area_renderer_locks_geometry_axis_gaps_and_bin_reducers() -> None:
         assert compact[-2].startswith("   0 ")
 
 
+def test_compact_plot_heights_preserve_zero_missing_and_low_positive_baselines() -> None:
+    """Every responsive height needs a visible bottom-row baseline."""
+    now = 120.0
+    width = 12
+    zero = DashboardHistory(2)
+    low_positive = DashboardHistory(2)
+    zero.points[("one", "GPU-a", "util")] = [HistoryPoint(now, 0)]
+    low_positive.points[("one", "GPU-a", "util")] = [HistoryPoint(now, 0.1)]
+
+    for height in range(1, 6):
+        zero_rows = zero.area("one", "GPU-a", "util", now, width, 100, height)
+        missing_rows = DashboardHistory(2).area("one", "GPU-a", "util", now, width, 100, height)
+        positive_rows = low_positive.area("one", "GPU-a", "util", now, width, 100, height)
+        zero_glyphs = [row[5:] for row in zero_rows[:-1]]
+        positive_glyphs = [row[5:] for row in positive_rows[:-1]]
+
+        assert sum(line.count("▁") for line in zero_glyphs) == 1
+        assert zero_glyphs[height - 1].endswith("▁")
+        assert all(line == " " * width for line in (row[5:] for row in missing_rows[:-1]))
+        assert sum(line.count("█") for line in positive_glyphs) == 1
+        assert positive_glyphs[height - 1].endswith("█")
+
+
 class _DashboardApp(App[None]):
     def compose(self) -> ComposeResult:
         yield FanAppUI("config.toml", lambda: None, 75, 2)
