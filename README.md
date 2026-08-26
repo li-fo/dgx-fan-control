@@ -1,5 +1,7 @@
 # DGX Fan Controller TUI (MVP)
 
+[한국어 README](README.ko.md)
+
 `dgx-fan` is a direct-Python Textual application for a Raspberry Pi 4 that reads GPU data from up to two DCGM exporter endpoints and sets one shared PWM target for two 4-wire fans. It shows GPU memory, utilisation, temperature, fan RPM/status, and has a runtime-only On/Off control.
 
 ## Run
@@ -36,11 +38,88 @@ Start with `hardware.backend = "fake"` on a development machine. Its default tac
 
 ## Raspberry Pi 4 wiring
 
-- Enable hardware PWM with `dtoverlay=pwm-2chan` in `/boot/firmware/config.txt` (or the OS-equivalent boot configuration), then reboot.
-- BCM18 is the shared 25 kHz PWM output. Connect it through an NPN/N-MOSFET open-collector circuit; do **not** connect a 5 V fan PWM input directly to a Pi GPIO. `pwm_inverted` accounts for that circuit's inversion.
-- BCM23 and BCM24 are independent tach inputs with 3.3 V pull-ups. Confirm the fan's pulses-per-revolution value before use.
-- Check both fans' normal and startup current against the Pi 5 V supply budget before using the header for fan power. Use a separate supply if the budget is uncertain, with a common ground where required by the circuit.
-- Validate PWM frequency, duty polarity, minimum stable duty, tach/RPM, endpoint loss, and shutdown behavior on the physical target. This repository cannot validate wiring or live DGX data.
+This app drives **one shared PWM signal** and reads **two separate tach signals**. It does not independently control two PWM channels: both fans receive the same duty, although their RPM/state can differ. The exact fan data sheet always wins. The connector positions below are the usual four-wire PWM convention only: fan connector order, wire colours, voltage, and tach type can vary. Disconnect power before wiring or changing a connection.
+
+| Function | Typical fan connector position* | Fan 1 | Fan 2 | Raspberry Pi 4 |
+| --- | --- | --- | --- | --- |
+| Ground | Pin 1 | GND | GND | Any Pi GND, for example physical pin 6 or 9; all supplies share this ground |
+| Fan power | Pin 2 | +5 V | +5 V | Physical pin 2 or 4 **only when its supply budget is safe**; otherwise use a separate 5 V fan supply |
+| Tach / RPM | Pin 3 | Tach 1 | Tach 2 | Fan 1: BCM23 / physical pin 16; Fan 2: BCM24 / physical pin 18. Each has its own external 4.7 kΩ–10 kΩ pull-up to Pi 3.3 V |
+| PWM control | Pin 4 | PWM | PWM | Join both PWM inputs at the collector/drain of one open-collector/open-drain driver controlled by BCM18 / physical pin 12 |
+
+\* Never trust a generic wire colour or connector number over the exact fan data sheet. Never connect the fan PWM line (which may have an internal 5 V pull-up), or a 5 V tach signal, directly to a Pi GPIO.
+
+`BCM18` / physical pin 12 is the only PWM output used by this application. `BCM19` / physical pin 35 remains unused even if `dtoverlay=pwm-2chan` enables it. Connecting Fan 2 PWM to BCM19 will not control it; independent PWM requires code and configuration changes.
+
+### PWM level shifting
+
+The Pi GPIO is 3.3 V logic. Drive the joined fan PWM input with an open-collector/open-drain circuit, not directly from BCM18. One suitable NPN circuit uses a 2N3904 or 2N2222:
+
+```text
+Pi BCM18 / physical pin 12 -- 2.2 kΩ–4.7 kΩ -- Base (NPN)
+                                            |
+                                  10 kΩ to GND (recommended pull-down)
+
+Fan 1 PWM (typical pin 4) ---+--- Collector (NPN)
+Fan 2 PWM (typical pin 4) ---+
+                                  Emitter --- common GND
+```
+
+A 3.3 V logic-level N-channel MOSFET can be used instead: gate from BCM18 through about 100 Ω–1 kΩ, a 10 kΩ gate-to-ground pull-down, source to common ground, and drain to the joined fan PWM inputs. Select a component specified to turn on with a 3.3 V gate drive. Do not add a Pi-side pull-up to the joined PWM line; use the fan's documented input circuit.
+
+The supplied `pwm_inverted = true` compensates for this low-side NPN/N-MOSFET inversion: a higher requested duty creates the corresponding active-low duty at the fan input. Keep it unless a changed physical circuit has been measured and its polarity verified.
+
+### Tach, power, and grounding
+
+Do not join tach wires. Typical open-collector/open-drain tach wiring is:
+
+```text
+Pi 3.3 V ---- 4.7 kΩ–10 kΩ ---- Fan 1 tach ---- BCM23 / physical pin 16
+Pi 3.3 V ---- 4.7 kΩ–10 kΩ ---- Fan 2 tach ---- BCM24 / physical pin 18
+```
+
+Confirm the tach output type in the fan data sheet. A 5 V push-pull tach needs a level shifter; the Pi internal pull-up is not a substitute and BCM23/24 must never receive 5 V. Set `pulses_per_revolution` to the fan's documented value (often 2, but not always).
+
+Physical pins 2 and 4 are one Pi 5 V rail, not separate supplies. Add both fans' normal and startup current to the Pi/USB load and verify that the supply, cabling, and connector are rated for the total before using header power. If uncertain, use a separately rated 5 V fan supply. Its ground must connect to Pi ground for PWM/tach reference, but do **not** connect that supply's +5 V back to Pi physical pin 2/4 while the Pi has another supply: that can backfeed the Pi.
+
+### Overlay, daemon, and first bring-up
+
+The code calls pigpio hardware PWM on BCM18 at the configured 25 kHz. For the one channel this app uses, configure this overlay in `/boot/firmware/config.txt` (the boot path can vary by OS) and reboot:
+
+```ini
+dtoverlay=pwm,pin=18,func=2
+```
+
+`dtoverlay=pwm-2chan` may remain if already configured; it enables the GPIO18/GPIO19 pair, but channel 2 is unused by this app. Verify the physical mapping, install the Pi extra, start `pigpiod`, and check the configuration before selecting the real backend:
+
+```bash
+pinout
+uv pip install -e '.[raspberry-pi]'
+sudo systemctl enable --now pigpiod
+uv run dgx-fan --config config.toml
+```
+
+```toml
+[hardware]
+backend = "raspberry-pi"
+pwm_gpio_bcm = 18
+pwm_frequency_hz = 25000
+pwm_inverted = true
+tach_gpio_bcm = [23, 24]
+```
+
+Bring up one fan at a time: first inspect powered-off wiring against the fan data sheet, then verify voltage/common ground with PWM and tach disconnected. Add the driver and first fan. The app commands full speed before receiving DCGM data, so expect a full-speed fail-safe output; power off if this is not expected. Confirm approximately 25 kHz PWM, active-low polarity, stage duty changes, and minimum stable duty. Then validate each tach/RPM separately, add the second fan, and exercise endpoint loss, a disconnected tach/stall, and app exit. Safety states should force full speed; PWM release should return the external driver/fan input to its documented pull-up/default full-speed state.
+
+Stop and remove power if any GPIO, cable, transistor, connector, or supply becomes hot; a Pi GPIO is above 3.3 V; polarity is uncertain; a fan will not start; or measured current exceeds a supply/cable rating. This project cannot validate an unknown fan, assembled circuit, or live DGX data.
+
+### Electrical references
+
+- [Raspberry Pi GPIO and 40-pin header documentation](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#gpio-and-the-40-pin-header)
+- [Official Raspberry Pi firmware overlay README](https://github.com/raspberrypi/firmware/blob/master/boot/overlays/README)
+- [pigpio documentation and source](https://github.com/joan2937/pigpio)
+- [Intel four-wire fan electrical guidance (reference topology)](https://www.intel.com.tr/content/dam/www/public/us/en/documents/design-guides/celeron-400-guide.pdf)
+
+The Intel guide describes a common four-wire PWM electrical topology. It does not certify an unknown 5 V fan's connector order, voltage, current, or behaviour.
 
 On startup the app sets a safe full-speed output before reading the network. On normal exit or error it releases PWM; the external open-collector circuit should leave the fan's control input at its pull-up/default full-speed behavior.
 
