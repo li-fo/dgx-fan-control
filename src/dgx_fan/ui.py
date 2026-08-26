@@ -4,6 +4,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
@@ -25,6 +26,19 @@ def _safe_display_text(value: object) -> str:
         "\N{REPLACEMENT CHARACTER}" if ord(char) < 32 or 127 <= ord(char) <= 159 else char
         for char in str(value)
     )
+
+
+def _compact_display_text(value: object, maximum_cells: int) -> str:
+    """Sanitize and truncate an external identifier without splitting wide cells."""
+    safe = _safe_display_text(value)
+    if cell_len(safe) <= maximum_cells:
+        return safe
+    result = ""
+    for char in safe:
+        if cell_len(result + char + "…") > maximum_cells:
+            return result + "…"
+        result += char
+    return result
 
 
 @dataclass(frozen=True)
@@ -257,7 +271,7 @@ class FanAppUI(Static):
             with TabPane("Fan Control", id="fan-control"), Vertical():
                 with Horizontal(id="fan-top-row"):
                     yield Static(
-                        "Fan Status / Control · WAITING\nFan 1: -- | Fan 2: --\nMax GPU temp: N/A",
+                        "Fan Status / Control · WAITING\nF1: --\nF2: --",
                         id="fan-status",
                         markup=False,
                     )
@@ -290,24 +304,18 @@ class FanAppUI(Static):
             self._layout_convergence_passes = 0
             self._render_dashboard(snapshot, now)
             self.last_signature = signature
-        maximum = (
-            "N/A"
-            if snapshot.max_temperature_celsius is None
-            else f"{snapshot.max_temperature_celsius:.1f} C"
-        )
         def fan_summary(index: int) -> str:
             temperature = snapshot.fan_temperatures_celsius[index]
             stage = snapshot.active_stages[index]
             temperature_text = "N/A" if temperature is None else f"{temperature:.1f} C"
             return (
-                f"F{index + 1} {snapshot.fan_endpoint_ids[index]}: "
-                f"{snapshot.duty_percents[index]}% · {temperature_text} · S{stage if stage is not None else '-'}"
+                f"F{index + 1} {_compact_display_text(snapshot.fan_endpoint_ids[index], 14)} "
+                f"{snapshot.duty_percents[index]}% {temperature_text} S{stage if stage is not None else '-'}"
             )
 
         self.query_one("#fan-status", Static).update(
             f"Fan Status / Control · {snapshot.state}\n"
-            f"{fan_summary(0)} | {fan_summary(1)}\n"
-            f"Max GPU temp: {maximum} ({snapshot.reason})"
+            f"{fan_summary(0)}\n{fan_summary(1)}"
         )
         for number in (1, 2):
             fan = snapshot.fans[number - 1]

@@ -1,6 +1,8 @@
 import asyncio
 from pathlib import Path
+from typing import Literal
 
+import pytest
 from rich.cells import cell_len
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
@@ -10,6 +12,21 @@ from dgx_fan.app import DGXFanApp
 from dgx_fan.config import DashboardColors, load_config
 from dgx_fan.models import ControlSnapshot, EndpointSnapshot, FanReading, GPUStat
 from dgx_fan.ui import DashboardHistory, FanAppUI, FanGauge, HistoryPoint
+
+
+def _fan_snapshot(
+    duty: int,
+    reason: str,
+    state: str,
+    maximum: float | None,
+    stage: int | None,
+    fans: tuple[FanReading, FanReading],
+    endpoints: tuple[EndpointSnapshot, ...],
+) -> ControlSnapshot:
+    return ControlSnapshot(
+        (duty, duty), reason, state, maximum, (stage, stage), (maximum, maximum),
+        ("one", "one"), fans, endpoints,
+    )
 
 
 def test_ui_has_tabs_and_power_toggle() -> None:
@@ -87,11 +104,11 @@ def test_fan_control_panel_updates_gauges_and_buttons_without_side_effects() -> 
             two = app.query_one("#fan-2-gauge", FanGauge).render().plain
             assert status.splitlines() == [
                 "Fan Status / Control · AUTO ON",
-                "F1 dgx-1: 20% · 40.0 C · S0 | F2 dgx-2: 80% · 63.0 C · S2",
-                "Max GPU temp: 63.0 C (curve)",
+                "F1 dgx-1 20% 40.0 C S0",
+                "F2 dgx-2 80% 63.0 C S2",
             ]
             assert not any(glyph in status for glyph in "┌┐└┘│")
-            assert "F1 dgx-1: 20%" in status and "F2 dgx-2: 80%" in status
+            assert "F1 dgx-1 20%" in status and "F2 dgx-2 80%" in status
             assert "20%" in one and "RPM: 1234 RPM" in one and "RUNNING" in one
             assert "80%" in two and "RPM: N/A" in two and "NO TACH" in two
             refreshed = ControlSnapshot(
@@ -141,6 +158,58 @@ def test_fan_control_panel_updates_gauges_and_buttons_without_side_effects() -> 
             power.press()
             await pilot.pause()
             assert calls == ["toggle", "toggle"]
+
+    asyncio.run(exercise())
+
+
+def test_fan_status_is_sanitized_and_fits_79_columns() -> None:
+    class FanPanelApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FanAppUI("config.toml", lambda: None, 75, 2)
+
+    snapshot = ControlSnapshot(
+        (20, 80), "temperature curve", "AUTO ON", 63, (0, 2), (40, 63),
+        ("very-long-dgx-name\x1b[31m", "second-dgx\x07-with-extra"),
+        (FanReading(1234, "RUNNING"), FanReading(None, "NO TACH")), (),
+    )
+    app = FanPanelApp()
+
+    async def exercise() -> None:
+        async with app.run_test(size=(79, 30)) as pilot:
+            app.query_one(TabbedContent).active = "fan-control"
+            app.query_one(FanAppUI).update_snapshot(snapshot, 1)
+            await pilot.pause()
+            status = app.query_one("#fan-status", Static).render().plain
+            lines = status.splitlines()
+            content_width = app.query_one("#fan-status", Static).content_size.width
+            assert len(lines) == 3 and all(cell_len(line) <= content_width for line in lines)
+            assert "\x1b" not in status and "\x07" not in status
+            assert "F1" in lines[1] and "F2" in lines[2]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("state", ["AUTO ON", "USER OFF", "SAFETY OVERRIDE", "STARTUP BOOST"])
+def test_fan_status_header_states_fit_actual_widget_width(
+    state: Literal["AUTO ON", "USER OFF", "SAFETY OVERRIDE", "STARTUP BOOST"]
+) -> None:
+    class FanPanelApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FanAppUI("config.toml", lambda: None, 75, 2)
+
+    snapshot = ControlSnapshot(
+        (100, 100), "safety recovery temperature", state, 74, (2, 2), (74, 74),
+        ("dgx-1", "dgx-2"), (FanReading(1200, "RUNNING"), FanReading(1200, "RUNNING")), (),
+    )
+    app = FanPanelApp()
+
+    async def exercise() -> None:
+        async with app.run_test(size=(79, 30)) as pilot:
+            app.query_one(TabbedContent).active = "fan-control"
+            app.query_one(FanAppUI).update_snapshot(snapshot, 1)
+            await pilot.pause()
+            status = app.query_one("#fan-status", Static)
+            assert cell_len(status.render().plain.splitlines()[0]) <= status.content_size.width
 
     asyncio.run(exercise())
 
@@ -222,7 +291,7 @@ def test_poll_exception_is_supervised_and_unmount_cleans_up(monkeypatch) -> None
             await app._poll_once(0)
             app.control_tick(1)
             await pilot.pause()
-            assert app.latest is not None and app.latest.duty_percent == 100
+            assert app.latest is not None and app.latest.duty_percents == (100, 100)
             assert not app.endpoints[0].healthy
         assert app.hardware is not None
         assert getattr(app.hardware, "released", False)
@@ -369,7 +438,7 @@ def _single_gpu_snapshot(name: str = "One") -> ControlSnapshot:
         utilization_percent=20,
         temperature_celsius=40,
     )
-    return ControlSnapshot(
+    return _fan_snapshot(
         20,
         "curve",
         "AUTO ON",
@@ -483,7 +552,7 @@ def test_panels_are_ordered_retained_and_deduplicated() -> None:
     incomplete = GPUStat(
         "GPU-z", "H100", memory_used_mib=50, utilization_percent=0, temperature_celsius=0
     )
-    first = ControlSnapshot(
+    first = _fan_snapshot(
         20,
         "curve",
         "AUTO ON",
@@ -497,7 +566,7 @@ def test_panels_are_ordered_retained_and_deduplicated() -> None:
             EndpointSnapshot("dgx:one", "A endpoint", True, 0, gpus=(gpu,), sample_revision=1),
         ),
     )
-    second = ControlSnapshot(
+    second = _fan_snapshot(
         20,
         "curve",
         "AUTO ON",
@@ -567,7 +636,7 @@ def test_dashboard_signature_gates_charts_but_not_fast_status_updates(monkeypatc
             )
             for endpoint in endpoints
         )
-        return ControlSnapshot(
+        return _fan_snapshot(
             20,
             "curve",
             state,
@@ -707,7 +776,7 @@ def test_compact_gpu_groups_pair_memory_and_temperature_without_identity_lines()
             temperature_celsius=40,
         ),
     )
-    snapshot = ControlSnapshot(
+    snapshot = _fan_snapshot(
         20,
         "curve",
         "AUTO ON",
@@ -752,7 +821,7 @@ def test_mounted_paired_width_reuses_history() -> None:
         utilization_percent=20,
         temperature_celsius=40,
     )
-    snapshot = ControlSnapshot(
+    snapshot = _fan_snapshot(
         20,
         "curve",
         "AUTO ON",
@@ -816,7 +885,7 @@ def test_dashboard_scrolls_with_keyboard() -> None:
         )
         for i in range(5)
     )
-    snapshot = ControlSnapshot(
+    snapshot = _fan_snapshot(
         20,
         "curve",
         "AUTO ON",
@@ -861,7 +930,7 @@ def test_dashboard_color_spans_cover_complete_boxes_only() -> None:
         utilization_percent=20,
         temperature_celsius=40,
     )
-    snapshot = ControlSnapshot(
+    snapshot = _fan_snapshot(
         20,
         "curve",
         "AUTO ON",
@@ -910,7 +979,7 @@ def test_dashboard_without_colors_preserves_plain_geometry_and_sanitizes_externa
         utilization_percent=20,
         temperature_celsius=40,
     )
-    snapshot = ControlSnapshot(
+    snapshot = _fan_snapshot(
         20,
         "curve",
         "AUTO ON",
@@ -960,7 +1029,7 @@ def test_two_single_gpu_endpoints_fit_short_viewports_and_expand_when_tall() -> 
         utilization_percent=20,
         temperature_celsius=40,
     )
-    snapshot = ControlSnapshot(
+    snapshot = _fan_snapshot(
         20,
         "curve",
         "AUTO ON",
@@ -1052,7 +1121,7 @@ def test_scrollbar_width_converges_after_resize_without_wrapping_rows() -> None:
         utilization_percent=20,
         temperature_celsius=40,
     )
-    fit = ControlSnapshot(
+    fit = _fan_snapshot(
         20,
         "curve",
         "AUTO ON",
@@ -1101,7 +1170,7 @@ def test_true_overflow_uses_reduced_scrollable_content_width() -> None:
         )
         for index in range(5)
     )
-    snapshot = ControlSnapshot(
+    snapshot = _fan_snapshot(
         20,
         "curve",
         "AUTO ON",

@@ -52,15 +52,23 @@ class RaspberryPiHardware:
         self.config = config
         self.pi = pigpio.pi()
         if not self.pi.connected:
+            self.pi.stop()
             raise RuntimeError("cannot connect to pigpiod")
         self._pulses = [0, 0]
         self._last = [(0, time.monotonic()), (0, time.monotonic())]
         self._callbacks = []
-        for index, gpio in enumerate(config.tach_gpio_bcm):
-            self.pi.set_mode(gpio, pigpio.INPUT)
-            self.pi.set_pull_up_down(gpio, pigpio.PUD_UP)
-            self._callbacks.append(self.pi.callback(gpio, pigpio.FALLING_EDGE, self._tach_callback(index)))
-        self.set_duties((100, 100))
+        try:
+            for index, gpio in enumerate(config.tach_gpio_bcm):
+                self.pi.set_mode(gpio, pigpio.INPUT)
+                self.pi.set_pull_up_down(gpio, pigpio.PUD_UP)
+                self._callbacks.append(self.pi.callback(gpio, pigpio.FALLING_EDGE, self._tach_callback(index)))
+            self.set_duties((100, 100))
+        except Exception:  # preserve the original hardware setup error.
+            try:
+                self.release()
+            except Exception as cleanup_error:  # noqa: BLE001 - best-effort cleanup must not mask setup failure.
+                _ = cleanup_error
+            raise
 
     def _tach_callback(self, index: int) -> Callable[[int, int, int], None]:
         def callback(gpio: int, level: int, tick: int) -> None:

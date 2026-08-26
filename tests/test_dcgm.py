@@ -72,7 +72,7 @@ async def test_snapshots_expire_between_polls_and_force_control_safe(monkeypatch
         HardwareConfig("fake", (18, 19), 25000, True, (23, 24), (2, 2), 1, 5),
     )
     fans = (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING"))
-    assert controller.update(stale, fans, 5.1).duty_percent == 100
+    assert controller.update(stale, fans, 5.1).duty_percents == (100, 100)
 
 
 def test_unexpected_collector_failure_publishes_unhealthy_snapshot() -> None:

@@ -66,6 +66,19 @@ def test_unmapped_configured_endpoint_emergency_still_couples_safety() -> None:
     assert snapshot.duty_percents == (100, 100)
 
 
+def test_unmapped_endpoint_must_clear_global_recovery_boundary() -> None:
+    control = ControlConfig(
+        True, 90, 2, 75, 10,
+        (Stage(45, 20), Stage(55, 50), Stage(70, 80), Stage(None, 100)),
+        ("one", "one"),
+    )
+    hardware = HardwareConfig("fake", (18, 19), 25000, True, (23, 24), (2, 2), 1, 5)
+    controller = FanController(control, hardware)
+    assert controller.update(_endpoints(40, 80), FANS, 0).state == "SAFETY OVERRIDE"
+    assert controller.update(_endpoints(40, 74), FANS, 5).reason == "safety recovery temperature"
+    assert controller.update(_endpoints(40, 72), FANS, 6).reason == "safety recovery dwell"
+
+
 def test_safety_recovery_and_one_fan_stall_latch_couple_both_outputs() -> None:
     controller = _controller()
     assert controller.update(_endpoints(80, 40), FANS, 0).state == "SAFETY OVERRIDE"
@@ -87,3 +100,18 @@ def test_one_fan_no_tach_boost_does_not_change_other_normal_target() -> None:
     snapshot = controller.update(_endpoints(40, 60), no_tach, 5)
     assert snapshot.state == "STARTUP BOOST"
     assert snapshot.duty_percents == (100, 80)
+
+
+def test_zero_percent_stage_resets_non_latched_tach_timeout_before_restart() -> None:
+    control = ControlConfig(
+        True, 100, 2, 75, 10,
+        (Stage(45, 0), Stage(55, 50), Stage(70, 80), Stage(None, 100)),
+        ("one", "two"),
+    )
+    hardware = HardwareConfig("fake", (18, 19), 25000, True, (23, 24), (2, 2), 1, 5)
+    controller = FanController(control, hardware)
+    no_tach = (FanReading(None, "NO TACH"), FanReading(1000, "RUNNING"))
+    controller.update(_endpoints(40, 40), no_tach, 0)
+    controller.update(_endpoints(40, 40), no_tach, 1)
+    assert controller.update(_endpoints(60, 40), no_tach, 6).state == "STARTUP BOOST"
+    assert controller.update(_endpoints(60, 40), no_tach, 7).fans[0].state != "STALLED"

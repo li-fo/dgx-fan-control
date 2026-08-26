@@ -64,9 +64,8 @@ class FanController:
         assert temperatures[0] is not None and temperatures[1] is not None
         normal_temperatures = (temperatures[0], temperatures[1])
         if self._safety_active:
-            below_recovery = all(
-                temperature < self.config.emergency_temperature_celsius - self.config.hysteresis_celsius
-                for temperature in normal_temperatures
+            below_recovery = maximum is not None and maximum < (
+                self.config.emergency_temperature_celsius - self.config.hysteresis_celsius
             )
             if below_recovery:
                 if self._recovery_since is None:
@@ -158,10 +157,13 @@ class FanController:
     ) -> tuple[FanReading, FanReading]:
         readings = list(fans)
         for index, fan in enumerate(fans):
-            if self._previous_duties[index] <= 0:
-                continue
             if self._stalled[index]:
                 readings[index] = replace(fan, state="STALLED")
+                continue
+            if self._previous_duties[index] <= 0:
+                self._no_tach_since[index] = None
+                self._restart_attempted[index] = False
+                self._boost_until[index] = None
                 continue
             if fan.state == "RUNNING":
                 self._no_tach_since[index] = None

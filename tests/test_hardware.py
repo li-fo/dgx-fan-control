@@ -1,3 +1,6 @@
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 from dgx_fan.config import HardwareConfig
@@ -71,3 +74,53 @@ def test_release_attempts_both_pwm_channels_after_one_failure() -> None:
         hardware.release()
     assert pi.calls == [(18, 0, 0), (19, 0, 0)]
     assert pi.stopped and hardware.pi is None
+
+
+def test_constructor_setup_failure_cleans_callbacks_pwm_and_pi(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Callback:
+        def __init__(self) -> None:
+            self.cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    class Pi:
+        connected = True
+
+        def __init__(self) -> None:
+            self.callback_handles: list[Callback] = []
+            self.calls: list[tuple[int, int, int]] = []
+            self.stopped = False
+
+        def set_mode(self, gpio: int, mode: int) -> None:
+            return None
+
+        def set_pull_up_down(self, gpio: int, pud: int) -> None:
+            return None
+
+        def callback(self, gpio: int, edge: int, callback: object) -> Callback:
+            handle = Callback()
+            self.callback_handles.append(handle)
+            return handle
+
+        def hardware_PWM(self, gpio: int, frequency: int, duty: int) -> None:
+            self.calls.append((gpio, frequency, duty))
+            if len(self.calls) == 1:
+                raise RuntimeError("initial full-speed PWM failed")
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    pi = Pi()
+    monkeypatch.setitem(sys.modules, "pigpio", SimpleNamespace(
+        INPUT=0, PUD_UP=1, FALLING_EDGE=2, pi=lambda: pi,
+    ))
+    config = HardwareConfig("raspberry-pi", (18, 19), 25000, True, (23, 24), (2, 2), 1, 5)
+    with pytest.raises(RuntimeError, match="failed to update one or more fan PWM") as error:
+        RaspberryPiHardware(config)
+    assert error.value.__cause__ is not None and "initial full-speed PWM failed" in str(error.value.__cause__)
+    assert all(handle.cancelled for handle in pi.callback_handles) and pi.stopped
+    assert pi.calls == [
+        (18, 25000, 0), (19, 25000, 0), (18, 25000, 0), (19, 25000, 0),
+        (18, 0, 0), (19, 0, 0),
+    ]
