@@ -8,7 +8,7 @@ from textual.widgets import Button
 from dgx_fan.app import DGXFanApp
 from dgx_fan.config import load_config
 from dgx_fan.models import ControlSnapshot, EndpointSnapshot, FanReading, GPUStat
-from dgx_fan.ui import DashboardHistory, FanAppUI
+from dgx_fan.ui import DashboardHistory, FanAppUI, HistoryPoint
 
 
 def test_ui_has_tabs_and_power_toggle() -> None:
@@ -74,17 +74,52 @@ def test_memory_history_is_normalized_and_zero_is_not_a_gap() -> None:
     assert history.area("one", "GPU-a", "util", 250, 1, 100)[4][5:] == " "
 
 
-def test_area_renderer_has_five_rows_axis_gaps_zero_and_width_scaling() -> None:
-    history = DashboardHistory()
-    gpu = GPUStat("GPU-a", "A100", memory_used_mib=0, memory_total_mib=100, utilization_percent=1, temperature_celsius=100)
-    history.append("one", 1, (gpu,), 120)
-    rendered = history.area("one", "GPU-a", "util", 120, 40, 100)
-    assert len(rendered) == 6
-    assert all(len(line) == 45 for line in rendered)
-    assert "█" in rendered[4]
-    assert "▁" in history.area("one", "GPU-a", "mem", 120, 40, 100)[4]
-    assert "120s" in rendered[-1] and "60s" in rendered[-1] and "now" in rendered[-1]
-    assert len(history.area("one", "GPU-a", "util", 120, 80, 100)[0]) > len(rendered[0])
+def test_area_renderer_locks_geometry_axis_gaps_and_bin_reducers() -> None:
+    """Keep the renderer's nvitop-like plot geometry independent of Textual layout."""
+    now = 120.0
+
+    def point_for_bin(width: int, bin_index: int, value: float) -> HistoryPoint:
+        return HistoryPoint((bin_index + 0.5) / width * 120, value)
+
+    for width, expected_positions in ((72, (5, 38, 56, 73)), (113, (5, 58, 86, 113))):
+        history = DashboardHistory()
+        # Bin 1 is intentionally absent; bins 2..5 prove zero and area height.
+        history.points[("one", "GPU-a", "util")] = [
+            point_for_bin(width, 2, 0),
+            point_for_bin(width, 3, 1),
+            point_for_bin(width, 4, 50),
+            point_for_bin(width, 5, 100),
+        ]
+        rendered = history.area("one", "GPU-a", "util", now, width, 100)
+
+        assert len(rendered) == 6
+        assert all(len(line) == width + 5 for line in rendered)
+        assert [line[:5] for line in rendered[:5]] == [" 100 ", "     ", "  50 ", "     ", "   0 "]
+        assert all(line[5 + 1] == " " for line in rendered[:5])
+        assert [line[5 + 2] for line in rendered[:5]] == [" ", " ", " ", " ", "▁"]
+        filled = [sum(line[5 + column] != " " for line in rendered[:5]) for column in (3, 4, 5)]
+        assert filled[0] < filled[1] < filled[2]
+
+        axis = rendered[-1]
+        positions = tuple(axis.index(label) for label in ("120s", "60s", "30s", "now"))
+        assert positions == expected_positions
+        assert positions == tuple(sorted(positions))
+        assert positions[0] == 5 and axis.rstrip().endswith("now")
+        assert all(positions[index] + len(label) <= positions[index + 1] for index, label in enumerate(("120s", "60s", "30s")))
+
+    reducers = DashboardHistory()
+    width = 72
+    reducers.points[("one", "GPU-a", "mem")] = [point_for_bin(width, 10, 10), point_for_bin(width, 10, 80)]
+    reducers.points[("one", "GPU-a", "util")] = [point_for_bin(width, 10, 10), point_for_bin(width, 10, 90)]
+    reducers.points[("one", "GPU-a", "temp")] = [point_for_bin(width, 10, 10), point_for_bin(width, 10, 90)]
+    filled_rows = {
+        metric: sum(line[5 + 10] != " " for line in reducers.area("one", "GPU-a", metric, now, width, 100)[:5])
+        for metric in ("mem", "util", "temp")
+    }
+    assert filled_rows == {"mem": 4, "util": 3, "temp": 4}
+
+    temp = reducers.area("one", "GPU-a", "temp", now, width, 75)
+    assert [line[:5] for line in temp[:5]] == ["  75 ", "     ", "  38 ", "     ", "   0 "]
 
 
 class _DashboardApp(App[None]):
@@ -138,12 +173,22 @@ def test_mounted_responsive_width_reuses_history() -> None:
             count = len(ui.history.points[("one", "GPU-a", "util")])
             await pilot.resize_terminal(79, 24); await pilot.pause()
             assert scroll.display and len(ui.query(".dgx-panel")) == 1
-            narrow = scroll.size.width
+            narrow_lines = str(next(iter(ui.query(".dgx-panel"))).render()).splitlines()
+            mem_index = next(index for index, line in enumerate(narrow_lines) if line.startswith("MEM"))
+            narrow_rows = narrow_lines[mem_index + 1:mem_index + 7]
+            assert len(narrow_rows) == 6 and all(len(line) <= scroll.size.width for line in narrow_rows)
+            narrow = len(narrow_rows[0]) - 5
+            assert narrow > 36 and len(narrow_rows[-1]) == len(narrow_rows[0])
             await pilot.resize_terminal(120, 24); await pilot.pause()
-            wide = scroll.size.width
+            wide_lines = str(next(iter(ui.query(".dgx-panel"))).render()).splitlines()
+            wide_index = next(index for index, line in enumerate(wide_lines) if line.startswith("MEM"))
+            wide_rows = wide_lines[wide_index + 1:wide_index + 7]
+            wide = len(wide_rows[0]) - 5
+            assert all(len(line) <= scroll.size.width for line in wide_rows) and len(wide_rows[-1]) == len(wide_rows[0])
             assert wide > narrow and count == len(ui.history.points[("one", "GPU-a", "util")])
             await pilot.resize_terminal(78, 24); await pilot.resize_terminal(79, 24); await pilot.pause()
             assert scroll.display and len(ui.query(".dgx-panel")) == 1
+            assert count == len(ui.history.points[("one", "GPU-a", "util")])
     asyncio.run(exercise())
 
 
