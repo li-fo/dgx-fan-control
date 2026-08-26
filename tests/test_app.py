@@ -35,15 +35,31 @@ def test_terminal_state_restores_exact_attributes_and_blocking(monkeypatch: pyte
     monkeypatch.setitem(sys.modules, "termios", fake_termios)
     monkeypatch.setattr(app_module.sys, "stdin", SimpleNamespace(isatty=lambda: True, fileno=lambda: 42))
     monkeypatch.setattr(app_module.os, "name", "posix")
+    monkeypatch.setattr(app_module.os, "dup", lambda fd: 43)
     monkeypatch.setattr(app_module.os, "get_blocking", lambda fd: False)
     monkeypatch.setattr(app_module.os, "set_blocking", lambda fd, blocking: calls.append((fd, blocking)))
+    monkeypatch.setattr(app_module.os, "close", lambda fd: calls.append(("close", fd)))
 
     state = _capture_terminal_state()
-    assert state == _TerminalState(42, [1, 2, 3, 4, 5, 6, [7, 8]], False)
+    assert state == _TerminalState(43, [1, 2, 3, 4, 5, 6, [7, 8]], False)
     original[6][0] = 99
     _restore_terminal_state(state)
 
-    assert calls == [(42, 9, [1, 2, 3, 4, 5, 6, [7, 8]]), (42, False)]
+    assert calls == [(43, 9, [1, 2, 3, 4, 5, 6, [7, 8]]), (43, False), ("close", 43)]
+    assert state.fd is None
+
+
+def test_terminal_capture_closes_duplicate_after_partial_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    closed: list[int] = []
+    fake_termios = SimpleNamespace(TCSANOW=0, tcgetattr=lambda fd: (_ for _ in ()).throw(OSError()))
+    monkeypatch.setitem(sys.modules, "termios", fake_termios)
+    monkeypatch.setattr(app_module.sys, "stdin", SimpleNamespace(isatty=lambda: True, fileno=lambda: 42))
+    monkeypatch.setattr(app_module.os, "name", "posix")
+    monkeypatch.setattr(app_module.os, "dup", lambda fd: 43)
+    monkeypatch.setattr(app_module.os, "close", closed.append)
+
+    assert _capture_terminal_state() is None
+    assert closed == [43]
 
 
 def test_app_exception_restores_terminal_and_releases_hardware(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -68,6 +84,28 @@ def test_app_exception_restores_terminal_and_releases_hardware(monkeypatch: pyte
     with pytest.raises(RuntimeError, match="app failure"):
         main(["--config", "unused.toml"])
     assert events == ["restore", "release"]
+
+
+def test_closed_stdin_does_not_prevent_app_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+
+    class Hardware:
+        def release(self) -> None:
+            events.append("release")
+
+    class ReturningApp:
+        def __init__(self, config: object) -> None:
+            self.hardware = Hardware()
+
+        def run(self) -> None:
+            events.append("run")
+
+    monkeypatch.setattr(app_module, "load_config", lambda path: object())
+    monkeypatch.setattr(app_module, "DGXFanApp", ReturningApp)
+    monkeypatch.setattr(app_module.sys, "stdin", SimpleNamespace(isatty=lambda: (_ for _ in ()).throw(OSError())))
+
+    main(["--config", "unused.toml"])
+    assert events == ["run", "release"]
 
 
 def test_terminal_restore_failure_is_contained_and_hardware_releases(monkeypatch: pytest.MonkeyPatch) -> None:

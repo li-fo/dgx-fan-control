@@ -19,11 +19,11 @@ from .models import ControlSnapshot, EndpointSnapshot
 from .ui import FanAppUI
 
 
-@dataclass(frozen=True)
+@dataclass
 class _TerminalState:
-    """The exact POSIX state of the interactive stdin descriptor, if available."""
+    """The exact POSIX state of an owned duplicate of interactive stdin."""
 
-    fd: int
+    fd: int | None
     attributes: list[Any]
     blocking: bool
 
@@ -34,33 +34,54 @@ def _capture_terminal_state() -> _TerminalState | None:
     Textual owns normal terminal lifecycle.  This is deliberately only a
     best-effort fallback for an interrupted or emulator-specific teardown.
     """
-    if os.name != "posix" or not sys.stdin.isatty():
+    if os.name != "posix":
         return None
-    if not all(hasattr(os, name) for name in ("get_blocking", "set_blocking")):
+    if not all(hasattr(os, name) for name in ("close", "dup", "get_blocking", "set_blocking")):
         return None
+    duplicate_fd: int | None = None
     try:
         import termios
 
-        fd = sys.stdin.fileno()
-        return _TerminalState(fd, copy.deepcopy(termios.tcgetattr(fd)), os.get_blocking(fd))
-    except (ImportError, OSError, ValueError):
+        if not sys.stdin.isatty():
+            return None
+        duplicate_fd = os.dup(sys.stdin.fileno())
+        return _TerminalState(
+            duplicate_fd,
+            copy.deepcopy(termios.tcgetattr(duplicate_fd)),
+            os.get_blocking(duplicate_fd),
+        )
+    except (AttributeError, ImportError, OSError, ValueError):
+        if duplicate_fd is not None:
+            try:
+                os.close(duplicate_fd)
+            except OSError:
+                pass
         return None
 
 
 def _restore_terminal_state(state: _TerminalState | None) -> None:
     """Restore a captured terminal state without obscuring application errors."""
-    if state is None:
+    if state is None or state.fd is None:
         return
+    fd = state.fd
     try:
         import termios
 
-        termios.tcsetattr(state.fd, termios.TCSANOW, state.attributes)
+        termios.tcsetattr(fd, termios.TCSANOW, state.attributes)
     except (ImportError, OSError, ValueError):
         pass
-    try:
-        os.set_blocking(state.fd, state.blocking)
-    except (OSError, ValueError, AttributeError):
-        pass
+    finally:
+        try:
+            os.set_blocking(fd, state.blocking)
+        except (OSError, ValueError, AttributeError):
+            pass
+        finally:
+            try:
+                os.close(fd)
+            except (AttributeError, OSError):
+                pass
+            finally:
+                state.fd = None
 
 
 class DGXFanApp(App[None]):

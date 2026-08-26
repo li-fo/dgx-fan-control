@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 import select
 import signal
@@ -16,6 +17,9 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX PTY APIs are r
 if os.name == "posix":
     import pty
     import termios
+    import tty
+
+from dgx_fan import app as app_module
 
 
 def _config() -> str:
@@ -81,6 +85,54 @@ def _read_until(fd: int, marker: bytes, deadline: float) -> bytes:
     raise AssertionError(f"PTY output did not contain {marker!r}: {bytes(output)!r}")
 
 
+def _stop_process_group(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=2)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait(timeout=2)
+
+
+def test_capture_restore_restores_complete_state_and_closes_duplicate(monkeypatch: pytest.MonkeyPatch) -> None:
+    master, slave = pty.openpty()
+    try:
+        before = copy.deepcopy(termios.tcgetattr(slave))
+        blocking = os.get_blocking(slave)
+        stdin = type("PTYStdin", (), {"isatty": lambda self: True, "fileno": lambda self: slave})()
+        monkeypatch.setattr(app_module.sys, "stdin", stdin)
+
+        state = app_module._capture_terminal_state()
+        assert state is not None and state.fd is not None
+        duplicate_fd = state.fd
+        tty.setraw(slave)
+        os.set_blocking(slave, not blocking)
+        assert termios.tcgetattr(slave) != before or os.get_blocking(slave) != blocking
+
+        app_module._restore_terminal_state(state)
+
+        assert termios.tcgetattr(slave) == before
+        assert os.get_blocking(slave) == blocking
+        assert state.fd is None
+        with pytest.raises(OSError):
+            os.fstat(duplicate_fd)
+    finally:
+        try:
+            os.close(master)
+        finally:
+            os.close(slave)
+
+
 def test_cli_quit_restores_posix_terminal_and_accepts_sentinel(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(_config())
@@ -102,21 +154,24 @@ def test_cli_quit_restores_posix_terminal_and_accepts_sentinel(tmp_path: Path) -
             stderr=slave,
             start_new_session=True,
         )
-        _read_until(master, b"DGX Fan Controller", time.monotonic() + 10)
+        _read_until(master, b"DGX Fan Controller", time.monotonic() + 6)
         os.write(master, b"\x11")  # Textual's confirmed default Quit binding: Ctrl+Q.
 
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 3
         while time.monotonic() < deadline and _pty_flags(slave) != before:
             time.sleep(0.05)
         assert _pty_flags(slave) == before
 
         os.write(master, b"restored-input\n")
-        output = _read_until(master, b"SENTINEL:restored-input", time.monotonic() + 5)
+        output = _read_until(master, b"SENTINEL:restored-input", time.monotonic() + 3)
         assert b"restored-input" in output  # Canonical shell input was echoed after the app quit.
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=3) == 0
     finally:
-        if process is not None and process.poll() is None:
-            os.killpg(process.pid, signal.SIGTERM)
-            process.wait(timeout=5)
-        os.close(master)
-        os.close(slave)
+        try:
+            if process is not None:
+                _stop_process_group(process)
+        finally:
+            try:
+                os.close(master)
+            finally:
+                os.close(slave)
