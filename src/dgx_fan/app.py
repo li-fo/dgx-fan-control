@@ -99,7 +99,12 @@ class DGXFanApp(App[None]):
         self._poll_task: Task[None] | None = None
 
     def compose(self) -> ComposeResult:
-        yield FanAppUI(str(self.config.path), self.toggle_power, self.config.control.emergency_temperature_celsius)
+        yield FanAppUI(
+            str(self.config.path),
+            self.toggle_power,
+            self.config.control.emergency_temperature_celsius,
+            self.config.collection.interval_seconds,
+        )
 
     async def on_mount(self) -> None:
         self.hardware = create_hardware(self.config.hardware)

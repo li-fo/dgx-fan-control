@@ -25,7 +25,8 @@ class HistoryPoint:
 class DashboardHistory:
     """Revision-deduplicated, bounded in-memory metric history."""
 
-    def __init__(self) -> None:
+    def __init__(self, collection_interval_seconds: float) -> None:
+        self.collection_interval_seconds = collection_interval_seconds
         self.points: dict[tuple[str, str, str], list[HistoryPoint]] = defaultdict(list)
         self.last_seen: dict[tuple[str, str], float] = {}
         self.revisions: dict[str, int] = {}
@@ -60,11 +61,28 @@ class DashboardHistory:
 
     def area(self, endpoint_id: str, gpu: str, metric: str, now: float, width: int, maximum: float) -> list[str]:
         bins: list[list[float]] = [[] for _ in range(width)]
+        latest_at: list[float | None] = [None for _ in range(width)]
         cutoff = now - HISTORY_SECONDS
         for point in self.points.get((endpoint_id, gpu, metric), []):
             if point.at >= cutoff:
-                bins[min(width - 1, int((point.at - cutoff) / HISTORY_SECONDS * width))].append(point.value)
+                index = min(width - 1, int((point.at - cutoff) / HISTORY_SECONDS * width))
+                bins[index].append(point.value)
+                latest = latest_at[index]
+                latest_at[index] = point.at if latest is None else max(latest, point.at)
         values = [None if not group else (max(group) if metric == "temp" else sum(group) / len(group) if metric == "util" else group[-1]) for group in bins]
+        # A DCGM sample represents the preceding interval. Step-fill only the
+        # expected short wait for its successor; longer holes stay observable.
+        bin_seconds = HISTORY_SECONDS / width
+        hold_seconds = self.collection_interval_seconds * 1.5
+        previous_value: float | None = None
+        previous_at: float | None = None
+        for index, value in enumerate(values):
+            if value is not None:
+                previous_value, previous_at = value, latest_at[index]
+                continue
+            bin_start = cutoff + index * bin_seconds
+            if previous_value is not None and previous_at is not None and bin_start - previous_at <= hold_seconds:
+                values[index] = previous_value
         rows: list[str] = []
         for row in range(PLOT_HEIGHT):
             threshold = (PLOT_HEIGHT - 1 - row) / (PLOT_HEIGHT - 1) * maximum
@@ -87,11 +105,11 @@ class PowerButton(Button):
 
 
 class FanAppUI(Static):
-    def __init__(self, config_path: str, toggle: Callable[[], None], emergency_temperature: float) -> None:
+    def __init__(self, config_path: str, toggle: Callable[[], None], emergency_temperature: float, collection_interval_seconds: float) -> None:
         super().__init__()
         self.config_path, self.toggle, self.emergency_temperature = config_path, toggle, emergency_temperature
         self.snapshot: ControlSnapshot | None = None
-        self.history = DashboardHistory()
+        self.history = DashboardHistory(collection_interval_seconds)
         self.panels: dict[str, Static] = {}
         self.last_render_time: float | None = None
         self.last_signature: tuple[tuple[str, int], ...] | None = None
@@ -150,14 +168,12 @@ class FanAppUI(Static):
             keys = sorted(key for source, key in self.history.last_seen if source == endpoint.endpoint_id)
             for key in keys:
                 gpu = current.get((endpoint.endpoint_id, key))
-                label = f"{gpu.key} {gpu.name}" if gpu else f"{key} (last seen)"
                 mem = "N/A"
                 if gpu is not None and gpu.memory_used_mib is not None and gpu.memory_total_mib is not None and gpu.memory_total_mib > 0:
                     mem = f"{gpu.memory_used_mib:.0f}/{gpu.memory_total_mib:.0f} MiB ({gpu.memory_used_mib / gpu.memory_total_mib * 100:.0f}%)"
                 util = "N/A" if gpu is None or gpu.utilization_percent is None else f"{gpu.utilization_percent:.0f}%"
                 temp = "N/A" if gpu is None or gpu.temperature_celsius is None else f"{gpu.temperature_celsius:.1f} C"
                 plot_width = max(1, available - 7)
-                lines.append(label)
                 for metric, value, maximum in (("MEM", mem, 100), ("UTIL", util, 100), ("TEMP", temp, max(100, self.emergency_temperature))):
                     chart = self.history.area(endpoint.endpoint_id, key, metric.lower(), now, max(1, plot_width - 2), maximum)
                     inner = max(len(row) for row in chart)

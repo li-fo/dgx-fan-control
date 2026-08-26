@@ -18,6 +18,7 @@ def test_ui_has_tabs_and_power_toggle() -> None:
         async with app.run_test() as pilot:
             assert app.query_one("#dashboard")
             assert app.query_one("#fan-control")
+            assert app.query_one(FanAppUI).history.collection_interval_seconds == config.collection.interval_seconds
             app.query_one("#power-toggle", Button).press()
             await pilot.pause()
             assert not app.controller.power
@@ -52,7 +53,7 @@ def test_poll_exception_is_supervised_and_unmount_cleans_up(monkeypatch) -> None
 
 
 def test_history_deduplicates_revisions_preserves_gaps_and_prunes_missing_gpu() -> None:
-    history = DashboardHistory()
+    history = DashboardHistory(2)
     gpu = GPUStat("GPU-a", "A100", memory_used_mib=40, utilization_percent=50, temperature_celsius=60)
     history.append("one", 1, (gpu,), 0)
     history.append("one", 1, (gpu,), 0.25)
@@ -66,7 +67,7 @@ def test_history_deduplicates_revisions_preserves_gaps_and_prunes_missing_gpu() 
 
 
 def test_memory_history_is_normalized_and_zero_is_not_a_gap() -> None:
-    history = DashboardHistory()
+    history = DashboardHistory(2)
     gpu = GPUStat("GPU-a", "A100", memory_used_mib=50, memory_total_mib=100, utilization_percent=0, temperature_celsius=0)
     history.append("one", 1, (gpu,), 120)
     assert history.points[("one", "GPU-a", "mem")][0].value == 50
@@ -82,7 +83,7 @@ def test_area_renderer_locks_geometry_axis_gaps_and_bin_reducers() -> None:
         return HistoryPoint((bin_index + 0.5) / width * 120, value)
 
     for width, expected_positions in ((72, (5, 38, 56, 73)), (113, (5, 58, 86, 113))):
-        history = DashboardHistory()
+        history = DashboardHistory(2)
         # Bin 1 is intentionally absent; bins 2..5 prove zero and area height.
         history.points[("one", "GPU-a", "util")] = [
             point_for_bin(width, 2, 0),
@@ -107,7 +108,7 @@ def test_area_renderer_locks_geometry_axis_gaps_and_bin_reducers() -> None:
         assert positions[0] == 5 and axis.rstrip().endswith("now")
         assert all(positions[index] + len(label) <= positions[index + 1] for index, label in enumerate(("120s", "60s", "30s")))
 
-    reducers = DashboardHistory()
+    reducers = DashboardHistory(2)
     width = 72
     reducers.points[("one", "GPU-a", "mem")] = [point_for_bin(width, 10, 10), point_for_bin(width, 10, 80)]
     reducers.points[("one", "GPU-a", "util")] = [point_for_bin(width, 10, 10), point_for_bin(width, 10, 90)]
@@ -124,7 +125,7 @@ def test_area_renderer_locks_geometry_axis_gaps_and_bin_reducers() -> None:
 
 class _DashboardApp(App[None]):
     def compose(self) -> ComposeResult:
-        yield FanAppUI("config.toml", lambda: None, 75)
+        yield FanAppUI("config.toml", lambda: None, 75, 2)
 
 
 def test_panels_are_ordered_retained_and_deduplicated() -> None:
@@ -154,7 +155,7 @@ def test_panels_are_ordered_retained_and_deduplicated() -> None:
             assert len(rendered) == 2
             assert "A endpoint" in rendered[0] and "Z endpoint" in rendered[1]
             assert "N/A" in rendered[1]
-            assert "GPU-a (last seen)" in rendered[0]
+            assert "GPU-a" not in rendered[0] and "A100" not in rendered[0] and "(last seen)" not in rendered[0]
             assert len(ui.history.points[("dgx:one", "GPU-a", "util")]) == 1
 
     asyncio.run(exercise())
@@ -223,6 +224,62 @@ def test_dashboard_signature_gates_charts_but_not_fast_status_updates(monkeypatc
             ui.update_snapshot(snapshot((a2,)), 5.25)
             assert len(renders) == before_resize_renders + 1
             assert len(ui.history.points[("a", "GPU-a", "util")]) == before_resize_count
+
+    asyncio.run(exercise())
+
+
+def test_area_step_fills_only_the_configured_cadence_and_preserves_reducers() -> None:
+    """Expected DCGM waits are continuous; longer missing/stale periods stay blank."""
+    history = DashboardHistory(2)
+    now = 120.0
+    history.points[("one", "GPU-a", "util")] = [HistoryPoint(0, 25), HistoryPoint(2, 50), HistoryPoint(4, 75)]
+    normal = history.area("one", "GPU-a", "util", now, 120, 100)[4][5:]
+    assert all(column != " " for column in normal[:5])
+
+    history.points[("one", "GPU-a", "temp")] = [HistoryPoint(0, 60), HistoryPoint(8, 80)]
+    outage = history.area("one", "GPU-a", "temp", now, 120, 100)[4][5:]
+    assert outage[:4].count(" ") == 0
+    assert outage[4:8] == "    "
+    assert outage[8] != " "
+
+    history.points[("one", "GPU-a", "mem")] = [HistoryPoint(0, 0)]
+    isolated = history.area("one", "GPU-a", "mem", now, 120, 100)[4][5:]
+    assert isolated[:4] == "▁▁▁▁"
+    assert isolated[4] == " "
+
+    # Reducers run before fill: all samples share bin 10, so the visible height
+    # distinguishes MEM-last (10), UTIL-average (50), and TEMP-max (90).
+    points = [HistoryPoint(10.1, 90), HistoryPoint(10.9, 10)]
+    history.points[("one", "GPU-a", "mem")] = points
+    history.points[("one", "GPU-a", "util")] = points
+    history.points[("one", "GPU-a", "temp")] = points
+    heights = {
+        metric: sum(row[5 + 10] != " " for row in history.area("one", "GPU-a", metric, now, 120, 100)[:5])
+        for metric in ("mem", "util", "temp")
+    }
+    assert heights == {"mem": 1, "util": 3, "temp": 4}
+
+
+def test_compact_gpu_groups_have_three_boxes_each_without_identity_lines() -> None:
+    app = _DashboardApp()
+    gpus = (
+        GPUStat("GPU-z", "H100", memory_used_mib=20, memory_total_mib=100, utilization_percent=10, temperature_celsius=30),
+        GPUStat("GPU-a", "A100", memory_used_mib=50, memory_total_mib=100, utilization_percent=20, temperature_celsius=40),
+    )
+    snapshot = ControlSnapshot(20, "curve", "AUTO ON", 40, 0, (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")), (EndpointSnapshot("one", "One", True, 0, gpus=gpus, sample_revision=1),))
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 24)) as pilot:
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 1)
+            await pilot.pause()
+            lines = str(next(iter(ui.query(".dgx-panel"))).render()).splitlines()
+            assert lines[0] == "One" and "GPU-" not in "\n".join(lines) and "A100" not in "\n".join(lines) and "H100" not in "\n".join(lines)
+            assert sum(line.startswith("┌ ") for line in lines) == 6
+            assert "" not in lines
+            for index, line in enumerate(lines):
+                if line.startswith("┌ "):
+                    assert lines[index + 7].startswith("└")
 
     asyncio.run(exercise())
 
