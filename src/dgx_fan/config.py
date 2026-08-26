@@ -52,6 +52,8 @@ class HardwareConfig:
     pulses_per_revolution: tuple[int, int]
     startup_boost_seconds: float
     stall_timeout_seconds: float
+    pwm_chip_path: str = "/sys/class/pwm/pwmchip0"
+    gpio_chip_path: str = "/dev/gpiochip0"
 
 
 @dataclass(frozen=True)
@@ -272,6 +274,12 @@ def load_config(path: Path) -> AppConfig:
     inverted = hardware.get("pwm_inverted")
     if not isinstance(inverted, bool):
         raise ConfigError("hardware.pwm_inverted must be true or false")
+    pwm_chip_path = hardware.get("pwm_chip_path", "/sys/class/pwm/pwmchip0")
+    gpio_chip_path = hardware.get("gpio_chip_path", "/dev/gpiochip0")
+    if not isinstance(pwm_chip_path, str) or not pwm_chip_path.startswith("/"):
+        raise ConfigError("hardware.pwm_chip_path must be an absolute path")
+    if not isinstance(gpio_chip_path, str) or not gpio_chip_path.startswith("/"):
+        raise ConfigError("hardware.gpio_chip_path must be an absolute path")
     return AppConfig(
         path,
         tuple(endpoints),
@@ -288,6 +296,8 @@ def load_config(path: Path) -> AppConfig:
             _number(
                 hardware.get("stall_timeout_seconds"), "hardware.stall_timeout_seconds", minimum=0.1
             ),
+            pwm_chip_path,
+            gpio_chip_path,
         ),
         dashboard_colors,
     )

@@ -42,12 +42,13 @@ speed_percent = 80
 speed_percent = 100
 
 [hardware]
-# Use fake on development machines. raspberry-pi imports pigpio lazily at runtime.
+# Use fake on development machines. raspberry-pi uses Linux PWM and libgpiod lazily at runtime.
 backend = "fake"
 # Fan 1: BCM18 / physical pin 12 (PWM0); Fan 2: BCM19 / physical pin 35 (PWM1).
 pwm_gpio_bcm = [18, 19]
 pwm_frequency_hz = 25000
-pwm_inverted = true
+# Direct Noctua NF-A6x25 5V PWM wiring is non-inverted.
+pwm_inverted = false
 tach_gpio_bcm = [23, 24]
 pulses_per_revolution = [2, 2]
 startup_boost_seconds = 1.0

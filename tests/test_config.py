@@ -60,8 +60,24 @@ def test_load_valid_config(tmp_path: Path) -> None:
     assert config.control.stages[-1].max_temperature_celsius is None
     assert config.hardware.backend == "fake"
     assert config.hardware.pwm_gpio_bcm == (18, 19)
+    assert config.hardware.pwm_chip_path == "/sys/class/pwm/pwmchip0"
+    assert config.hardware.gpio_chip_path == "/dev/gpiochip0"
     assert config.control.fan_endpoint_ids == ("one", "one")
     assert config.dashboard_colors == DashboardColors()
+
+
+def test_loads_optional_linux_device_paths_without_schema_change(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        _config()
+        + """
+pwm_chip_path = "/tmp/pwmchip0"
+gpio_chip_path = "/tmp/gpiochip0"
+"""
+    )
+    config = load_config(path)
+    assert config.hardware.pwm_chip_path == "/tmp/pwmchip0"
+    assert config.hardware.gpio_chip_path == "/tmp/gpiochip0"
 
 
 def test_loads_partial_dashboard_colors_and_normalizes_values(tmp_path: Path) -> None:

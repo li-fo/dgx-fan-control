@@ -30,7 +30,7 @@ uv run dgx-fan --config config.toml
 
 시스템 `/usr/bin/python`을 사용하면 `src/` 레이아웃 패키지를 보지 못할 수 있습니다. 설정 탐색 순서는 `--config`, `DGX_FAN_CONFIG`, `./config.toml`입니다. 설정을 수정하면 앱을 재시작하세요. MVP에는 설정 UI와 hot reload가 없습니다.
 
-개발 PC에서는 `hardware.backend = "fake"`로 시작하세요. Pi에서는 `.[raspberry-pi]`를 설치하고 `pigpiod`를 실행한 뒤, 배선을 확인한 다음에만 `raspberry-pi` backend로 전환하세요.
+개발 PC에서는 `hardware.backend = "fake"`로 시작하세요. Pi에서는 `.[raspberry-pi]`를 설치하고 Linux PWM overlay를 활성화한 뒤, 배선을 확인한 다음에만 `raspberry-pi` backend로 전환하세요.
 
 ## 설정과 안전 동작
 
@@ -74,17 +74,23 @@ Fan 2 green tach ---------------- BCM24 / 물리 18
 
 팬 한 개는 typical 0.187 A, maximum 0.26 A이고 두 개는 typical 0.374 A, maximum 0.52 A입니다. 물리 2/4는 하나의 Pi 5 V rail이므로 Pi/USB 부하와 합산해 전원·케이블·커넥터 여유를 확인하세요. 외부 5 V 팬 전원은 GND를 Pi와 공통으로 하되, Pi가 다른 전원으로 켜진 상태에서 +5 V를 Pi 물리 2/4에 되먹이지 마세요.
 
-### pigpio 소유권, daemon, 첫 가동
+### Linux PWM/libgpiod 소유권과 첫 가동
 
-코드는 설정한 25 kHz로 BCM18(PWM0)과 BCM19(PWM1)에 pigpio `hardware_PWM`을 호출합니다. 이 pigpio backend에는 `dtoverlay=pwm` 또는 `dtoverlay=pwm-2chan`을 추가하지 마세요. OS 이미지나 다른 프로젝트에서 PWM overlay를 물려받았다면, 운영자가 배타적 소유권과 호환성을 별도로 확인한 경우가 아니면 실제 가동 전에 제거/비활성화하세요. PWM peripheral/channel은 공유 하드웨어 자원이므로 analogue audio나 다른 PWM 소비자를 동시에 실행하지 마세요. 아래 Raspberry Pi overlay 문서는 이 backend의 설정 요구 사항이 아니라 핀/channel/resource 사실을 확인하기 위한 참고 자료입니다.
-
-실제 backend 전환 전 물리 매핑, Pi extra, `pigpiod`, 설정을 확인하세요.
+이 backend는 pigpiod를 사용하지 않습니다. 커널 Linux PWM sysfs와 libgpiod falling-edge tach 입력(내부 pull-up)을 사용합니다. 현재 Raspberry Pi OS에서는 `/boot/firmware/config.txt`에 다음 overlay를 추가하고 재부팅하세요. PWM channel은 공유 자원이므로 analogue audio나 다른 PWM 소비자를 동시에 실행하지 마세요.
 
 ```bash
 pinout
 uv pip install -e '.[raspberry-pi]'
-sudo systemctl enable --now pigpiod
-uv run dgx-fan --config config.toml
+sudoedit /boot/firmware/config.txt
+sudo reboot
+ls -l /sys/class/pwm/pwmchip0 /dev/gpiochip0
+sudo .venv/bin/dgx-fan --config /absolute/path/config.toml
+```
+
+재부팅 전에 `/boot/firmware/config.txt`에 다음 주석 없는 줄을 추가하세요.
+
+```ini
+dtoverlay=pwm-2chan,pin=18,pin2=19,func=2,func2=2
 ```
 
 ```toml
@@ -96,7 +102,8 @@ pwm_inverted = false
 tach_gpio_bcm = [23, 24]
 ```
 
-팬은 한 개씩 가동하세요. 전원 없는 배선과 5 V/공통 GND를 확인한 뒤 Fan 1을 연결하고 약 25 kHz non-inverted duty, RPM, 곡선 반응을 확인한 다음 Fan 2를 추가하세요. endpoint 손실, tach 분리/stall, 앱 종료도 시험하세요. 소프트웨어는 문서화된 안전 상태에서 100% duty를 명령합니다. 현재 release는 `hardware_PWM(gpio, 0, 0)`만 호출하므로 GPIO input/Hi-Z 전환 또는 종료 후 full-speed를 보장하지 않습니다. 무인 운용 전 실기 측정이 필요합니다.
+프로세스는 PWM sysfs 쓰기와 `/dev/gpiochip0` 접근 권한이 필요합니다. 적절한 udev/device-access 정책을 구성하거나 첫 가동은 `sudo`로 하세요. 팬은 한 개씩 가동하세요. 전원 없는 배선과 5 V/공통 GND를 확인한 뒤 Fan 1을 연결하고 약 25 kHz non-inverted duty, RPM, 곡선 반응을 실측한 다음 Fan 2를 추가하세요. endpoint 손실, tach 분리/stall, 앱 종료도 시험하세요. release는 두 PWM에 full duty를 명령하고 enabled 상태를 유지하지만, 이 저장소는 pinmux·파형·강제 종료 후 물리 full-speed를 증명하지 않습니다. 무인 운용 전 실기 측정이 필요합니다. 롤백은 앱을 중지하고 전원을 제거한 후 배선을 확인하고, 다른 PWM 소비자가 없을 때만 overlay를 제거하고 재부팅한 뒤 안전 상태를 재확인하는 절차입니다.
+
 
 GPIO, 케이블, 커넥터, 전원이 뜨거워지거나, GPIO가 3.3 V보다 높은 전압을 보거나, 극성이 불확실하거나, 팬이 시작하지 않거나, 측정 전류가 전원/케이블 정격을 넘으면 즉시 전원을 제거하고 중지하세요. 이 프로젝트는 알 수 없는 팬, 조립된 회로, 실시간 DGX 데이터를 검증할 수 없습니다.
 
@@ -107,7 +114,8 @@ GPIO, 케이블, 커넥터, 전원이 뜨거워지거나, GPIO가 3.3 V보다 �
 - [Noctua PWM specifications white paper](https://cdn.noctua.at/media/Noctua_PWM_specifications_white_paper.pdf)
 - [Raspberry Pi 4 Model B 데이터시트 및 핀아웃](https://datasheets.raspberrypi.com/rpi4/raspberry-pi-4-datasheet.pdf)
 - [공식 Raspberry Pi firmware overlay README](https://github.com/raspberrypi/firmware/blob/master/boot/overlays/README)
-- [pigpio `gpioHardwarePWM` 구현(GPIO mode와 PWM clock 설정)](https://github.com/joan2937/pigpio/blob/master/pigpio.c#L12319-L12410)
+- [Linux PWM sysfs 문서](https://docs.kernel.org/driver-api/pwm.html)
+- [libgpiod Python bindings](https://libgpiod.readthedocs.io/)
 위 1차 자료는 명시된 Noctua 모델만 뒷받침하며, 조립 회로나 현재 release 동작을 실기 검증하지는 않습니다.
 
 ## MVP 한계

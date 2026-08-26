@@ -30,7 +30,7 @@ uv run dgx-fan --config config.toml
 
 Do not substitute the system `/usr/bin/python` for the activated environment: it will not see this repository's `src/`-layout package unless `dgx-fan` has been installed into that Python environment. Configuration lookup is `--config`, then `DGX_FAN_CONFIG`, then `./config.toml`. Edit the file and restart the application; the MVP intentionally has no settings UI or hot reload.
 
-Start with `hardware.backend = "fake"` on a development machine. Its default tach simulation reports plausible running RPM while PWM is nonzero; tests can explicitly inject `NO TACH` readings for stall probes. For a Pi install `.[raspberry-pi]`, run `pigpiod`, and change the backend to `raspberry-pi` only after wiring has been checked.
+Start with `hardware.backend = "fake"` on a development machine. Its default tach simulation reports plausible running RPM while PWM is nonzero; tests can explicitly inject `NO TACH` readings for stall probes. For a Pi install `.[raspberry-pi]`, enable the kernel PWM overlay, and change the backend to `raspberry-pi` only after wiring has been checked.
 
 ## Configuration and safety
 
@@ -74,17 +74,23 @@ The app enables the Pi's internal 3.3 V pull-up (`PUD_UP`) on these open-collect
 
 Each fan is 0.187 A typical and 0.26 A maximum; two are 0.374 A typical and 0.52 A maximum. Physical pins 2/4 are one Pi 5 V rail: include this load with the Pi and USB load, and verify supply/cable/connector headroom. With an external 5 V fan supply, connect ground to Pi ground but never connect its +5 V back to Pi pins 2/4 while the Pi has another supply (backfeed risk).
 
-### pigpio ownership, daemon, and first bring-up
+### Linux PWM and libgpiod first bring-up
 
-The code calls pigpio `hardware_PWM` on BCM18 (PWM0) and BCM19 (PWM1) at the configured 25 kHz. For this pigpio backend, do **not** add `dtoverlay=pwm` or `dtoverlay=pwm-2chan`. If either PWM overlay is inherited from an image or another project, remove/disable it before live use unless an operator has independently established exclusive ownership and compatibility. Do not run analogue audio or another PWM consumer concurrently: the PWM peripheral/channels are shared hardware resources. The Raspberry Pi overlay documentation is linked below for pin/channel/resource facts, not as a setup requirement for this backend.
-
-Verify the physical mapping, install the Pi extra, start `pigpiod`, and check the configuration before selecting the real backend:
+This backend does not use pigpiod. It writes kernel Linux PWM sysfs channels and uses libgpiod falling-edge events with an internal pull-up for tach. Add this overlay to the active boot configuration (`/boot/firmware/config.txt` on current Raspberry Pi OS images), then reboot:
 
 ```bash
 pinout
 uv pip install -e '.[raspberry-pi]'
-sudo systemctl enable --now pigpiod
-uv run dgx-fan --config config.toml
+sudoedit /boot/firmware/config.txt
+sudo reboot
+ls -l /sys/class/pwm/pwmchip0 /dev/gpiochip0
+sudo .venv/bin/dgx-fan --config /absolute/path/config.toml
+```
+
+Add this uncommented line to `/boot/firmware/config.txt` before the reboot:
+
+```ini
+dtoverlay=pwm-2chan,pin=18,pin2=19,func=2,func2=2
 ```
 
 ```toml
@@ -96,7 +102,8 @@ pwm_inverted = false
 tach_gpio_bcm = [23, 24]
 ```
 
-Bring up one fan at a time: inspect unpowered wiring, verify 5 V/common ground, connect Fan 1, then confirm approximately 25 kHz non-inverted duty, RPM, and curve response before adding Fan 2. Exercise endpoint loss, disconnected tach/stall, and app exit. The software commands 100% duty for its documented safety states. Current release calls `hardware_PWM(gpio, 0, 0)` and does **not** prove a GPIO input/Hi-Z transition or full-speed-after-quit on live hardware; measure that behavior before unattended use.
+The process needs permission to write PWM sysfs and open `/dev/gpiochip0`; use an appropriate device-access/udev policy or run the initial bring-up with `sudo`. Do not run analogue audio or another PWM consumer at the same time: PWM channels are shared hardware. Bring up one fan at a time: inspect unpowered wiring, verify 5 V/common ground, connect Fan 1, then measure approximately 25 kHz non-inverted duty, RPM, and curve response before adding Fan 2. Exercise endpoint loss, disconnected tach/stall, and app exit. On release the app commands both channels to full duty and leaves PWM enabled, but this repository cannot prove pinmux, waveform, process-kill, or physical full-speed behavior; measure it before unattended use. To roll back, stop the app, remove power before rewiring, remove the overlay only when no other consumer owns PWM, reboot, and verify the fans' safe state.
+
 
 Stop and remove power if any GPIO, cable, connector, or supply becomes hot; a Pi GPIO is above 3.3 V; polarity is uncertain; a fan will not start; or measured current exceeds a supply/cable rating. This project cannot validate an unknown fan, assembled circuit, or live DGX data.
 
@@ -107,7 +114,8 @@ Stop and remove power if any GPIO, cable, connector, or supply becomes hot; a Pi
 - [Noctua PWM specifications white paper](https://cdn.noctua.at/media/Noctua_PWM_specifications_white_paper.pdf)
 - [Raspberry Pi 4 Model B datasheet and pinout](https://datasheets.raspberrypi.com/rpi4/raspberry-pi-4-datasheet.pdf)
 - [Official Raspberry Pi firmware overlay README](https://github.com/raspberrypi/firmware/blob/master/boot/overlays/README)
-- [pigpio `gpioHardwarePWM` implementation (sets GPIO mode and PWM clock)](https://github.com/joan2937/pigpio/blob/master/pigpio.c#L12319-L12410)
+- [Linux PWM sysfs documentation](https://docs.kernel.org/driver-api/pwm.html)
+- [libgpiod Python bindings](https://libgpiod.readthedocs.io/)
 The primary sources above support only the stated Noctua model. They do not verify this assembled circuit or the current release behavior.
 
 ## MVP limitations
