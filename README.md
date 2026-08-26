@@ -10,10 +10,23 @@ Use Python 3.11+ and install the project with its development dependencies:
 uv venv
 uv pip install -e '.[dev]'
 cp config.example.toml config.toml
-python -m dgx_fan --config config.toml
 ```
 
-The console entry point is also available as `dgx-fan --config config.toml`. Configuration lookup is `--config`, then `DGX_FAN_CONFIG`, then `./config.toml`. Edit the file and restart the application; the MVP intentionally has no settings UI or hot reload.
+Activate that virtual environment before using its Python or console entry point:
+
+```bash
+source .venv/bin/activate
+python -m dgx_fan --config config.toml
+# or: dgx-fan --config config.toml
+```
+
+Alternatively, run without activation through uv's managed project environment:
+
+```bash
+uv run dgx-fan --config config.toml
+```
+
+Do not substitute the system `/usr/bin/python` for the activated environment: it will not see this repository's `src/`-layout package unless `dgx-fan` has been installed into that Python environment. Configuration lookup is `--config`, then `DGX_FAN_CONFIG`, then `./config.toml`. Edit the file and restart the application; the MVP intentionally has no settings UI or hot reload.
 
 Start with `hardware.backend = "fake"` on a development machine. Its default tach simulation reports plausible running RPM while PWM is nonzero; tests can explicitly inject `NO TACH` readings for stall probes. For a Pi install `.[raspberry-pi]`, run `pigpiod`, and change the backend to `raspberry-pi` only after wiring has been checked.
 
