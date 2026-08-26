@@ -12,6 +12,8 @@ from textual.widgets import Button, Footer, Header, Static, TabbedContent, TabPa
 from .models import ControlSnapshot, GPUStat
 
 HISTORY_SECONDS = 120.0
+MIN_DASHBOARD_WIDTH = 79
+PLOT_HEIGHT = 5
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,23 @@ class DashboardHistory:
             rendered.append(glyphs[min(7, max(0, round(value / maximum * 7)))])
         return "".join(rendered)
 
+    def area(self, endpoint_id: str, gpu: str, metric: str, now: float, width: int, maximum: float) -> list[str]:
+        bins: list[list[float]] = [[] for _ in range(width)]
+        cutoff = now - HISTORY_SECONDS
+        for point in self.points.get((endpoint_id, gpu, metric), []):
+            if point.at >= cutoff:
+                bins[min(width - 1, int((point.at - cutoff) / HISTORY_SECONDS * width))].append(point.value)
+        values = [None if not group else (max(group) if metric == "temp" else sum(group) / len(group) if metric == "util" else group[-1]) for group in bins]
+        rows: list[str] = []
+        for row in range(PLOT_HEIGHT):
+            threshold = (PLOT_HEIGHT - row) / PLOT_HEIGHT * maximum
+            line = "".join(" " if value is None else "▁" if value == 0 and row == PLOT_HEIGHT - 1 else "█" if value >= threshold else " " for value in values)
+            label = f"{threshold:>4.0f} " if row in {0, 2, 4} else "     "
+            rows.append(label + line)
+        axis = "     120s" + " " * max(0, width // 2 - 7) + "60s" + " " * max(0, width // 4 - 3) + "30s" + " " * max(0, width // 4 - 4) + "now"
+        rows.append(axis[: width + 5])
+        return rows
+
 
 class PowerButton(Button):
     def __init__(self, callback: Callable[[], None]) -> None:
@@ -98,6 +117,7 @@ class FanAppUI(Static):
         with TabbedContent(initial="dashboard"):
             with TabPane("DGX Dashboard", id="dashboard"):
                 yield Static("Waiting for DCGM metrics…", id="error-banner")
+                yield Static(id="dashboard-warning")
                 yield VerticalScroll(id="dashboard-scroll")
             with TabPane("Fan Control", id="fan-control"), Vertical():
                 yield Static(id="fan-status")
@@ -118,6 +138,14 @@ class FanAppUI(Static):
 
     def _render_dashboard(self, snapshot: ControlSnapshot, now: float) -> None:
         scroll = self.query_one("#dashboard-scroll", VerticalScroll)
+        available = scroll.size.width
+        warning = self.query_one("#dashboard-warning", Static)
+        if available < MIN_DASHBOARD_WIDTH:
+            warning.update(f"Dashboard width {available}; at least {MIN_DASHBOARD_WIDTH} columns required for charts.")
+            scroll.display = False
+            return
+        warning.update("")
+        scroll.display = True
         active_ids = {endpoint.endpoint_id for endpoint in snapshot.endpoint_snapshots}
         for endpoint_id, stale_panel in list(self.panels.items()):
             if endpoint_id not in active_ids:
@@ -136,7 +164,8 @@ class FanAppUI(Static):
                     mem = f"{gpu.memory_used_mib:.0f}/{gpu.memory_total_mib:.0f} MiB ({gpu.memory_used_mib / gpu.memory_total_mib * 100:.0f}%)"
                 util = "N/A" if gpu is None or gpu.utilization_percent is None else f"{gpu.utilization_percent:.0f}%"
                 temp = "N/A" if gpu is None or gpu.temperature_celsius is None else f"{gpu.temperature_celsius:.1f} C"
-                lines.extend((label, f"MEM  {mem:>9} {self.history.graph(endpoint.endpoint_id, key, 'mem', now, 36, 100)}", f"UTIL {util:>9} {self.history.graph(endpoint.endpoint_id, key, 'util', now, 36, 100)}", f"TEMP {temp:>9} {self.history.graph(endpoint.endpoint_id, key, 'temp', now, 36, max(100, self.emergency_temperature))}"))
+                plot_width = max(1, available - 7)
+                lines.extend((label, f"MEM  {mem:>9}", *self.history.area(endpoint.endpoint_id, key, 'mem', now, plot_width, 100), f"UTIL {util:>9}", *self.history.area(endpoint.endpoint_id, key, 'util', now, plot_width, 100), f"TEMP {temp:>9}", *self.history.area(endpoint.endpoint_id, key, 'temp', now, plot_width, max(100, self.emergency_temperature))))
             panel = self.panels.get(endpoint.endpoint_id)
             if panel is None:
                 panel = Static(classes="dgx-panel")
