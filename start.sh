@@ -6,6 +6,11 @@ PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 CONFIG_PATH="$PROJECT_ROOT/config.toml"
 HELPER=/usr/local/libexec/dgx-fan-prepare-hardware
 
+[[ $EUID -ne 0 ]] || {
+    printf '%s\n' 'dgx-fan: run start.sh as the regular login user, not root' >&2
+    exit 1
+}
+
 if [[ "${1:-}" == "--dry-run" && $# -eq 1 ]]; then
     printf 'sudo -n %q\n' "$HELPER"
     printf '%q --config %q\n' "$PROJECT_ROOT/.venv/bin/dgx-fan" "$CONFIG_PATH"

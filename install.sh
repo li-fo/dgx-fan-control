@@ -12,6 +12,15 @@ CONFIG_PATH="$PROJECT_ROOT/config.toml"
 REBOOT=false
 DRY_RUN=false
 TEST_ROOT=""
+readonly HELPER_MARKER='# Managed by dgx-fan install.sh; do not edit.'
+readonly PROFILE_MARKER='# Managed by dgx-fan install.sh; do not edit.'
+readonly SUDOERS_MARKER='# Managed by dgx-fan install.sh; do not edit.'
+
+[[ $EUID -ne 0 ]] || { printf '%s\n' 'dgx-fan install: run as the regular login user, not root' >&2; exit 1; }
+[[ "$PROJECT_ROOT" != *$'\n'* && "$PROJECT_ROOT" != *$'\r'* ]] || {
+    printf '%s\n' 'dgx-fan install: project path must not contain a newline' >&2
+    exit 1
+}
 
 usage() {
     cat <<'EOF'
@@ -40,7 +49,11 @@ done
 if [[ -n "${DGX_FAN_TEST_ROOT:-}" ]]; then
     [[ "${DGX_FAN_INSTALL_TESTING:-}" == "1" ]] || fail 'DGX_FAN_TEST_ROOT is test-only'
     [[ "${DGX_FAN_TEST_ROOT}" = /* ]] || fail 'DGX_FAN_TEST_ROOT must be absolute'
-    TEST_ROOT=${DGX_FAN_TEST_ROOT%/}
+    [[ "${DGX_FAN_TEST_ROOT}" != / ]] || fail 'DGX_FAN_TEST_ROOT must not be /'
+    [[ -d "${DGX_FAN_TEST_ROOT}" && ! -L "${DGX_FAN_TEST_ROOT}" ]] || fail 'DGX_FAN_TEST_ROOT must be a real directory'
+    TEST_ROOT=$(realpath -e -- "${DGX_FAN_TEST_ROOT}")
+    [[ "$TEST_ROOT" == "${DGX_FAN_TEST_ROOT%/}" ]] || fail 'DGX_FAN_TEST_ROOT must not traverse a symlink'
+    [[ $(stat -c '%u' -- "$TEST_ROOT") == "$EUID" ]] || fail 'DGX_FAN_TEST_ROOT must be owned by the caller'
 fi
 
 target_path() {
@@ -105,8 +118,18 @@ from pathlib import Path
 from dgx_fan.config import load_config
 import sys
 config = load_config(Path(sys.argv[1]))
-if config.hardware.backend != "raspberry-pi":
-    raise SystemExit("hardware.backend must be \"raspberry-pi\" for install.sh")
+hardware = config.hardware
+problems = []
+if hardware.backend != "raspberry-pi":
+    problems.append("hardware.backend must be raspberry-pi")
+if hardware.pwm_gpio_bcm != (18, 19):
+    problems.append("hardware.pwm_gpio_bcm must be [18, 19]")
+if hardware.pwm_chip_path != "/sys/class/pwm/pwmchip0":
+    problems.append("hardware.pwm_chip_path must be /sys/class/pwm/pwmchip0")
+if hardware.gpio_chip_path != "/dev/gpiochip0":
+    problems.append("hardware.gpio_chip_path must be /dev/gpiochip0")
+if problems:
+    raise SystemExit("; ".join(problems))
 ' "$CONFIG_PATH"
 }
 
@@ -115,7 +138,7 @@ check_platform() {
     [[ -r /proc/device-tree/model ]] || fail 'this installer must run on Raspberry Pi OS'
     local model
     model=$(tr -d '\000' </proc/device-tree/model)
-    [[ "$model" == *'Raspberry Pi'* ]] || fail "unsupported platform: $model"
+    [[ "$model" == *'Raspberry Pi 4'* ]] || fail "unsupported platform (Raspberry Pi 4 required): $model"
     command -v raspi-config >/dev/null 2>&1 || fail 'raspi-config is required for tty1 console auto-login'
     command -v visudo >/dev/null 2>&1 || fail 'visudo is required to validate the sudoers policy'
 }
@@ -134,32 +157,53 @@ select_boot_config() {
 }
 
 install_overlay() {
-    local active line backup
-    active=$(grep -Ev '^[[:space:]]*(#|$)' "$BOOT_CONFIG" | grep -F 'dtoverlay=pwm-2chan' || true)
-    while IFS= read -r line; do
-        [[ -z "$line" || "$line" == "$OVERLAY" ]] || {
-            fail "conflicting active pwm-2chan overlay in $BOOT_CONFIG: $line"
+    local found backup context line
+    found=false
+    while IFS=$'\t' read -r context line; do
+        [[ -z "$line" ]] && continue
+        if [[ "$context" != global && "$context" != all ]]; then
+            fail "pwm-2chan overlay is conditional under [$context] in $BOOT_CONFIG; reconcile it manually"
+        fi
+        [[ "$line" == "$OVERLAY" ]] || fail "conflicting active pwm-2chan overlay in $BOOT_CONFIG: $line"
+        found=true
+    done < <(awk '
+        /^[[:space:]]*(#|$)/ { next }
+        /^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
+            section=$0
+            sub(/^[[:space:]]*\[/, "", section)
+            sub(/\][[:space:]]*$/, "", section)
+            next
         }
-    done <<<"$active"
-    if [[ -n "$active" ]] && ! grep -Fxq "$OVERLAY" "$BOOT_CONFIG"; then
-        fail "conflicting active pwm-2chan overlay in $BOOT_CONFIG"
-    fi
-    if grep -Fxq "$OVERLAY" "$BOOT_CONFIG"; then
+        {
+            line=$0
+            sub(/^[[:space:]]+/, "", line)
+            sub(/[[:space:]]+$/, "", line)
+            if (line ~ /^dtoverlay=pwm-2chan/) {
+                print (section == "" ? "global" : section) "\t" line
+            }
+        }
+    ' "$BOOT_CONFIG")
+    if [[ "$found" == true ]]; then
         note "PWM overlay already present in $BOOT_CONFIG"
         return
     fi
     backup="${BOOT_CONFIG}.dgx-fan-$(date +%Y%m%d%H%M%S).bak"
     run_root cp -- "$BOOT_CONFIG" "$backup"
-    printf '\n%s\n' "$OVERLAY" | run_root tee -a "$BOOT_CONFIG" >/dev/null
+    printf '\n[all]\n%s\n' "$OVERLAY" | run_root tee -a "$BOOT_CONFIG" >/dev/null
     note "added PWM overlay; backup: $backup"
 }
 
 write_helper() {
-    local helper
+    local helper rendered
     helper=$(target_path "/usr/local/libexec/$HELPER_NAME")
-    run_root install -d -m 0755 -- "$(dirname -- "$helper")"
-    run_root tee "$helper" >/dev/null <<'EOF'
+    rendered=$(mktemp)
+    trap 'rm -f -- "$rendered"' RETURN
+    {
+        cat <<'EOF'
 #!/bin/sh
+EOF
+        printf '%s\n' "$HELPER_MARKER"
+        cat <<'EOF'
 set -eu
 [ "$#" -eq 0 ] || { echo "dgx-fan hardware helper accepts no arguments" >&2; exit 64; }
 chip=/sys/class/pwm/pwmchip0
@@ -178,34 +222,40 @@ done
 chgrp gpio /dev/gpiochip0
 chmod g+rw /dev/gpiochip0
 EOF
-    run_root chown root:root "$helper"
-    run_root chmod 0755 "$helper"
+    } >"$rendered"
+    install_managed_file "$rendered" "$helper" "$HELPER_MARKER" 0755
+    trap - RETURN
+    rm -f -- "$rendered"
 }
 
 write_sudoers() {
     local sudoers temporary
     sudoers=$(target_path "/etc/sudoers.d/$SUDOERS_NAME")
-    temporary="${sudoers}.tmp"
-    run_root install -d -m 0750 -- "$(dirname -- "$sudoers")"
-    printf '%s ALL=(root) NOPASSWD: /usr/local/libexec/%s\n' "$INSTALL_USER" "$HELPER_NAME" | run_root tee "$temporary" >/dev/null
+    temporary=$(mktemp)
+    trap 'rm -f -- "$temporary"' RETURN
+    {
+        printf '%s\n' "$SUDOERS_MARKER"
+        printf '%s ALL=(root) NOPASSWD: /usr/local/libexec/%s\n' "$INSTALL_USER" "$HELPER_NAME"
+    } >"$temporary"
     if [[ -n "$TEST_ROOT" ]]; then
         grep -Fxq "$INSTALL_USER ALL=(root) NOPASSWD: /usr/local/libexec/$HELPER_NAME" "$temporary" || fail 'test sudoers validation failed'
     else
         run_root visudo -cf "$temporary"
     fi
-    run_root chown root:root "$temporary"
-    run_root chmod 0440 "$temporary"
-    run_root mv -f -- "$temporary" "$sudoers"
+    install_managed_file "$temporary" "$sudoers" "$SUDOERS_MARKER" 0440
+    trap - RETURN
+    rm -f -- "$temporary"
 }
 
 write_profile_hook() {
-    local hook project_quoted user_quoted
+    local hook project_quoted user_quoted rendered
     hook=$(target_path "/etc/profile.d/$PROFILE_NAME")
     project_quoted=$(posix_quote "$PROJECT_ROOT")
     user_quoted=$(posix_quote "$INSTALL_USER")
-    run_root install -d -m 0755 -- "$(dirname -- "$hook")"
+    rendered=$(mktemp)
+    trap 'rm -f -- "$rendered"' RETURN
     {
-        printf '%s\n' '# Managed by dgx-fan install.sh. Remove with ./uninstall.sh.'
+        printf '%s\n' "$PROFILE_MARKER"
         printf 'DGX_FAN_PROJECT_ROOT=%s\n' "$project_quoted"
         printf 'DGX_FAN_INSTALL_USER=%s\n' "$user_quoted"
         cat <<'EOF'
@@ -218,9 +268,47 @@ if [ "${USER:-}" = "$DGX_FAN_INSTALL_USER" ] && [ -z "${SSH_CONNECTION:-}" ] \
 fi
 unset DGX_FAN_PROJECT_ROOT DGX_FAN_INSTALL_USER
 EOF
-    } | run_root tee "$hook" >/dev/null
-    run_root chown root:root "$hook"
-    run_root chmod 0644 "$hook"
+    } >"$rendered"
+    install_managed_file "$rendered" "$hook" "$PROFILE_MARKER" 0644
+    trap - RETURN
+    rm -f -- "$rendered"
+}
+
+ensure_managed_destination() {
+    local destination=$1 marker=$2
+    if [[ -L "$destination" ]]; then
+        fail "refusing symlink destination: $destination"
+    fi
+    if [[ -e "$destination" ]]; then
+        [[ -f "$destination" ]] || fail "refusing non-regular destination: $destination"
+        if [[ -n "$TEST_ROOT" ]]; then
+            grep -Fxq "$marker" "$destination" || fail "refusing unmanaged destination: $destination"
+        else
+            run_root grep -Fxq "$marker" "$destination" || fail "refusing unmanaged destination: $destination"
+        fi
+    fi
+}
+
+install_managed_file() {
+    local source=$1 destination=$2 marker=$3 mode=$4 parent
+    ensure_managed_destination "$destination" "$marker"
+    parent=$(dirname -- "$destination")
+    if [[ -e "$parent" || -L "$parent" ]]; then
+        [[ -d "$parent" && ! -L "$parent" ]] || fail "refusing unsafe parent directory: $parent"
+    else
+        run_root install -d -m 0755 -- "$parent"
+    fi
+    if [[ -n "$TEST_ROOT" ]]; then
+        install -m "$mode" -- "$source" "$destination"
+    else
+        run_root install -o root -g root -m "$mode" -- "$source" "$destination"
+    fi
+}
+
+preflight_managed_destinations() {
+    ensure_managed_destination "$(target_path "/usr/local/libexec/$HELPER_NAME")" "$HELPER_MARKER"
+    ensure_managed_destination "$(target_path "/etc/sudoers.d/$SUDOERS_NAME")" "$SUDOERS_MARKER"
+    ensure_managed_destination "$(target_path "/etc/profile.d/$PROFILE_NAME")" "$PROFILE_MARKER"
 }
 
 configure_console_autologin() {
@@ -246,9 +334,10 @@ main() {
         note "dry run: would sync $PROJECT_ROOT/.venv, validate $CONFIG_PATH, install tty1 integration, and reboot=$REBOOT"
         return
     fi
-    "$UV_BIN" sync --locked --extra raspberry-pi --no-dev
+    "$UV_BIN" sync --project "$PROJECT_ROOT" --locked --extra raspberry-pi --no-dev
     validate_config
     select_boot_config
+    preflight_managed_destinations
     install_overlay
     run_root usermod -a -G gpio "$INSTALL_USER"
     write_helper

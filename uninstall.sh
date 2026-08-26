@@ -4,6 +4,7 @@ set -euo pipefail
 
 TEST_ROOT=""
 ASSUME_YES=false
+readonly MARKER='# Managed by dgx-fan install.sh; do not edit.'
 
 usage() {
     cat <<'EOF'
@@ -24,10 +25,15 @@ while (($#)); do
 done
 
 [[ "$ASSUME_YES" == true ]] || { usage >&2; exit 64; }
+[[ $EUID -ne 0 ]] || { echo 'dgx-fan uninstall: run as the regular login user, not root' >&2; exit 1; }
 if [[ -n "${DGX_FAN_TEST_ROOT:-}" ]]; then
     [[ "${DGX_FAN_INSTALL_TESTING:-}" == "1" ]] || { echo 'DGX_FAN_TEST_ROOT is test-only' >&2; exit 1; }
     [[ "${DGX_FAN_TEST_ROOT}" = /* ]] || { echo 'DGX_FAN_TEST_ROOT must be absolute' >&2; exit 1; }
-    TEST_ROOT=${DGX_FAN_TEST_ROOT%/}
+    [[ "${DGX_FAN_TEST_ROOT}" != / ]] || { echo 'DGX_FAN_TEST_ROOT must not be /' >&2; exit 1; }
+    [[ -d "${DGX_FAN_TEST_ROOT}" && ! -L "${DGX_FAN_TEST_ROOT}" ]] || { echo 'DGX_FAN_TEST_ROOT must be a real directory' >&2; exit 1; }
+    TEST_ROOT=$(realpath -e -- "${DGX_FAN_TEST_ROOT}")
+    [[ "$TEST_ROOT" == "${DGX_FAN_TEST_ROOT%/}" ]] || { echo 'DGX_FAN_TEST_ROOT must not traverse a symlink' >&2; exit 1; }
+    [[ $(stat -c '%u' -- "$TEST_ROOT") == "$EUID" ]] || { echo 'DGX_FAN_TEST_ROOT must be owned by the caller' >&2; exit 1; }
 fi
 
 target_path() {
@@ -37,11 +43,20 @@ run_root() {
     if [[ -n "$TEST_ROOT" ]]; then "$@"; else sudo "$@"; fi
 }
 
+status=0
 for path in \
     "$(target_path /etc/profile.d/dgx-fan-autostart.sh)" \
     "$(target_path /etc/sudoers.d/dgx-fan)" \
     "$(target_path /usr/local/libexec/dgx-fan-prepare-hardware)"; do
-    if [[ -e "$path" || -L "$path" ]]; then
+    if [[ -L "$path" || ( -e "$path" && ! -f "$path" ) ]]; then
+        printf 'dgx-fan uninstall: preserving unsafe destination: %s\n' "$path" >&2
+        status=1
+    elif [[ -f "$path" ]]; then
+        if ! grep -Fxq "$MARKER" "$path"; then
+            printf 'dgx-fan uninstall: preserving unmanaged destination: %s\n' "$path" >&2
+            status=1
+            continue
+        fi
         run_root rm -f -- "$path"
         printf 'dgx-fan uninstall: removed %s\n' "$path"
     fi
@@ -49,3 +64,4 @@ done
 
 printf '%s\n' 'dgx-fan uninstall: config.toml and PWM overlay were intentionally preserved.'
 printf '%s\n' 'Disable console auto-login with sudo raspi-config and remove the exact overlay manually if desired.'
+exit "$status"

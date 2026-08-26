@@ -35,7 +35,8 @@ Start with `hardware.backend = "fake"` on a development machine. Its default tac
 ## Raspberry Pi clone-local installation and console start
 
 For a Raspberry Pi OS console installation, clone the repository, then keep the editable
-configuration **in that clone**. `install.sh` never copies `config.toml` to `/etc`.
+configuration **in that clone**. `install.sh` never copies application `config.toml` to `/etc`;
+it does install narrowly scoped boot-integration files in `/etc`.
 
 ```bash
 git clone <repository-url> dgx-fan
@@ -46,7 +47,8 @@ cp config.example.toml config.toml
 ```
 
 `install.sh` runs `uv sync --locked --extra raspberry-pi --no-dev`, validates the clone's
-`config.toml`, adds the required dual-PWM overlay, and configures Raspberry Pi OS console
+`config.toml`, adds the required dual-PWM overlay, and configures the Raspberry Pi OS console on
+Raspberry Pi 4
 auto-login on tty1. If `config.toml` is absent, it creates it from `config.example.toml` and
 stops; edit it and run the installer again. It requires `uv`; install uv with the
 [official uv instructions](https://docs.astral.sh/uv/getting-started/installation/) first if it
@@ -129,7 +131,7 @@ Each fan is 0.187 A typical and 0.26 A maximum; two are 0.374 A typical and 0.52
 
 ### Linux PWM and libgpiod first bring-up
 
-This backend does not use pigpiod. It writes kernel Linux PWM sysfs channels and uses libgpiod falling-edge events with an internal pull-up for tach. The clone-local installer adds the overlay to the active boot configuration (`/boot/firmware/config.txt` on current Raspberry Pi OS images), installs the access helper, and reboots:
+This backend does not use pigpiod. It writes kernel Linux PWM sysfs channels and uses libgpiod falling-edge events with an internal pull-up for tach. The clone-local installer supports Raspberry Pi 4 only. It adds the overlay to the active boot configuration (`/boot/firmware/config.txt` on current Raspberry Pi OS images), installs the access helper, and reboots:
 
 ```bash
 pinout

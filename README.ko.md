@@ -35,7 +35,8 @@ uv run dgx-fan --config config.toml
 ## Raspberry Pi 클론 로컬 설치와 콘솔 자동 시작
 
 Raspberry Pi OS 콘솔 설치에서는 저장소를 clone한 폴더에 편집 가능한 설정을 둡니다.
-`install.sh`는 `config.toml`을 `/etc`로 복사하거나 이동하지 않습니다.
+`install.sh`는 애플리케이션 `config.toml`을 `/etc`로 복사하거나 이동하지 않지만,
+boot 통합에 필요한 좁은 범위의 파일은 `/etc`에 설치합니다.
 
 ```bash
 git clone <repository-url> dgx-fan
@@ -46,7 +47,7 @@ cp config.example.toml config.toml
 ```
 
 `install.sh`는 `uv sync --locked --extra raspberry-pi --no-dev`를 실행하고, 클론의
-`config.toml`을 검증한 다음, 2채널 PWM overlay와 Raspberry Pi OS tty1 콘솔 자동 로그인을
+`config.toml`을 검증한 다음, 2채널 PWM overlay와 Raspberry Pi 4의 Raspberry Pi OS tty1 콘솔 자동 로그인을
 구성합니다. `config.toml`이 없으면 `config.example.toml`에서 만들고 즉시 중지하므로, 파일을
 편집한 뒤 설치 스크립트를 다시 실행하세요. `uv`가 필요합니다. 설치되어 있지 않다면
 [공식 uv 설치 안내](https://docs.astral.sh/uv/getting-started/installation/)를 먼저 따르세요.
@@ -127,7 +128,7 @@ Fan 2 green tach ---------------- BCM24 / 물리 18
 
 ### Linux PWM/libgpiod 소유권과 첫 가동
 
-이 backend는 pigpiod를 사용하지 않습니다. 커널 Linux PWM sysfs와 libgpiod falling-edge tach 입력(내부 pull-up)을 사용합니다. 클론 로컬 설치 스크립트는 현재 Raspberry Pi OS의 활성 boot 설정(대개 `/boot/firmware/config.txt`)에 overlay를 추가하고, 접근 helper를 설치한 뒤 재부팅합니다. PWM channel은 공유 자원이므로 analogue audio나 다른 PWM 소비자를 동시에 실행하지 마세요.
+이 backend는 pigpiod를 사용하지 않습니다. 커널 Linux PWM sysfs와 libgpiod falling-edge tach 입력(내부 pull-up)을 사용합니다. 클론 로컬 설치 스크립트는 Raspberry Pi 4만 지원하며, 현재 Raspberry Pi OS의 활성 boot 설정(대개 `/boot/firmware/config.txt`)에 overlay를 추가하고, 접근 helper를 설치한 뒤 재부팅합니다. PWM channel은 공유 자원이므로 analogue audio나 다른 PWM 소비자를 동시에 실행하지 마세요.
 
 ```bash
 pinout
