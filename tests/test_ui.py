@@ -232,20 +232,35 @@ def test_area_step_fills_only_the_configured_cadence_and_preserves_reducers() ->
     """Expected DCGM waits are continuous; longer missing/stale periods stay blank."""
     history = DashboardHistory(2)
     now = 120.0
-    history.points[("one", "GPU-a", "util")] = [HistoryPoint(0, 25), HistoryPoint(2, 50), HistoryPoint(4, 75)]
-    normal = history.area("one", "GPU-a", "util", now, 120, 100)[4][5:]
-    assert all(column != " " for column in normal[:5])
+    # These are the actual area widths mounted at 79 and 120 columns.
+    for width in (70, 111):
+        history.points[("one", "GPU-a", "util")] = [HistoryPoint(0, 25), HistoryPoint(2, 50), HistoryPoint(4, 75)]
+        normal = history.area("one", "GPU-a", "util", now, width, 100)[4][5:]
+        first, last = 0, int(4 / 120 * width)
+        assert all(column != " " for column in normal[first:last + 1])
 
-    history.points[("one", "GPU-a", "temp")] = [HistoryPoint(0, 60), HistoryPoint(8, 80)]
-    outage = history.area("one", "GPU-a", "temp", now, 120, 100)[4][5:]
-    assert outage[:4].count(" ") == 0
-    assert outage[4:8] == "    "
-    assert outage[8] != " "
+        history.points[("one", "GPU-a", "temp")] = [HistoryPoint(0, 60), HistoryPoint(3, 80)]
+        boundary = history.area("one", "GPU-a", "temp", now, width, 100)[4][5:]
+        assert all(column != " " for column in boundary[:int(3 / 120 * width) + 1])
+
+        history.points[("one", "GPU-a", "temp")] = [HistoryPoint(0, 60), HistoryPoint(4, 80)]
+        outage = history.area("one", "GPU-a", "temp", now, width, 100)[4][5:]
+        successor = int(4 / 120 * width)
+        assert " " in outage[1:successor]
+        assert outage[successor] != " "
+
+    history.points[("one", "GPU-a", "temp")] = [HistoryPoint(10, 60)]
+    prefix = history.area("one", "GPU-a", "temp", now, 120, 100)[4][5:]
+    assert prefix[:10] == " " * 10
 
     history.points[("one", "GPU-a", "mem")] = [HistoryPoint(0, 0)]
     isolated = history.area("one", "GPU-a", "mem", now, 120, 100)[4][5:]
-    assert isolated[:4] == "▁▁▁▁"
-    assert isolated[4] == " "
+    assert isolated[:3] == "▁▁▁"
+    assert isolated[3] == " "
+
+    history.points[("one", "GPU-a", "mem")] = [HistoryPoint(119, 10), HistoryPoint(121, 90)]
+    future = history.area("one", "GPU-a", "mem", now, 120, 100)
+    assert sum(row[-1] != " " for row in future[:5]) == 1
 
     # Reducers run before fill: all samples share bin 10, so the visible height
     # distinguishes MEM-last (10), UTIL-average (50), and TEMP-max (90).
@@ -275,7 +290,18 @@ def test_compact_gpu_groups_have_three_boxes_each_without_identity_lines() -> No
             await pilot.pause()
             lines = str(next(iter(ui.query(".dgx-panel"))).render()).splitlines()
             assert lines[0] == "One" and "GPU-" not in "\n".join(lines) and "A100" not in "\n".join(lines) and "H100" not in "\n".join(lines)
-            assert sum(line.startswith("┌ ") for line in lines) == 6
+            tops = [line for line in lines if line.startswith("┌ ")]
+            assert len(tops) == 6
+            assert tops[:3] == [
+                next(line for line in tops if line.startswith("┌ MEM 50/100 MiB (50%)")),
+                next(line for line in tops if line.startswith("┌ UTIL 20%")),
+                next(line for line in tops if line.startswith("┌ TEMP 40.0 C")),
+            ]
+            assert tops[3:] == [
+                next(line for line in tops if line.startswith("┌ MEM 20/100 MiB (20%)")),
+                next(line for line in tops if line.startswith("┌ UTIL 10%")),
+                next(line for line in tops if line.startswith("┌ TEMP 30.0 C")),
+            ]
             assert "" not in lines
             for index, line in enumerate(lines):
                 if line.startswith("┌ "):

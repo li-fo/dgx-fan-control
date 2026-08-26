@@ -64,7 +64,7 @@ class DashboardHistory:
         latest_at: list[float | None] = [None for _ in range(width)]
         cutoff = now - HISTORY_SECONDS
         for point in self.points.get((endpoint_id, gpu, metric), []):
-            if point.at >= cutoff:
+            if cutoff <= point.at <= now:
                 index = min(width - 1, int((point.at - cutoff) / HISTORY_SECONDS * width))
                 bins[index].append(point.value)
                 latest = latest_at[index]
@@ -80,8 +80,11 @@ class DashboardHistory:
             if value is not None:
                 previous_value, previous_at = value, latest_at[index]
                 continue
-            bin_start = cutoff + index * bin_seconds
-            if previous_value is not None and previous_at is not None and bin_start - previous_at <= hold_seconds:
+            # The whole represented bin must fit in the bounded hold. Checking
+            # only its start would paint [3s, 4s) from a t=0 sample with a 3s
+            # hold, hiding the outage before a t=4 successor.
+            bin_end = cutoff + (index + 1) * bin_seconds
+            if previous_value is not None and previous_at is not None and bin_end <= previous_at + hold_seconds:
                 values[index] = previous_value
         rows: list[str] = []
         for row in range(PLOT_HEIGHT):
