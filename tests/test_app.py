@@ -118,8 +118,8 @@ def test_app_exception_restores_terminal_and_releases_hardware(
     events: list[str] = []
 
     class Hardware:
-        def release(self) -> None:
-            events.append("release")
+        def release(self, *, normal_shutdown: bool = False) -> None:
+            events.append(f"release:{normal_shutdown}")
 
     class ExplodingApp:
         def __init__(self, config: object) -> None:
@@ -137,15 +137,15 @@ def test_app_exception_restores_terminal_and_releases_hardware(
 
     with pytest.raises(RuntimeError, match="app failure"):
         main(["--config", "unused.toml"])
-    assert events == ["restore", "release"]
+    assert events == ["restore", "release:False"]
 
 
 def test_closed_stdin_does_not_prevent_app_run(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[str] = []
 
     class Hardware:
-        def release(self) -> None:
-            events.append("release")
+        def release(self, *, normal_shutdown: bool = False) -> None:
+            events.append(f"release:{normal_shutdown}")
 
     class ReturningApp:
         def __init__(self, config: object) -> None:
@@ -154,6 +154,8 @@ def test_closed_stdin_does_not_prevent_app_run(monkeypatch: pytest.MonkeyPatch) 
         def run(self) -> None:
             events.append("run")
 
+        return_code = 0
+
     monkeypatch.setattr(app_module, "load_config", lambda path: object())
     monkeypatch.setattr(app_module, "DGXFanApp", ReturningApp)
     monkeypatch.setattr(
@@ -161,7 +163,7 @@ def test_closed_stdin_does_not_prevent_app_run(monkeypatch: pytest.MonkeyPatch) 
     )
 
     main(["--config", "unused.toml"])
-    assert events == ["run", "release"]
+    assert events == ["run", "release:True"]
 
 
 def test_terminal_restore_failure_is_contained_and_hardware_releases(
@@ -173,8 +175,8 @@ def test_terminal_restore_failure_is_contained_and_hardware_releases(
     )
 
     class Hardware:
-        def release(self) -> None:
-            events.append("release")
+        def release(self, *, normal_shutdown: bool = False) -> None:
+            events.append(f"release:{normal_shutdown}")
 
     class ReturningApp:
         def __init__(self, config: object) -> None:
@@ -182,6 +184,8 @@ def test_terminal_restore_failure_is_contained_and_hardware_releases(
 
         def run(self) -> None:
             return None
+
+        return_code = 0
 
     monkeypatch.setitem(sys.modules, "termios", fake_termios)
     monkeypatch.setattr(app_module, "load_config", lambda path: object())
@@ -192,4 +196,27 @@ def test_terminal_restore_failure_is_contained_and_hardware_releases(
     )
 
     main(["--config", "unused.toml"])
-    assert events == ["release"]
+    assert events == ["release:True"]
+
+
+def test_returned_textual_error_code_keeps_hardware_full(monkeypatch: pytest.MonkeyPatch) -> None:
+    dispositions: list[bool] = []
+
+    class Hardware:
+        def release(self, *, normal_shutdown: bool = False) -> None:
+            dispositions.append(normal_shutdown)
+
+    class FailedApp:
+        return_code = 1
+
+        def __init__(self, config: object) -> None:
+            self.hardware = Hardware()
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(app_module, "load_config", lambda path: object())
+    monkeypatch.setattr(app_module, "DGXFanApp", FailedApp)
+    monkeypatch.setattr(app_module, "_capture_terminal_state", lambda: None)
+    main(["--config", "unused.toml"])
+    assert dispositions == [False]

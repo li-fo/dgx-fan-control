@@ -54,6 +54,7 @@ class HardwareConfig:
     stall_timeout_seconds: float
     pwm_chip_path: str = "/sys/class/pwm/pwmchip0"
     gpio_chip_path: str = "/dev/gpiochip0"
+    shutdown_mode: str = "full"
 
 
 @dataclass(frozen=True)
@@ -276,10 +277,13 @@ def load_config(path: Path) -> AppConfig:
         raise ConfigError("hardware.pwm_inverted must be true or false")
     pwm_chip_path = hardware.get("pwm_chip_path", "/sys/class/pwm/pwmchip0")
     gpio_chip_path = hardware.get("gpio_chip_path", "/dev/gpiochip0")
+    shutdown_mode = hardware.get("shutdown_mode", "full")
     if not isinstance(pwm_chip_path, str) or not pwm_chip_path.startswith("/"):
         raise ConfigError("hardware.pwm_chip_path must be an absolute path")
     if not isinstance(gpio_chip_path, str) or not gpio_chip_path.startswith("/"):
         raise ConfigError("hardware.gpio_chip_path must be an absolute path")
+    if not isinstance(shutdown_mode, str) or shutdown_mode not in {"full", "off"}:
+        raise ConfigError('hardware.shutdown_mode must be "full" or "off"')
     return AppConfig(
         path,
         tuple(endpoints),
@@ -298,6 +302,7 @@ def load_config(path: Path) -> AppConfig:
             ),
             pwm_chip_path,
             gpio_chip_path,
+            shutdown_mode,
         ),
         dashboard_colors,
     )

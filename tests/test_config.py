@@ -62,6 +62,7 @@ def test_load_valid_config(tmp_path: Path) -> None:
     assert config.hardware.pwm_gpio_bcm == (18, 19)
     assert config.hardware.pwm_chip_path == "/sys/class/pwm/pwmchip0"
     assert config.hardware.gpio_chip_path == "/dev/gpiochip0"
+    assert config.hardware.shutdown_mode == "full"
     assert config.control.fan_endpoint_ids == ("one", "one")
     assert config.dashboard_colors == DashboardColors()
 
@@ -78,6 +79,20 @@ gpio_chip_path = "/tmp/gpiochip0"
     config = load_config(path)
     assert config.hardware.pwm_chip_path == "/tmp/pwmchip0"
     assert config.hardware.gpio_chip_path == "/tmp/gpiochip0"
+
+
+def test_loads_opt_in_clean_shutdown_fan_off(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config() + '\nshutdown_mode = "off"\n')
+    assert load_config(path).hardware.shutdown_mode == "off"
+
+
+@pytest.mark.parametrize("value", ['"unexpected"', "true", "1", '["off"]', '{ mode = "off" }'])
+def test_rejects_invalid_shutdown_mode(tmp_path: Path, value: str) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config() + f"\nshutdown_mode = {value}\n")
+    with pytest.raises(ConfigError, match=r"hardware\.shutdown_mode"):
+        load_config(path)
 
 
 def test_loads_partial_dashboard_colors_and_normalizes_values(tmp_path: Path) -> None:

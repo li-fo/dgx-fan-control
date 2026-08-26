@@ -53,3 +53,6 @@ tach_gpio_bcm = [23, 24]
 pulses_per_revolution = [2, 2]
 startup_boost_seconds = 1.0
 stall_timeout_seconds = 5.0
+# Default "full" is fail-safe. Set "off" only when this exact fan is known
+# to stop at 0% PWM and only for a clean TUI exit (not boot, SIGKILL, or power loss).
+shutdown_mode = "off"

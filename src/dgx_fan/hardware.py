@@ -13,13 +13,14 @@ from .models import FanReading
 class FanHardware(Protocol):
     def set_duties(self, percents: tuple[int, int]) -> None: ...
     def readings(self, now: float) -> tuple[FanReading, FanReading]: ...
-    def release(self) -> None: ...
+    def release(self, *, normal_shutdown: bool = False) -> None: ...
 
 
 class FakeHardware:
-    def __init__(self) -> None:
+    def __init__(self, shutdown_mode: str = "full") -> None:
         self.duties = (100, 100)
         self.released = False
+        self.shutdown_mode = shutdown_mode
         self._readings: tuple[FanReading, FanReading] | None = None
 
     def set_duties(self, percents: tuple[int, int]) -> None:
@@ -37,9 +38,9 @@ class FakeHardware:
     def set_readings(self, readings: tuple[FanReading, FanReading] | None) -> None:
         self._readings = readings
 
-    def release(self) -> None:
+    def release(self, *, normal_shutdown: bool = False) -> None:
         self.released = True
-        self.duties = (100, 100)
+        self.duties = (0, 0) if normal_shutdown and self.shutdown_mode == "off" else (100, 100)
 
 
 class RaspberryPiHardware:
@@ -144,14 +145,17 @@ class RaspberryPiHardware:
         self._write(path / "duty_cycle", str(self._duty_ns(percent)), "set PWM duty")
         self._write(path / "enable", "1", "keep PWM enabled")
 
-    def _safe_full_speed(self) -> list[Exception]:
+    def _write_all_duties(self, percent: int) -> list[Exception]:
         failures: list[Exception] = []
         for path in self._pwm_paths:
             try:
-                self._write_duty(path, 100)
+                self._write_duty(path, percent)
             except Exception as error:  # noqa: BLE001 - attempt both physical channels.
                 failures.append(error)
         return failures
+
+    def _safe_full_speed(self) -> list[Exception]:
+        return self._write_all_duties(100)
 
     def set_duties(self, percents: tuple[int, int]) -> None:
         failures: list[Exception] = []
@@ -224,29 +228,43 @@ class RaspberryPiHardware:
             result.append(FanReading(rpm if count else None, "RUNNING" if count else "NO TACH"))
         return (result[0], result[1])
 
-    def release(self) -> None:
+    def release(self, *, normal_shutdown: bool = False) -> None:
         if self._release_complete:
             return
         failures: list[Exception] = []
         self._tach_stop.set()
-        failures.extend(self._safe_full_speed())
+        target_percent = 0 if normal_shutdown and self.config.shutdown_mode == "off" else 100
+        target_failures = self._write_all_duties(target_percent)
+        failures.extend(target_failures)
+        if target_percent == 0 and target_failures:
+            # A partial stop would leave one fan uncontrolled.  Restore both channels to
+            # the fail-safe duty before continuing tach cleanup and surfacing the error.
+            failures.extend(self._safe_full_speed())
+        cleanup_failed = False
         thread = self._tach_thread
         if thread is not None:
             thread.join(self._TACH_JOIN_SECONDS)
             if thread.is_alive():
                 failures.append(RuntimeError("tach worker did not stop before GPIO release"))
+                cleanup_failed = True
         request = self._tach_request
         if request is not None and (thread is None or not thread.is_alive()):
             try:
                 request.release()
             except Exception as error:  # noqa: BLE001 - retry after a later release call.
                 failures.append(error)
+                cleanup_failed = True
             else:
                 self._tach_request = None
+        if target_percent == 0 and cleanup_failed:
+            # The fans are already at the requested stop duty.  A later tach
+            # cleanup fault changes this into an abnormal teardown, so return
+            # both physical channels to full before surfacing that fault.
+            failures.extend(self._safe_full_speed())
         if failures:
             raise RuntimeError("failed cleanup: PWM safe-full or tach release did not complete") from failures[0]
         self._release_complete = True
 
 
 def create_hardware(config: HardwareConfig) -> FanHardware:
-    return FakeHardware() if config.backend == "fake" else RaspberryPiHardware(config)
+    return FakeHardware(config.shutdown_mode) if config.backend == "fake" else RaspberryPiHardware(config)

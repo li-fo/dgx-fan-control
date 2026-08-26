@@ -71,6 +71,15 @@ def test_fake_hardware_safe_release() -> None:
     assert hardware.released and hardware.duties == (100, 100)
 
 
+def test_fake_hardware_stops_only_for_opted_in_normal_shutdown() -> None:
+    hardware = FakeHardware("off")
+    hardware.release(normal_shutdown=True)
+    assert hardware.duties == (0, 0)
+    hardware.set_duties((20, 80))
+    hardware.release(normal_shutdown=False)
+    assert hardware.duties == (100, 100)
+
+
 def test_fake_hardware_simulates_running_and_allows_stall_probe() -> None:
     hardware = FakeHardware()
     hardware.set_duties((50, 0))
@@ -229,6 +238,130 @@ def test_release_waits_before_request_close_and_keeps_pwm_enabled(monkeypatch: p
     assert ("one/enable", "1") in writes and ("two/enable", "1") in writes
 
 
+def test_clean_opt_in_release_writes_zero_and_keeps_pwm_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    hardware = object.__new__(RaspberryPiHardware)
+    hardware.config = HardwareConfig(
+        "raspberry-pi", (18, 19), 25000, False, (23, 24), (2, 2), 1, 5, shutdown_mode="off"
+    )
+    hardware._period_ns = 40000
+    hardware._pwm_paths = [Path("one"), Path("two")]
+    hardware._release_complete = False
+    hardware._tach_stop = threading.Event()
+    hardware._tach_thread = None
+    hardware._tach_request = None
+    writes: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        RaspberryPiHardware,
+        "_write",
+        staticmethod(lambda path, value, action: writes.append((str(path), value))),
+    )
+    hardware.release(normal_shutdown=True)
+    assert ("one/duty_cycle", "0") in writes and ("two/duty_cycle", "0") in writes
+    assert ("one/enable", "1") in writes and ("two/enable", "1") in writes
+
+
+def test_partial_clean_off_failure_attempts_both_then_restores_both_full_and_releases_tach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = object.__new__(RaspberryPiHardware)
+    hardware.config = HardwareConfig(
+        "raspberry-pi", (18, 19), 25000, False, (23, 24), (2, 2), 1, 5, shutdown_mode="off"
+    )
+    hardware._period_ns = 40000
+    hardware._pwm_paths = [Path("one"), Path("two")]
+    hardware._release_complete = False
+    hardware._tach_stop = threading.Event()
+    hardware._tach_thread = None
+    request = _Request()
+    hardware._tach_request = request
+    writes: list[tuple[str, str]] = []
+
+    def write(path: Path, value: str, action: str) -> None:
+        writes.append((str(path), value))
+        if path == Path("one/duty_cycle") and value == "0":
+            raise OSError("cannot stop fan one")
+
+    monkeypatch.setattr(RaspberryPiHardware, "_write", staticmethod(write))
+    with pytest.raises(RuntimeError, match="failed cleanup"):
+        hardware.release(normal_shutdown=True)
+    assert ("two/duty_cycle", "0") in writes
+    assert writes.count(("one/duty_cycle", "40000")) == 1
+    assert writes.count(("two/duty_cycle", "40000")) == 1
+    assert request.released
+
+
+def test_clean_off_tach_join_failure_restores_both_fans_full(monkeypatch: pytest.MonkeyPatch) -> None:
+    class AliveThread:
+        def join(self, timeout: float) -> None:
+            assert timeout == RaspberryPiHardware._TACH_JOIN_SECONDS
+
+        def is_alive(self) -> bool:
+            return True
+
+    hardware = object.__new__(RaspberryPiHardware)
+    hardware.config = HardwareConfig(
+        "raspberry-pi", (18, 19), 25000, False, (23, 24), (2, 2), 1, 5, shutdown_mode="off"
+    )
+    hardware._period_ns = 40000
+    hardware._pwm_paths = [Path("one"), Path("two")]
+    hardware._release_complete = False
+    hardware._tach_stop = threading.Event()
+    hardware._tach_thread = AliveThread()
+    request = _Request()
+    hardware._tach_request = request
+    writes: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        RaspberryPiHardware,
+        "_write",
+        staticmethod(lambda path, value, action: writes.append((str(path), value))),
+    )
+    with pytest.raises(RuntimeError, match="failed cleanup"):
+        hardware.release(normal_shutdown=True)
+    assert writes.count(("one/duty_cycle", "0")) == 1
+    assert writes.count(("two/duty_cycle", "0")) == 1
+    assert writes.count(("one/duty_cycle", "40000")) == 1
+    assert writes.count(("two/duty_cycle", "40000")) == 1
+    assert not request.released and not hardware._release_complete
+
+
+def test_clean_off_request_release_failure_restores_full_then_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FailingRequest(_Request):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail = True
+
+        def release(self) -> None:
+            if self.fail:
+                self.fail = False
+                raise OSError("temporary request cleanup failure")
+            super().release()
+
+    hardware = object.__new__(RaspberryPiHardware)
+    hardware.config = HardwareConfig(
+        "raspberry-pi", (18, 19), 25000, False, (23, 24), (2, 2), 1, 5, shutdown_mode="off"
+    )
+    hardware._period_ns = 40000
+    hardware._pwm_paths = [Path("one"), Path("two")]
+    hardware._release_complete = False
+    hardware._tach_stop = threading.Event()
+    hardware._tach_thread = None
+    request = FailingRequest()
+    hardware._tach_request = request
+    writes: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        RaspberryPiHardware,
+        "_write",
+        staticmethod(lambda path, value, action: writes.append((str(path), value))),
+    )
+    with pytest.raises(RuntimeError, match="failed cleanup"):
+        hardware.release(normal_shutdown=True)
+    assert request is hardware._tach_request and not hardware._release_complete
+    assert writes.count(("one/duty_cycle", "40000")) == 1
+    assert writes.count(("two/duty_cycle", "40000")) == 1
+    hardware.release(normal_shutdown=True)
+    assert request.released and hardware._release_complete
+
+
 def test_release_retries_after_one_safe_full_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     hardware = object.__new__(RaspberryPiHardware)
     hardware.config = _config()
@@ -318,7 +451,7 @@ def test_missing_gpiod_is_actionable_and_constructor_restores_full_speed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     chip = _pwm_chip(tmp_path)
-    monkeypatch.delitem(sys.modules, "gpiod", raising=False)
+    monkeypatch.setitem(sys.modules, "gpiod", None)
     with pytest.raises(RuntimeError, match=r"dgx-fan\[raspberry-pi\].*gpiod"):
         RaspberryPiHardware(_config(chip))
     assert (chip / "pwm0" / "duty_cycle").read_text() == "40000"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import select
 import signal
 import struct
@@ -20,6 +21,21 @@ if os.name == "posix":
     import tty
 
 from dgx_fan import app as app_module
+
+
+def test_no_kitty_driver_suppresses_textuals_exact_push_pop_pair(monkeypatch: pytest.MonkeyPatch) -> None:
+    if app_module._NO_KITTY_LINUX_DRIVER is None:
+        pytest.skip("default Linux driver adapter is POSIX-only")
+    writes: list[str] = []
+    parent = app_module._NO_KITTY_LINUX_DRIVER.__mro__[1]
+    monkeypatch.setattr(parent, "write", lambda self, data: writes.append(data))
+    driver = object.__new__(app_module._NO_KITTY_LINUX_DRIVER)
+    driver.write("\x1b[>25u")
+    driver.write("\x1b[>1u")
+    driver.write("ordinary-output")
+    driver.write("\x1b[>kittyu")
+    driver.write("\x1b[<u")
+    assert writes == ["ordinary-output", "\x1b[>kittyu"]
 
 
 def _config() -> str:
@@ -213,7 +229,7 @@ def test_capture_restore_restores_complete_state_and_closes_duplicate(monkeypatc
             os.close(slave)
 
 
-def test_cli_quit_restores_posix_terminal_and_accepts_sentinel(tmp_path: Path) -> None:
+def test_cli_quit_restores_terminal_and_leaves_space_enter_as_ordinary_shell_input(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(_config())
     master, slave = pty.openpty()
@@ -225,7 +241,8 @@ def test_cli_quit_restores_posix_terminal_and_accepts_sentinel(tmp_path: Path) -
         before = _pty_flags(slave)
         command = (
             f'"{sys.executable}" -m dgx_fan --config "{config}"; '
-            'IFS= read -r value; printf "SENTINEL:%s\\n" "$value"'
+            'IFS= read -r space; IFS= read -r enter; '
+            'printf "SENTINEL:<%s>|<%s>\\n" "$space" "$enter"'
         )
         process = subprocess.Popen(
             ["/bin/sh", "-c", command],
@@ -233,8 +250,13 @@ def test_cli_quit_restores_posix_terminal_and_accepts_sentinel(tmp_path: Path) -
             stdout=slave,
             stderr=slave,
             start_new_session=True,
+            env={
+                key: value
+                for key, value in os.environ.items()
+                if key not in {"TEXTUAL_DISABLE_KITTY_KEY", "TEXTUAL_DRIVER"}
+            },
         )
-        _read_until(master, b"DGX Fan Controller", time.monotonic() + 6)
+        startup = _read_until(master, b"DGX Fan Controller", time.monotonic() + 6)
         os.write(master, b"\x11")  # Textual's confirmed default Quit binding: Ctrl+Q.
 
         deadline = time.monotonic() + 3
@@ -242,9 +264,15 @@ def test_cli_quit_restores_posix_terminal_and_accepts_sentinel(tmp_path: Path) -
             time.sleep(0.05)
         assert _pty_flags(slave) == before
 
-        os.write(master, b"restored-input\n")
-        output = _read_until(master, b"SENTINEL:restored-input", time.monotonic() + 3)
-        assert b"restored-input" in output  # Canonical shell input was echoed after the app quit.
+        # Kitty CSI-u encodes space and Enter as `...;32u` / `...;13u` in the
+        # shell when keyboard reporting leaks.  They must be plain input after
+        # Textual exits, not protocol bytes handed to the shell's `read`.
+        os.write(master, b" \n\n")
+        output = _read_until(master, b"SENTINEL:< >|<>", time.monotonic() + 3)
+        terminal_output = startup + output
+        assert re.search(rb"\x1b\[>[0-9]+u", terminal_output) is None
+        assert b"\x1b[<u" not in terminal_output
+        assert b";;32u" not in output and b";;13u" not in output
         assert process.wait(timeout=3) == 0
     finally:
         try:

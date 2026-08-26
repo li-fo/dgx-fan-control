@@ -36,6 +36,8 @@ Start with `hardware.backend = "fake"` on a development machine. Its default tac
 
 `config.example.toml` documents schema v2. `hardware.pwm_gpio_bcm` and `control.fan_endpoint_ids` each contain exactly two entries in Fan 1/Fan 2 order. Both endpoint IDs must name configured `[[dgx]]` IDs; for one DGX, repeat its ID. Normal curve, hysteresis, startup boost, tach expectation, duty, and TUI status are independent per fan. The curve and max-speed cap are intentionally shared. All configured endpoints must be fresh and healthy; any endpoint failure, missing mapped temperature, emergency temperature on **any** configured GPU, or a reported fan stall forces **both** PWM channels to 100%. A runtime UI Off is ignored by those safety states. Normal recovery has a dwell period. Version-1 scalar `pwm_gpio_bcm = 18` files are rejected: change to `version = 2`, use `[18, 19]`, and add `fan_endpoint_ids` before starting the app.
 
+`hardware.shutdown_mode` is optional and defaults to `"full"`: every release, including startup/setup failure and an application error, commands both fans to full duty. Set `shutdown_mode = "off"` only for a verified fan such as the direct-wired Noctua NF-A6x25 5V PWM, whose documented 0% PWM speed is 0 RPM. It stops both fans only after Textual returns with exit code 0; it keeps PWM channels enabled at 0% duty. A non-zero/internal Textual failure, raised exception, failed stop write, tach join timeout, or GPIO release failure instead returns both channels to full duty. This is not a boot-time, SIGKILL, terminal-kill, or power-loss guarantee; use a hardware power switch if default-off under those conditions is required.
+
 For two DGX endpoints, pin the physical airflow mapping explicitly:
 
 ```toml
@@ -100,9 +102,10 @@ pwm_gpio_bcm = [18, 19]
 pwm_frequency_hz = 25000
 pwm_inverted = false
 tach_gpio_bcm = [23, 24]
+shutdown_mode = "off" # optional; clean exit only, default is fail-safe "full"
 ```
 
-The process needs permission to write PWM sysfs and open `/dev/gpiochip0`; use an appropriate device-access/udev policy or run the initial bring-up with `sudo`. Do not run analogue audio or another PWM consumer at the same time: PWM channels are shared hardware. Bring up one fan at a time: inspect unpowered wiring, verify 5 V/common ground, connect Fan 1, then measure approximately 25 kHz non-inverted duty, RPM, and curve response before adding Fan 2. Exercise endpoint loss, disconnected tach/stall, and app exit. On release the app commands both channels to full duty and leaves PWM enabled, but this repository cannot prove pinmux, waveform, process-kill, or physical full-speed behavior; measure it before unattended use. To roll back, stop the app, remove power before rewiring, remove the overlay only when no other consumer owns PWM, reboot, and verify the fans' safe state.
+The process needs permission to write PWM sysfs and open `/dev/gpiochip0`; use an appropriate device-access/udev policy or run the initial bring-up with `sudo`. Do not run analogue audio or another PWM consumer at the same time: PWM channels are shared hardware. Bring up one fan at a time: inspect unpowered wiring, verify 5 V/common ground, connect Fan 1, then measure approximately 25 kHz non-inverted duty, RPM, and curve response before adding Fan 2. Exercise endpoint loss, disconnected tach/stall, and both clean and fault exits. The default release commands full duty and keeps PWM enabled. With the explicit `shutdown_mode = "off"` option, a clean TUI exit commands 0% duty and keeps PWM enabled; any PWM/tach/GPIO cleanup fault falls back to full duty. This repository cannot prove pinmux, waveform, process-kill, boot, or physical speed behavior; measure it before unattended use. To roll back, remove `shutdown_mode = "off"` (or set `"full"`) and restart, or revert the containing commit; no rewiring is required.
 
 
 Stop and remove power if any GPIO, cable, connector, or supply becomes hot; a Pi GPIO is above 3.3 V; polarity is uncertain; a fan will not start; or measured current exceeds a supply/cable rating. This project cannot validate an unknown fan, assembled circuit, or live DGX data.

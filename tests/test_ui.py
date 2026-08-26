@@ -278,7 +278,7 @@ def _assert_gauge_content_fits(gauge: FanGauge) -> None:
     assert gauge.content_region.height >= len(lines)
 
 
-def test_poll_exception_is_supervised_and_unmount_cleans_up(monkeypatch) -> None:
+def test_poll_exception_is_supervised_and_unmount_cancels_poll_without_releasing_hardware(monkeypatch) -> None:
     config = load_config(Path("config.example.toml"))
     app = DGXFanApp(config)
 
@@ -294,7 +294,7 @@ def test_poll_exception_is_supervised_and_unmount_cleans_up(monkeypatch) -> None
             assert app.latest is not None and app.latest.duty_percents == (100, 100)
             assert not app.endpoints[0].healthy
         assert app.hardware is not None
-        assert getattr(app.hardware, "released", False)
+        assert not getattr(app.hardware, "released", False)
 
     asyncio.run(exercise())
 

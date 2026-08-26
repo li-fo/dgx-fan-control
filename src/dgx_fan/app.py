@@ -3,13 +3,45 @@ from __future__ import annotations
 import argparse
 import copy
 import os
+import re
 import sys
 import time
 from asyncio import CancelledError, Task, create_task, sleep
 from dataclasses import dataclass
 from typing import Any
 
+from textual import constants
 from textual.app import App, ComposeResult
+from textual.driver import Driver
+
+
+def _create_no_kitty_linux_driver() -> type[Driver] | None:
+    """Create the POSIX-only adapter without importing Linux modules on Windows."""
+    if os.name != "posix":
+        return None
+    from textual.drivers.linux_driver import LinuxDriver
+
+    class NoKittyLinuxDriver(LinuxDriver):
+        """Keep Textual's mouse/terminal handling without owning Kitty CSI-u.
+
+        Textual 8.2.8 emits the enable sequence only in Linux application mode
+        but unconditionally emits its matching disable sequence.  This app
+        needs neither sequence, so suppress this driver's exact standalone
+        pair together.  Do not use this for a user-supplied custom driver.
+        """
+
+        _KITTY_ENABLE = re.compile(r"\x1b\[>[0-9]+u\Z")
+        _KITTY_DISABLE = "\x1b[<u"
+
+        def write(self, data: str) -> None:
+            if self._KITTY_ENABLE.fullmatch(data) or data == self._KITTY_DISABLE:
+                return
+            super().write(data)
+
+    return NoKittyLinuxDriver
+
+
+_NO_KITTY_LINUX_DRIVER = _create_no_kitty_linux_driver()
 
 from .config import AppConfig, ConfigError, load_config, resolve_config_path
 from .controller import FanController
@@ -89,7 +121,13 @@ class DGXFanApp(App[None]):
     CONTROL_TICK_SECONDS = 0.25
 
     def __init__(self, config: AppConfig) -> None:
-        super().__init__()
+        # Preserve Textual's Windows/headless paths and an explicit custom
+        # driver.  Only the default POSIX Linux driver receives the balanced
+        # CSI-u adapter above.
+        driver_class: type[Driver] | None = None
+        if constants.DRIVER is None and _NO_KITTY_LINUX_DRIVER is not None:
+            driver_class = _NO_KITTY_LINUX_DRIVER
+        super().__init__(driver_class=driver_class)
         self.config = config
         self.hardware: FanHardware | None = None
         self.controller = FanController(config.control, config.hardware)
@@ -151,8 +189,6 @@ class DGXFanApp(App[None]):
                 await self._poll_task
             except CancelledError:
                 pass
-        if self.hardware is not None:
-            self.hardware.release()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -171,11 +207,15 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(f"dgx-fan: configuration error: {error}") from error
     app = DGXFanApp(config)
     terminal_state = _capture_terminal_state()
+    run_completed = False
     try:
         app.run()
+        # Textual catches some internal fatal exceptions and returns with a
+        # non-zero public code, so return alone is not a clean fan-off exit.
+        run_completed = getattr(app, "return_code", None) == 0
     finally:
         try:
             _restore_terminal_state(terminal_state)
         finally:
             if app.hardware is not None:
-                app.hardware.release()
+                app.hardware.release(normal_shutdown=run_completed)
