@@ -143,7 +143,10 @@ class FanAppUI(Static):
         current = {(endpoint.endpoint_id, gpu.key): gpu for endpoint in snapshot.endpoint_snapshots for gpu in endpoint.gpus}
         previous: Static | None = None
         for endpoint in snapshot.endpoint_snapshots:
-            lines = [f"[b]{endpoint.name}[/b]  {'HEALTHY' if endpoint.healthy else 'UNHEALTHY'}"]
+            # Health changes on the fast control tick. Keep them in the banner so
+            # a changed health state doesn't imply that cached charts were sampled
+            # again or need a costly panel redraw.
+            lines = [endpoint.name]
             keys = sorted(key for source, key in self.history.last_seen if source == endpoint.endpoint_id)
             for key in keys:
                 gpu = current.get((endpoint.endpoint_id, key))
@@ -163,7 +166,9 @@ class FanAppUI(Static):
                     lines.append("└" + "─" * inner + "┘")
             panel = self.panels.get(endpoint.endpoint_id)
             if panel is None:
-                panel = Static(classes="dgx-panel")
+                # Endpoint/GPU names originate outside the UI. Rendering the panel
+                # as plain text keeps them from becoming Rich markup.
+                panel = Static(classes="dgx-panel", markup=False)
                 self.panels[endpoint.endpoint_id] = panel
                 scroll.mount(panel)
             assert panel is not None
@@ -176,5 +181,4 @@ class FanAppUI(Static):
 
     def on_resize(self) -> None:
         if self.snapshot is not None and self.last_render_time is not None:
-            self.last_signature = None
             self._render_dashboard(self.snapshot, self.last_render_time)

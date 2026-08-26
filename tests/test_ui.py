@@ -160,6 +160,73 @@ def test_panels_are_ordered_retained_and_deduplicated() -> None:
     asyncio.run(exercise())
 
 
+def test_dashboard_signature_gates_charts_but_not_fast_status_updates(monkeypatch) -> None:
+    """Fast health/fan changes must not make cached chart panels look sampled."""
+    app = _DashboardApp()
+    gpu = GPUStat("GPU-a", "A100", memory_used_mib=50, memory_total_mib=100, utilization_percent=20, temperature_celsius=40)
+
+    def snapshot(
+        endpoints: tuple[EndpointSnapshot, ...], *, state: str = "AUTO ON", healthy: bool = True
+    ) -> ControlSnapshot:
+        adjusted = tuple(
+            EndpointSnapshot(
+                endpoint.endpoint_id,
+                endpoint.name,
+                healthy if endpoint.endpoint_id == "a" else endpoint.healthy,
+                endpoint.age_seconds,
+                error="poll failed" if endpoint.endpoint_id == "a" and not healthy else endpoint.error,
+                gpus=endpoint.gpus,
+                sample_revision=endpoint.sample_revision,
+            )
+            for endpoint in endpoints
+        )
+        return ControlSnapshot(20, "curve", state, 40, 0, (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING")), adjusted)
+
+    a1 = EndpointSnapshot("a", "A", True, 0, gpus=(gpu,), sample_revision=1)
+    b1 = EndpointSnapshot("b", "B", True, 0, gpus=(gpu,), sample_revision=1)
+    a2 = EndpointSnapshot("a", "A", True, 0, gpus=(gpu,), sample_revision=2)
+    b2 = EndpointSnapshot("b", "B", True, 0, gpus=(gpu,), sample_revision=2)
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 24)) as pilot:
+            ui = app.query_one(FanAppUI)
+            renders: list[tuple[tuple[str, int], ...]] = []
+            original = ui._render_dashboard
+
+            def traced(rendered: ControlSnapshot, now: float) -> None:
+                renders.append(tuple((endpoint.endpoint_id, endpoint.sample_revision) for endpoint in rendered.endpoint_snapshots))
+                original(rendered, now)
+
+            monkeypatch.setattr(ui, "_render_dashboard", traced)
+            ui.update_snapshot(snapshot((a1, b1)), 1)
+            assert renders == [(('a', 1), ('b', 1))]
+            history_count = len(ui.history.points[("a", "GPU-a", "util")])
+
+            ui.update_snapshot(snapshot((a1, b1), state="AUTO OFF", healthy=False), 1.25)
+            assert len(renders) == 1
+            assert len(ui.history.points[("a", "GPU-a", "util")]) == history_count
+            assert "poll failed" in str(ui.query_one("#error-banner").render())
+            assert "AUTO OFF" in str(ui.query_one("#fan-status").render())
+            assert "HEALTHY" not in str(next(iter(ui.query(".dgx-panel"))).render())
+
+            ui.update_snapshot(snapshot((a2, b1)), 2)
+            ui.update_snapshot(snapshot((a2, b2)), 3)
+            ui.update_snapshot(snapshot((b2, a2)), 4)
+            ui.update_snapshot(snapshot((a2,)), 5)
+            assert renders == [(('a', 1), ('b', 1)), (('a', 2), ('b', 1)), (('a', 2), ('b', 2)), (('b', 2), ('a', 2)), (('a', 2),)]
+
+            before_resize_count = len(ui.history.points[("a", "GPU-a", "util")])
+            before_resize_renders = len(renders)
+            await pilot.resize_terminal(120, 24)
+            await pilot.pause()
+            assert len(renders) == before_resize_renders + 1
+            ui.update_snapshot(snapshot((a2,)), 5.25)
+            assert len(renders) == before_resize_renders + 1
+            assert len(ui.history.points[("a", "GPU-a", "util")]) == before_resize_count
+
+    asyncio.run(exercise())
+
+
 def test_mounted_responsive_width_reuses_history() -> None:
     app = _DashboardApp()
     gpu = GPUStat("GPU-a", "A100", memory_used_mib=50, memory_total_mib=100, utilization_percent=20, temperature_celsius=40)
@@ -174,17 +241,26 @@ def test_mounted_responsive_width_reuses_history() -> None:
             await pilot.resize_terminal(79, 24); await pilot.pause()
             assert scroll.display and len(ui.query(".dgx-panel")) == 1
             narrow_lines = str(next(iter(ui.query(".dgx-panel"))).render()).splitlines()
-            mem_index = next(index for index, line in enumerate(narrow_lines) if line.startswith("┌ MEM"))
-            narrow_rows = narrow_lines[mem_index + 1:mem_index + 7]
-            assert len(narrow_rows) == 6 and all(len(line) <= scroll.size.width for line in narrow_rows)
-            narrow = len(narrow_rows[0]) - 5
-            assert narrow > 36 and len(narrow_rows[-1]) == len(narrow_rows[0])
+            def assert_boxes(lines: list[str], expected_width: int) -> int:
+                widths: list[int] = []
+                for metric, value in (("MEM", "50/100 MiB (50%)"), ("UTIL", "20%"), ("TEMP", "40.0 C")):
+                    top_index = next(index for index, line in enumerate(lines) if line.startswith(f"┌ {metric} "))
+                    box = lines[top_index:top_index + 8]
+                    assert len(box) == 8
+                    assert box[0].startswith(f"┌ {metric} {value}") and box[0].endswith("┐")
+                    assert all(row.startswith("│") and row.endswith("│") for row in box[1:7])
+                    assert box[-1].startswith("└") and box[-1].endswith("┘")
+                    assert len({len(row) for row in box}) == 1
+                    assert all(len(row) <= expected_width for row in box)
+                    widths.append(len(box[1]) - 7)
+                assert len(set(widths)) == 1
+                return widths[0]
+
+            narrow = assert_boxes(narrow_lines, scroll.size.width)
+            assert narrow > 36
             await pilot.resize_terminal(120, 24); await pilot.pause()
             wide_lines = str(next(iter(ui.query(".dgx-panel"))).render()).splitlines()
-            wide_index = next(index for index, line in enumerate(wide_lines) if line.startswith("┌ MEM"))
-            wide_rows = wide_lines[wide_index + 1:wide_index + 7]
-            wide = len(wide_rows[0]) - 5
-            assert all(len(line) <= scroll.size.width for line in wide_rows) and len(wide_rows[-1]) == len(wide_rows[0])
+            wide = assert_boxes(wide_lines, scroll.size.width)
             assert wide > narrow and count == len(ui.history.points[("one", "GPU-a", "util")])
             await pilot.resize_terminal(78, 24); await pilot.resize_terminal(79, 24); await pilot.pause()
             assert scroll.display and len(ui.query(".dgx-panel")) == 1
