@@ -85,12 +85,12 @@ class DashboardHistory:
         values = [None if not group else (max(group) if metric == "temp" else sum(group) / len(group) if metric == "util" else group[-1]) for group in bins]
         rows: list[str] = []
         for row in range(PLOT_HEIGHT):
-            threshold = (PLOT_HEIGHT - row) / PLOT_HEIGHT * maximum
-            line = "".join(" " if value is None else "▁" if value == 0 and row == PLOT_HEIGHT - 1 else "█" if value >= threshold else " " for value in values)
+            threshold = (PLOT_HEIGHT - 1 - row) / (PLOT_HEIGHT - 1) * maximum
+            line = "".join(" " if value is None else "▁" if value == 0 and row == PLOT_HEIGHT - 1 else "█" if value > 0 and (row == PLOT_HEIGHT - 1 or value >= threshold) else " " for value in values)
             label = f"{threshold:>4.0f} " if row in {0, 2, 4} else "     "
             rows.append(label + line)
         axis = "     120s" + " " * max(0, width // 2 - 7) + "60s" + " " * max(0, width // 4 - 3) + "30s" + " " * max(0, width // 4 - 4) + "now"
-        rows.append(axis[: width + 5])
+        rows.append(axis[: width + 5].ljust(width + 5))
         return rows
 
 
@@ -111,6 +111,7 @@ class FanAppUI(Static):
         self.snapshot: ControlSnapshot | None = None
         self.history = DashboardHistory()
         self.panels: dict[str, Static] = {}
+        self.last_render_time: float | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -127,6 +128,7 @@ class FanAppUI(Static):
 
     def update_snapshot(self, snapshot: ControlSnapshot, now: float) -> None:
         self.snapshot = snapshot
+        self.last_render_time = now
         for endpoint in snapshot.endpoint_snapshots:
             self.history.append(endpoint.endpoint_id, endpoint.sample_revision, endpoint.gpus, now)
         errors = [f"{e.name}: {e.error or 'stale'} (sample age: {'N/A' if e.age_seconds is None else f'{e.age_seconds:.1f}s'})" for e in snapshot.endpoint_snapshots if not e.healthy]
@@ -138,10 +140,11 @@ class FanAppUI(Static):
 
     def _render_dashboard(self, snapshot: ControlSnapshot, now: float) -> None:
         scroll = self.query_one("#dashboard-scroll", VerticalScroll)
+        terminal_width = self.screen.size.width
         available = scroll.size.width
         warning = self.query_one("#dashboard-warning", Static)
-        if available < MIN_DASHBOARD_WIDTH:
-            warning.update(f"Dashboard width {available}; at least {MIN_DASHBOARD_WIDTH} columns required for charts.")
+        if terminal_width < MIN_DASHBOARD_WIDTH:
+            warning.update(f"Dashboard width {terminal_width}; at least {MIN_DASHBOARD_WIDTH} columns required for charts.")
             scroll.display = False
             return
         warning.update("")
@@ -178,3 +181,7 @@ class FanAppUI(Static):
             else:
                 scroll.move_child(panel, after=previous)
             previous = panel
+
+    def on_resize(self) -> None:
+        if self.snapshot is not None and self.last_render_time is not None:
+            self._render_dashboard(self.snapshot, self.last_render_time)

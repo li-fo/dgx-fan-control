@@ -73,6 +73,19 @@ def test_memory_history_is_normalized_and_zero_is_not_a_gap() -> None:
     assert history.graph("one", "GPU-a", "util", 250, 1, 100) == " "
 
 
+def test_area_renderer_has_five_rows_axis_gaps_zero_and_width_scaling() -> None:
+    history = DashboardHistory()
+    gpu = GPUStat("GPU-a", "A100", memory_used_mib=0, memory_total_mib=100, utilization_percent=1, temperature_celsius=100)
+    history.append("one", 1, (gpu,), 120)
+    rendered = history.area("one", "GPU-a", "util", 120, 40, 100)
+    assert len(rendered) == 6
+    assert all(len(line) == 45 for line in rendered)
+    assert "█" in rendered[4]
+    assert "▁" in history.area("one", "GPU-a", "mem", 120, 40, 100)[4]
+    assert "120s" in rendered[-1] and "60s" in rendered[-1] and "now" in rendered[-1]
+    assert len(history.area("one", "GPU-a", "util", 120, 80, 100)[0]) > len(rendered[0])
+
+
 class _DashboardApp(App[None]):
     def compose(self) -> ComposeResult:
         yield FanAppUI("config.toml", lambda: None, 75)
