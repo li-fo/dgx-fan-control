@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 [[dgx]]
 id = "dgx-1"
@@ -18,6 +18,8 @@ timeout_seconds = 1.5
 stale_after_seconds = 6.0
 
 [control]
+# Fan 1 and Fan 2 are explicitly mapped. For one DGX, use the same ID twice.
+fan_endpoint_ids = ["dgx-1", "dgx-1"]
 enabled_at_startup = true
 max_speed_percent = 100
 hysteresis_celsius = 2.0
@@ -42,7 +44,8 @@ speed_percent = 100
 [hardware]
 # Use fake on development machines. raspberry-pi imports pigpio lazily at runtime.
 backend = "fake"
-pwm_gpio_bcm = 18
+# Fan 1: BCM18 / physical pin 12 (PWM0); Fan 2: BCM19 / physical pin 35 (PWM1).
+pwm_gpio_bcm = [18, 19]
 pwm_frequency_hz = 25000
 pwm_inverted = true
 tach_gpio_bcm = [23, 24]

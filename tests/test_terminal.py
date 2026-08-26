@@ -23,7 +23,7 @@ from dgx_fan import app as app_module
 
 
 def _config() -> str:
-    return '''version = 1
+    return '''version = 2
 [[dgx]]
 id = "one"
 name = "One"
@@ -33,6 +33,7 @@ interval_seconds = 2
 timeout_seconds = 0.1
 stale_after_seconds = 6
 [control]
+fan_endpoint_ids = ["one", "one"]
 enabled_at_startup = true
 max_speed_percent = 90
 hysteresis_celsius = 2
@@ -51,7 +52,7 @@ speed_percent = 80
 speed_percent = 100
 [hardware]
 backend = "fake"
-pwm_gpio_bcm = 18
+pwm_gpio_bcm = [18, 19]
 pwm_frequency_hz = 25000
 pwm_inverted = true
 tach_gpio_bcm = [23, 24]

@@ -6,7 +6,7 @@ from dgx_fan.config import ConfigError, DashboardColors, load_config, resolve_co
 
 
 def _config() -> str:
-    return """version = 1
+    return """version = 2
 [[dgx]]
 id = "one"
 name = "One"
@@ -16,6 +16,7 @@ interval_seconds = 2
 timeout_seconds = 1
 stale_after_seconds = 6
 [control]
+fan_endpoint_ids = ["one", "one"]
 enabled_at_startup = true
 max_speed_percent = 90
 hysteresis_celsius = 2
@@ -34,7 +35,7 @@ speed_percent = 80
 speed_percent = 100
 [hardware]
 backend = "fake"
-pwm_gpio_bcm = 18
+pwm_gpio_bcm = [18, 19]
 pwm_frequency_hz = 25000
 pwm_inverted = true
 tach_gpio_bcm = [23, 24]
@@ -58,6 +59,8 @@ def test_load_valid_config(tmp_path: Path) -> None:
     config = load_config(path)
     assert config.control.stages[-1].max_temperature_celsius is None
     assert config.hardware.backend == "fake"
+    assert config.hardware.pwm_gpio_bcm == (18, 19)
+    assert config.control.fan_endpoint_ids == ("one", "one")
     assert config.dashboard_colors == DashboardColors()
 
 
@@ -137,7 +140,6 @@ def test_rejects_wrong_stage_count(tmp_path: Path) -> None:
         ("recovery_seconds", "10"),
         ("max_temperature_celsius", "45"),
         ("speed_percent", "20"),
-        ("pwm_gpio_bcm", "18"),
         ("pwm_frequency_hz", "25000"),
         ("pulses_per_revolution", "[2, 2]"),
         ("startup_boost_seconds", "1"),
@@ -152,4 +154,27 @@ def test_rejects_nonfinite_numeric_values(
     content = _config().replace(f"{field} = {existing}", f"{field} = {nonfinite}", 1)
     path.write_text(content)
     with pytest.raises(ConfigError, match="finite|integer"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    [
+        ("version = 1", "shared-PWM configuration"),
+        ('fan_endpoint_ids = ["one"]', "fan_endpoint_ids"),
+        ('fan_endpoint_ids = ["missing", "one"]', "reference configured"),
+        ("pwm_gpio_bcm = 18", "must contain exactly two GPIOs"),
+        ("pwm_gpio_bcm = [18, 12]", "PWM0"),
+        ("pwm_gpio_bcm = [18, 18]", "PWM and tach GPIOs"),
+    ],
+)
+def test_rejects_unsafe_dual_fan_migration_inputs(
+    tmp_path: Path, replacement: str, message: str
+) -> None:
+    path = tmp_path / "config.toml"
+    target = "version = 2" if replacement.startswith("version") else (
+        'fan_endpoint_ids = ["one", "one"]' if replacement.startswith("fan_endpoint") else "pwm_gpio_bcm = [18, 19]"
+    )
+    path.write_text(_config().replace(target, replacement, 1))
+    with pytest.raises(ConfigError, match=message):
         load_config(path)

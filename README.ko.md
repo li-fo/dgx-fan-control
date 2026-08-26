@@ -2,7 +2,7 @@
 
 [English README](README.md)
 
-`dgx-fan`은 Raspberry Pi 4에서 최대 두 DCGM exporter의 GPU 정보를 읽고, 두 개의 4선 PWM 팬에 공통 PWM 목표값 하나를 적용하는 직접 실행형 Python Textual 앱입니다. GPU 메모리, 사용률, 온도, 팬 RPM/상태를 보여 주며 실행 중 On/Off 제어를 제공합니다.
+`dgx-fan`은 Raspberry Pi 4에서 최대 두 DCGM exporter의 GPU 정보를 읽고, 두 개의 4선 PWM 팬을 각각 독립적으로 제어하는 직접 실행형 Python Textual 앱입니다. GPU 메모리, 사용률, 온도와 팬별 매핑 DGX, duty, RPM/상태를 보여 주며 실행 중 On/Off 제어는 전역으로 유지됩니다.
 
 ## 실행
 
@@ -34,41 +34,51 @@ uv run dgx-fan --config config.toml
 
 ## 설정과 안전 동작
 
-`config.example.toml`은 schema v1을 설명합니다. DCGM URL은 한 개 또는 두 개이고, 제어 단계는 오름차순 네 단계(네 번째는 상한 없음)입니다. 선택 `[dashboard.colors]` 표에서 `memory`, `utilization`, `temperature` 차트 전경색을 Rich 색상 이름 또는 `#38bdf8` 형식으로 설정할 수 있습니다. 표/키를 생략하면 터미널 기본색을 사용합니다. 배경색, 스타일 표현식, 공백 값, 축약 hex와 `nan`, `+inf`, `-inf` 같은 비유한 숫자는 시작 오류로 거부됩니다. 모든 엔드포인트가 최신이고 정상일 때만 정상 곡선 제어를 합니다. endpoint 오류, 오래되었거나 유효하지 않은 온도, 비상 온도, 팬 stall은 100% PWM을 강제합니다. UI Off는 그 안전 상태를 해제하지 않습니다. 정상 복구에는 dwell 시간이 있고, 0에서 재시작하면 짧은 full-speed boost가 적용됩니다. DCGM은 설정 주기로 폴링하고 별도 250 ms 제어 tick은 캐시된 상태에서 tach/stall을 확인합니다.
+`config.example.toml`은 schema v2를 설명합니다. `hardware.pwm_gpio_bcm`과 `control.fan_endpoint_ids`는 각각 Fan 1/Fan 2 순서의 정확히 두 항목이어야 합니다. endpoint ID는 설정된 `[[dgx]]` ID를 가리켜야 하며, DGX 한 대면 같은 ID를 두 번 씁니다. 정상 곡선, hysteresis, startup boost, tach 기대값, duty, TUI 상태는 팬별로 독립적이고 곡선/최대 속도 제한만 공통입니다. 모든 설정 endpoint가 최신·정상이 아니거나, 매핑된 온도가 없거나, **어느** 설정 GPU든 비상 온도이거나, 팬 stall이면 **두** PWM 채널 모두 100%가 됩니다. UI Off는 그 안전 상태를 해제하지 않습니다. 기존 v1의 `pwm_gpio_bcm = 18`은 시작 시 거부됩니다. `version = 2`, `[18, 19]`, `fan_endpoint_ids`로 마이그레이션하세요.
+
+DGX 두 대는 물리 공기 흐름 매핑을 명시적으로 고정합니다.
+
+```toml
+[control]
+fan_endpoint_ids = ["dgx-1", "dgx-2"] # Fan 1 -> DGX-1, Fan 2 -> DGX-2
+
+[hardware]
+pwm_gpio_bcm = [18, 19] # Fan 1 -> BCM18, Fan 2 -> BCM19
+```
 
 ## Raspberry Pi 4 배선
 
-이 앱은 **PWM 신호 하나를 두 팬이 공유**하고 **tach 신호는 두 개를 독립적으로 읽는** 구조입니다. 팬별 독립 PWM 제어가 아닙니다. 두 팬의 요청 duty는 같지만 RPM/상태는 다를 수 있습니다. 정확한 팬 데이터시트가 항상 우선입니다. 아래 커넥터 위치는 일반적인 4선 PWM 팬 관례일 뿐이고, 커넥터 순서, 선 색, 전압, tach 출력 방식은 팬마다 다를 수 있습니다. 배선·변경 전에는 반드시 전원을 제거하세요.
+이 앱은 **PWM 신호 두 개와 tach 신호 두 개를 각각 독립적으로** 제어/읽습니다. 정확한 팬 데이터시트가 항상 우선입니다. 아래 커넥터 위치는 일반적인 4선 PWM 팬 관례일 뿐이고, 커넥터 순서, 선 색, 전압, tach 출력 방식은 팬마다 다를 수 있습니다. 배선·변경 전에는 반드시 전원을 제거하세요.
 
 | 기능 | 일반적인 팬 커넥터 위치* | Fan 1 | Fan 2 | Raspberry Pi 4 |
 | --- | --- | --- | --- | --- |
 | 접지 | Pin 1 | GND | GND | Pi GND 아무 곳(예: 물리 핀 6 또는 9), 모든 전원이 이 접지를 공유 |
 | 팬 전원 | Pin 2 | +5 V | +5 V | 전원 예산이 안전할 때만 물리 핀 2 또는 4, 아니면 별도 5 V 팬 전원 |
 | Tach / RPM | Pin 3 | Tach 1 | Tach 2 | Fan 1: BCM23 / 물리 핀 16; Fan 2: BCM24 / 물리 핀 18. 각각 Pi 3.3 V로 향하는 독립 외부 4.7 kΩ–10 kΩ pull-up 필요 |
-| PWM 제어 | Pin 4 | PWM | PWM | 두 PWM 입력을 하나의 open-collector/open-drain 드라이버 collector/drain에 함께 연결, 드라이버 입력은 BCM18 / 물리 핀 12 |
+| PWM 제어 | Pin 4 | PWM 1 | PWM 2 | Fan 1: BCM18 / 물리 12(PWM0)의 독립 open-collector/open-drain 드라이버; Fan 2: BCM19 / 물리 35(PWM1)의 별도 드라이버 |
 
 \* 일반 배선도의 선 색/핀 번호보다 정확한 팬 데이터시트를 우선하세요. 팬 PWM선(내부 5 V pull-up이 있을 수 있음) 또는 5 V tach 신호를 Pi GPIO에 직접 연결하면 안 됩니다.
 
-`BCM18` / 물리 핀 12가 이 앱이 사용하는 유일한 PWM 출력입니다. `BCM19` / 물리 핀 35는 이 앱에서 사용하지 않습니다. Fan 2 PWM을 BCM19에 연결해도 제어되지 않습니다. 독립 PWM에는 코드와 설정 변경이 필요합니다.
+설정은 PWM0(`BCM12` 또는 `BCM18`)에서 하나, PWM1(`BCM13` 또는 `BCM19`)에서 하나를 사용해야 합니다. 지원 기본값은 Fan 1 `BCM18` / 물리 12, Fan 2 `BCM19` / 물리 35입니다. 같은 PWM 채널의 두 핀을 쓰거나 두 팬의 PWM선/트랜지스터 드라이버를 공유하지 마세요.
 
 ### PWM 레벨 시프터
 
-Pi GPIO는 3.3 V 로직입니다. BCM18을 팬 PWM 입력에 직접 연결하지 말고 open-collector/open-drain 회로를 사용하세요. 2N3904 또는 2N2222 같은 NPN 회로 예시는 다음과 같습니다.
+Pi GPIO는 3.3 V 로직입니다. 각 팬 PWM 입력에 각자의 open-collector/open-drain 회로를 사용하고 Pi GPIO에 직접 연결하지 마세요. 2N3904 또는 2N2222 NPN 회로 두 개를 사용합니다.
 
 ```text
-Pi BCM18 / 물리 핀 12 -- 2.2 kΩ–4.7 kΩ -- Base (NPN)
+Fan 1: Pi BCM18 / 물리 핀 12 -- 2.2 kΩ–4.7 kΩ -- Base (NPN #1)
                                             o  base node
                                             |
                                      10 kΩ (권장 pull-down)
                                             |
                                            GND
 
-Fan 1 PWM (일반적으로 pin 4) ---+--- Collector (NPN)
-Fan 2 PWM (일반적으로 pin 4) ---+
-                                  Emitter --- 공통 GND
+Fan 1 PWM (일반적으로 pin 4) -------- Collector (NPN #1); emitter --- 공통 GND
+Fan 2: Pi BCM19 / 물리 핀 35 -- 2.2 kΩ–4.7 kΩ -- Base (NPN #2)
+Fan 2 PWM (일반적으로 pin 4) -------- Collector (NPN #2); emitter --- 공통 GND
 ```
 
-대신 3.3 V gate drive에서 켜지도록 명시된 N-channel logic-level MOSFET을 쓸 수 있습니다. Gate는 BCM18에서 약 100 Ω–1 kΩ 직렬 저항을 거쳐 연결하고, gate-to-ground 10 kΩ pull-down을 둡니다. Source는 공통 GND, drain은 함께 묶은 팬 PWM 입력에 연결합니다. PWM선에 Pi 측 pull-up을 추가하지 말고 해당 팬의 데이터시트상 입력 회로를 사용하세요.
+대신 각 팬마다 3.3 V gate drive에서 켜지도록 명시된 N-channel logic-level MOSFET을 쓸 수 있습니다. Gate는 각 BCM18/BCM19에서 약 100 Ω–1 kΩ 직렬 저항을 거쳐 연결하고, gate-to-ground 10 kΩ pull-down을 둡니다. Source는 공통 GND, drain은 해당 팬 PWM 입력에 연결합니다. PWM선에 Pi 측 pull-up을 추가하지 말고 해당 팬의 데이터시트상 입력 회로를 사용하세요.
 
 제공되는 `pwm_inverted = true`는 NPN/N-MOSFET low-side 회로의 반전을 보정합니다. 요청 duty가 팬 입력의 active-low duty에 맞게 적용됩니다. 실제 회로를 변경하고 극성을 계측으로 확인하기 전에는 유지하세요.
 
@@ -92,7 +102,7 @@ Fan 2 tach ---------------------+
 
 ### pigpio 소유권, daemon, 첫 가동
 
-코드는 설정한 25 kHz로 BCM18에 pigpio `hardware_PWM`을 호출합니다. 이 pigpio backend에는 `dtoverlay=pwm` 또는 `dtoverlay=pwm-2chan`을 추가하지 마세요. OS 이미지나 다른 프로젝트에서 PWM overlay를 물려받았다면, 운영자가 배타적 소유권과 호환성을 별도로 확인한 경우가 아니면 실제 가동 전에 제거/비활성화하세요. PWM peripheral/channel은 공유 하드웨어 자원이므로 analogue audio나 다른 PWM 소비자를 동시에 실행하지 마세요. 아래 Raspberry Pi overlay 문서는 이 backend의 설정 요구 사항이 아니라 핀/channel/resource 사실을 확인하기 위한 참고 자료입니다.
+코드는 설정한 25 kHz로 BCM18(PWM0)과 BCM19(PWM1)에 pigpio `hardware_PWM`을 호출합니다. 이 pigpio backend에는 `dtoverlay=pwm` 또는 `dtoverlay=pwm-2chan`을 추가하지 마세요. OS 이미지나 다른 프로젝트에서 PWM overlay를 물려받았다면, 운영자가 배타적 소유권과 호환성을 별도로 확인한 경우가 아니면 실제 가동 전에 제거/비활성화하세요. PWM peripheral/channel은 공유 하드웨어 자원이므로 analogue audio나 다른 PWM 소비자를 동시에 실행하지 마세요. 아래 Raspberry Pi overlay 문서는 이 backend의 설정 요구 사항이 아니라 핀/channel/resource 사실을 확인하기 위한 참고 자료입니다.
 
 실제 backend 전환 전 물리 매핑, Pi extra, `pigpiod`, 설정을 확인하세요.
 
@@ -106,7 +116,7 @@ uv run dgx-fan --config config.toml
 ```toml
 [hardware]
 backend = "raspberry-pi"
-pwm_gpio_bcm = 18
+pwm_gpio_bcm = [18, 19]
 pwm_frequency_hz = 25000
 pwm_inverted = true
 tach_gpio_bcm = [23, 24]

@@ -68,8 +68,8 @@ async def test_snapshots_expire_between_polls_and_force_control_safe(monkeypatch
     stale = collector.snapshots(5.1)
     assert stale[0].stale and not stale[0].healthy and stale[0].gpus == ()
     controller = FanController(
-        ControlConfig(True, 100, 2, 75, 10, (Stage(45, 20), Stage(55, 50), Stage(70, 80), Stage(None, 100))),
-        HardwareConfig("fake", 18, 25000, True, (23, 24), (2, 2), 1, 5),
+        ControlConfig(True, 100, 2, 75, 10, (Stage(45, 20), Stage(55, 50), Stage(70, 80), Stage(None, 100)), ("one", "one")),
+        HardwareConfig("fake", (18, 19), 25000, True, (23, 24), (2, 2), 1, 5),
     )
     fans = (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING"))
     assert controller.update(stale, fans, 5.1).duty_percent == 100

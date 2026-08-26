@@ -39,12 +39,13 @@ class ControlConfig:
     emergency_temperature_celsius: float
     recovery_seconds: float
     stages: tuple[Stage, ...]
+    fan_endpoint_ids: tuple[str, str]
 
 
 @dataclass(frozen=True)
 class HardwareConfig:
     backend: str
-    pwm_gpio_bcm: int
+    pwm_gpio_bcm: tuple[int, int]
     pwm_frequency_hz: int
     pwm_inverted: bool
     tach_gpio_bcm: tuple[int, int]
@@ -150,8 +151,14 @@ def load_config(path: Path) -> AppConfig:
         raise ConfigError(f"configuration file not found: {path}") from error
     except tomllib.TOMLDecodeError as error:
         raise ConfigError(f"invalid TOML in {path}: {error}") from error
-    if raw.get("version") != 1:
-        raise ConfigError("version must be 1")
+    version = raw.get("version")
+    if version != 2:
+        if version == 1:
+            raise ConfigError(
+                "version 1 shared-PWM configuration is unsupported; migrate to version = 2, "
+                "set hardware.pwm_gpio_bcm = [18, 19], and set control.fan_endpoint_ids"
+            )
+        raise ConfigError("version must be 2")
     dashboard_colors = _dashboard_colors(raw)
     raw_endpoints = raw.get("dgx")
     if not isinstance(raw_endpoints, list) or not 1 <= len(raw_endpoints) <= 2:
@@ -210,6 +217,14 @@ def load_config(path: Path) -> AppConfig:
     enabled = control.get("enabled_at_startup")
     if not isinstance(enabled, bool):
         raise ConfigError("control.enabled_at_startup must be true or false")
+    fan_endpoint_ids = control.get("fan_endpoint_ids")
+    if not isinstance(fan_endpoint_ids, list) or len(fan_endpoint_ids) != 2 or not all(
+        isinstance(endpoint_id, str) and endpoint_id.strip() for endpoint_id in fan_endpoint_ids
+    ):
+        raise ConfigError("control.fan_endpoint_ids must contain exactly two non-empty DGX endpoint IDs")
+    endpoint_ids = {endpoint.id for endpoint in endpoints}
+    if any(endpoint_id not in endpoint_ids for endpoint_id in fan_endpoint_ids):
+        raise ConfigError("control.fan_endpoint_ids must reference configured dgx IDs")
     control_config = ControlConfig(
         enabled,
         _integer(
@@ -221,6 +236,7 @@ def load_config(path: Path) -> AppConfig:
         ),
         _number(control.get("recovery_seconds"), "control.recovery_seconds"),
         tuple(stages),
+        (fan_endpoint_ids[0], fan_endpoint_ids[1]),
     )
     hardware = _mapping(raw.get("hardware"), "hardware")
     backend = hardware.get("backend")
@@ -239,9 +255,20 @@ def load_config(path: Path) -> AppConfig:
         _integer(value, f"hardware.pulses_per_revolution[{i}]", minimum=1)
         for i, value in enumerate(ppr)
     )
-    pwm = _integer(hardware.get("pwm_gpio_bcm"), "hardware.pwm_gpio_bcm")
-    if pwm in tach_pair or len(set(tach_pair)) != 2:
+    pwm_raw = hardware.get("pwm_gpio_bcm")
+    if not isinstance(pwm_raw, list) or len(pwm_raw) != 2:
+        raise ConfigError(
+            "hardware.pwm_gpio_bcm must contain exactly two GPIOs (for example [18, 19]); "
+            "version 2 does not support shared PWM"
+        )
+    pwm_pair = tuple(_integer(value, f"hardware.pwm_gpio_bcm[{i}]") for i, value in enumerate(pwm_raw))
+    if len(set(pwm_pair)) != 2 or len(set(tach_pair)) != 2 or set(pwm_pair).intersection(tach_pair):
         raise ConfigError("PWM and tach GPIOs must be distinct")
+    pwm_channels = ({12, 18}, {13, 19})
+    if not all(any(gpio in channel for gpio in pwm_pair) for channel in pwm_channels):
+        raise ConfigError(
+            "hardware.pwm_gpio_bcm must use one GPIO from PWM0 (12 or 18) and one from PWM1 (13 or 19)"
+        )
     inverted = hardware.get("pwm_inverted")
     if not isinstance(inverted, bool):
         raise ConfigError("hardware.pwm_inverted must be true or false")
@@ -252,7 +279,7 @@ def load_config(path: Path) -> AppConfig:
         control_config,
         HardwareConfig(
             backend,
-            pwm,
+            (pwm_pair[0], pwm_pair[1]),
             _integer(hardware.get("pwm_frequency_hz"), "hardware.pwm_frequency_hz", minimum=1),
             inverted,
             (tach_pair[0], tach_pair[1]),

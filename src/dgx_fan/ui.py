@@ -163,7 +163,7 @@ class DashboardHistory:
 
 
 class FanGauge(Static):
-    """A compact terminal-safe ring for one fan's shared PWM and own tach state."""
+    """A compact terminal-safe ring for one fan's independent PWM and tach state."""
 
     SEGMENTS = 12
     RING_WIDTH = 15
@@ -257,7 +257,7 @@ class FanAppUI(Static):
             with TabPane("Fan Control", id="fan-control"), Vertical():
                 with Horizontal(id="fan-top-row"):
                     yield Static(
-                        "Fan Status / Control · WAITING\nShared PWM: --\nMax GPU temp: N/A; stage: N/A",
+                        "Fan Status / Control · WAITING\nFan 1: -- | Fan 2: --\nMax GPU temp: N/A",
                         id="fan-status",
                         markup=False,
                     )
@@ -295,15 +295,24 @@ class FanAppUI(Static):
             if snapshot.max_temperature_celsius is None
             else f"{snapshot.max_temperature_celsius:.1f} C"
         )
+        def fan_summary(index: int) -> str:
+            temperature = snapshot.fan_temperatures_celsius[index]
+            stage = snapshot.active_stages[index]
+            temperature_text = "N/A" if temperature is None else f"{temperature:.1f} C"
+            return (
+                f"F{index + 1} {snapshot.fan_endpoint_ids[index]}: "
+                f"{snapshot.duty_percents[index]}% · {temperature_text} · S{stage if stage is not None else '-'}"
+            )
+
         self.query_one("#fan-status", Static).update(
             f"Fan Status / Control · {snapshot.state}\n"
-            f"Shared PWM: {snapshot.duty_percent}% ({snapshot.reason})\n"
-            f"Max GPU temp: {maximum}; stage: {snapshot.active_stage}"
+            f"{fan_summary(0)} | {fan_summary(1)}\n"
+            f"Max GPU temp: {maximum} ({snapshot.reason})"
         )
         for number in (1, 2):
             fan = snapshot.fans[number - 1]
             self.query_one(f"#fan-{number}-gauge", FanGauge).set_reading(
-                snapshot.duty_percent, fan.rpm, fan.state
+                snapshot.duty_percents[number - 1], fan.rpm, fan.state
             )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

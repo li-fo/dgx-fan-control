@@ -2,7 +2,7 @@
 
 [한국어 README](README.ko.md)
 
-`dgx-fan` is a direct-Python Textual application for a Raspberry Pi 4 that reads GPU data from up to two DCGM exporter endpoints and sets one shared PWM target for two 4-wire fans. It shows GPU memory, utilisation, temperature, fan RPM/status, and has a runtime-only On/Off control.
+`dgx-fan` is a direct-Python Textual application for a Raspberry Pi 4 that reads GPU data from up to two DCGM exporter endpoints and independently drives two 4-wire PWM fans. It shows GPU memory, utilisation, temperature, and each fan's mapped DGX, duty, RPM, and state; its runtime On/Off control remains global.
 
 ## Run
 
@@ -34,41 +34,51 @@ Start with `hardware.backend = "fake"` on a development machine. Its default tac
 
 ## Configuration and safety
 
-`config.example.toml` documents schema v1: one or two DCGM URLs, four ascending control stages (the fourth is unbounded), maximum fan speed, emergency threshold, and GPIO configuration. The optional `[dashboard.colors]` table controls the foreground color of the `memory`, `utilization`, and `temperature` chart boxes independently. Each key may use a Rich color name such as `yellow`, `cyan`, or `red`, or an exact six-digit hexadecimal value such as `#38bdf8`; omit the table or individual keys to retain the terminal-default color. Backgrounds, style expressions, whitespace-padded values, and shorthand hex are rejected with a field-path startup error. Edit the configuration and restart the app to apply chart-color changes. All numeric values must be finite; `nan`, `+inf`, and `-inf` are rejected before hardware construction. All endpoints must be fresh and healthy for normal curve control. Endpoint failures, stale/no-valid temperature data, emergency temperature, or a reported fan stall force 100% PWM. A runtime UI Off is ignored by those safety states. Normal recovery has a dwell period; restarting from zero applies a short full-speed boost. DCGM polls use the configured interval while a separate 250 ms control tick continues tach/stall checks from cached snapshots.
+`config.example.toml` documents schema v2. `hardware.pwm_gpio_bcm` and `control.fan_endpoint_ids` each contain exactly two entries in Fan 1/Fan 2 order. Both endpoint IDs must name configured `[[dgx]]` IDs; for one DGX, repeat its ID. Normal curve, hysteresis, startup boost, tach expectation, duty, and TUI status are independent per fan. The curve and max-speed cap are intentionally shared. All configured endpoints must be fresh and healthy; any endpoint failure, missing mapped temperature, emergency temperature on **any** configured GPU, or a reported fan stall forces **both** PWM channels to 100%. A runtime UI Off is ignored by those safety states. Normal recovery has a dwell period. Version-1 scalar `pwm_gpio_bcm = 18` files are rejected: change to `version = 2`, use `[18, 19]`, and add `fan_endpoint_ids` before starting the app.
+
+For two DGX endpoints, pin the physical airflow mapping explicitly:
+
+```toml
+[control]
+fan_endpoint_ids = ["dgx-1", "dgx-2"] # Fan 1 -> DGX-1, Fan 2 -> DGX-2
+
+[hardware]
+pwm_gpio_bcm = [18, 19] # Fan 1 -> BCM18, Fan 2 -> BCM19
+```
 
 ## Raspberry Pi 4 wiring
 
-This app drives **one shared PWM signal** and reads **two separate tach signals**. It does not independently control two PWM channels: both fans receive the same duty, although their RPM/state can differ. The exact fan data sheet always wins. The connector positions below are the usual four-wire PWM convention only: fan connector order, wire colours, voltage, and tach type can vary. Disconnect power before wiring or changing a connection.
+This app drives **two independent PWM signals** and reads **two separate tach signals**. The exact fan data sheet always wins. The connector positions below are the usual four-wire PWM convention only: fan connector order, wire colours, voltage, and tach type can vary. Disconnect power before wiring or changing a connection.
 
 | Function | Typical fan connector position* | Fan 1 | Fan 2 | Raspberry Pi 4 |
 | --- | --- | --- | --- | --- |
 | Ground | Pin 1 | GND | GND | Any Pi GND, for example physical pin 6 or 9; all supplies share this ground |
 | Fan power | Pin 2 | +5 V | +5 V | Physical pin 2 or 4 **only when its supply budget is safe**; otherwise use a separate 5 V fan supply |
 | Tach / RPM | Pin 3 | Tach 1 | Tach 2 | Fan 1: BCM23 / physical pin 16; Fan 2: BCM24 / physical pin 18. Each has its own external 4.7 kΩ–10 kΩ pull-up to Pi 3.3 V |
-| PWM control | Pin 4 | PWM | PWM | Join both PWM inputs at the collector/drain of one open-collector/open-drain driver controlled by BCM18 / physical pin 12 |
+| PWM control | Pin 4 | PWM 1 | PWM 2 | Fan 1: an isolated open-collector/open-drain driver from BCM18 / physical pin 12 (PWM0); Fan 2: a separate driver from BCM19 / physical pin 35 (PWM1) |
 
 \* Never trust a generic wire colour or connector number over the exact fan data sheet. Never connect the fan PWM line (which may have an internal 5 V pull-up), or a 5 V tach signal, directly to a Pi GPIO.
 
-`BCM18` / physical pin 12 is the only PWM output used by this application. `BCM19` / physical pin 35 is unused by this application. Connecting Fan 2 PWM to BCM19 will not control it; independent PWM requires code and configuration changes.
+The configuration must use one GPIO from PWM0 (`BCM12` or `BCM18`) and one from PWM1 (`BCM13` or `BCM19`); the supported default is Fan 1 `BCM18` / physical 12 and Fan 2 `BCM19` / physical 35. Do not use two pins from the same PWM channel, and do not share a fan PWM line or its transistor driver between the fans.
 
 ### PWM level shifting
 
-The Pi GPIO is 3.3 V logic. Drive the joined fan PWM input with an open-collector/open-drain circuit, not directly from BCM18. One suitable NPN circuit uses a 2N3904 or 2N2222:
+The Pi GPIO is 3.3 V logic. Drive each fan PWM input with its own open-collector/open-drain circuit, not directly from a Pi GPIO. Use two suitable NPN circuits such as 2N3904/2N2222:
 
 ```text
-Pi BCM18 / physical pin 12 -- 2.2 kΩ–4.7 kΩ -- Base (NPN)
+Fan 1: Pi BCM18 / physical pin 12 -- 2.2 kΩ–4.7 kΩ -- Base (NPN #1)
                                             o  base node
                                             |
                                      10 kΩ (recommended pull-down)
                                             |
                                            GND
 
-Fan 1 PWM (typical pin 4) ---+--- Collector (NPN)
-Fan 2 PWM (typical pin 4) ---+
-                                  Emitter --- common GND
+Fan 1 PWM (typical pin 4) -------- Collector (NPN #1); emitter --- common GND
+Fan 2: Pi BCM19 / physical pin 35 -- 2.2 kΩ–4.7 kΩ -- Base (NPN #2)
+Fan 2 PWM (typical pin 4) -------- Collector (NPN #2); emitter --- common GND
 ```
 
-A 3.3 V logic-level N-channel MOSFET can be used instead: gate from BCM18 through about 100 Ω–1 kΩ, a 10 kΩ gate-to-ground pull-down, source to common ground, and drain to the joined fan PWM inputs. Select a component specified to turn on with a 3.3 V gate drive. Do not add a Pi-side pull-up to the joined PWM line; use the fan's documented input circuit.
+A 3.3 V logic-level N-channel MOSFET can be used instead for each fan: gate from its own BCM18/BCM19 GPIO through about 100 Ω–1 kΩ, a 10 kΩ gate-to-ground pull-down, source to common ground, and drain to that fan's PWM input. Select a component specified to turn on with a 3.3 V gate drive. Do not add a Pi-side pull-up to a fan PWM line; use the fan's documented input circuit.
 
 The supplied `pwm_inverted = true` compensates for this low-side NPN/N-MOSFET inversion: a higher requested duty creates the corresponding active-low duty at the fan input. Keep it unless a changed physical circuit has been measured and its polarity verified.
 
@@ -92,7 +102,7 @@ Physical pins 2 and 4 are one Pi 5 V rail, not separate supplies. Add both fans'
 
 ### pigpio ownership, daemon, and first bring-up
 
-The code calls pigpio `hardware_PWM` on BCM18 at the configured 25 kHz. For this pigpio backend, do **not** add `dtoverlay=pwm` or `dtoverlay=pwm-2chan`. If either PWM overlay is inherited from an image or another project, remove/disable it before live use unless an operator has independently established exclusive ownership and compatibility. Do not run analogue audio or another PWM consumer concurrently: the PWM peripheral/channel is a shared hardware resource. The Raspberry Pi overlay documentation is linked below for pin/channel/resource facts, not as a setup requirement for this backend.
+The code calls pigpio `hardware_PWM` on BCM18 (PWM0) and BCM19 (PWM1) at the configured 25 kHz. For this pigpio backend, do **not** add `dtoverlay=pwm` or `dtoverlay=pwm-2chan`. If either PWM overlay is inherited from an image or another project, remove/disable it before live use unless an operator has independently established exclusive ownership and compatibility. Do not run analogue audio or another PWM consumer concurrently: the PWM peripheral/channels are shared hardware resources. The Raspberry Pi overlay documentation is linked below for pin/channel/resource facts, not as a setup requirement for this backend.
 
 Verify the physical mapping, install the Pi extra, start `pigpiod`, and check the configuration before selecting the real backend:
 
@@ -106,7 +116,7 @@ uv run dgx-fan --config config.toml
 ```toml
 [hardware]
 backend = "raspberry-pi"
-pwm_gpio_bcm = 18
+pwm_gpio_bcm = [18, 19]
 pwm_frequency_hz = 25000
 pwm_inverted = true
 tach_gpio_bcm = [23, 24]

@@ -113,7 +113,7 @@ class DGXFanApp(App[None]):
 
     async def on_mount(self) -> None:
         self.hardware = create_hardware(self.config.hardware)
-        self.hardware.set_duty(100)  # Safe-full before any external read.
+        self.hardware.set_duties((100, 100))  # Safe-full before any external read.
         self.set_interval(self.CONTROL_TICK_SECONDS, self.control_tick)
         self._poll_task = create_task(self._poll_loop())
         self.control_tick()
@@ -138,7 +138,7 @@ class DGXFanApp(App[None]):
         self.endpoints = self.collector.snapshots(current)
         fans = self.hardware.readings(current)
         self.latest = self.controller.update(self.endpoints, fans, current)
-        self.hardware.set_duty(self.latest.duty_percent)
+        self.hardware.set_duties(self.latest.duty_percents)
         self.query_one(FanAppUI).update_snapshot(self.latest, current)
 
     def toggle_power(self) -> None:

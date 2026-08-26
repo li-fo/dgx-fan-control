@@ -65,11 +65,13 @@ def test_fan_control_panel_updates_gauges_and_buttons_without_side_effects() -> 
 
     app = FanPanelApp()
     snapshot = ControlSnapshot(
-        50,
+        (20, 80),
         "curve",
         "AUTO ON",
         63,
-        2,
+        (0, 2),
+        (40, 63),
+        ("dgx-1", "dgx-2"),
         (FanReading(1234, "RUNNING"), FanReading(None, "NO TACH")),
         (),
     )
@@ -85,24 +87,26 @@ def test_fan_control_panel_updates_gauges_and_buttons_without_side_effects() -> 
             two = app.query_one("#fan-2-gauge", FanGauge).render().plain
             assert status.splitlines() == [
                 "Fan Status / Control · AUTO ON",
-                "Shared PWM: 50% (curve)",
-                "Max GPU temp: 63.0 C; stage: 2",
+                "F1 dgx-1: 20% · 40.0 C · S0 | F2 dgx-2: 80% · 63.0 C · S2",
+                "Max GPU temp: 63.0 C (curve)",
             ]
             assert not any(glyph in status for glyph in "┌┐└┘│")
-            assert "Shared PWM: 50%" in status and "Fan 1" not in status
-            assert "50%" in one and "RPM: 1234 RPM" in one and "RUNNING" in one
-            assert "50%" in two and "RPM: N/A" in two and "NO TACH" in two
+            assert "F1 dgx-1: 20%" in status and "F2 dgx-2: 80%" in status
+            assert "20%" in one and "RPM: 1234 RPM" in one and "RUNNING" in one
+            assert "80%" in two and "RPM: N/A" in two and "NO TACH" in two
             refreshed = ControlSnapshot(
-                80,
+                (50, 80),
                 "curve",
                 "AUTO ON",
                 70,
-                3,
+                (1, 3),
+                (52, 70),
+                ("dgx-1", "dgx-2"),
                 (FanReading(1500, "RUNNING"), FanReading(900, "STOPPED")),
                 (),
             )
             ui.update_snapshot(refreshed, 2)
-            assert "80%" in app.query_one("#fan-1-gauge", FanGauge).render().plain
+            assert "50%" in app.query_one("#fan-1-gauge", FanGauge).render().plain
             assert "RPM: 1500 RPM" in app.query_one("#fan-1-gauge", FanGauge).render().plain
             assert "RPM: 900 RPM" in app.query_one("#fan-2-gauge", FanGauge).render().plain
             assert "STOPPED" in app.query_one("#fan-2-gauge", FanGauge).render().plain
