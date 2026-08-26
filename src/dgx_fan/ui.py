@@ -7,6 +7,7 @@ from typing import Self
 
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.widgets import Button, Footer, Header, Static, TabbedContent, TabPane
 
 from .models import ControlSnapshot, GPUStat
@@ -36,7 +37,10 @@ class DashboardHistory:
         for gpu in gpus:
             identity = (endpoint_id, gpu.key)
             self.last_seen[identity] = now
-            for metric, value in (("mem", gpu.memory_used_mib), ("util", gpu.utilization_percent), ("temp", gpu.temperature_celsius)):
+            memory_percent = None
+            if gpu.memory_used_mib is not None and gpu.memory_total_mib is not None and gpu.memory_total_mib > 0:
+                memory_percent = gpu.memory_used_mib / gpu.memory_total_mib * 100
+            for metric, value in (("mem", memory_percent), ("util", gpu.utilization_percent), ("temp", gpu.temperature_celsius)):
                 if value is not None:
                     self.points[(*identity, metric)].append(HistoryPoint(now, value))
         self.prune(now)
@@ -61,14 +65,14 @@ class DashboardHistory:
             if point.at >= cutoff:
                 index = min(width - 1, int((point.at - cutoff) / HISTORY_SECONDS * width))
                 bins[index].append(point.value)
-        glyphs = " ▁▂▃▄▅▆▇█"
+        glyphs = "▁▂▃▄▅▆▇█"
         rendered: list[str] = []
         for values in bins:
             if not values:
                 rendered.append(" ")
                 continue
             value = max(values) if metric == "temp" else sum(values) / len(values) if metric == "util" else values[-1]
-            rendered.append(glyphs[min(8, max(0, round(value / maximum * 8)))])
+            rendered.append(glyphs[min(7, max(0, round(value / maximum * 7)))])
         return "".join(rendered)
 
 
@@ -106,11 +110,17 @@ class FanAppUI(Static):
         for endpoint in snapshot.endpoint_snapshots:
             self.history.append(endpoint.endpoint_id, endpoint.sample_revision, endpoint.gpus, now)
         errors = [f"{e.name}: {e.error or 'stale'} (sample age: {'N/A' if e.age_seconds is None else f'{e.age_seconds:.1f}s'})" for e in snapshot.endpoint_snapshots if not e.healthy]
-        self.query_one("#error-banner", Static).update(" | ".join(errors) if errors else "All configured DGX endpoints are healthy.")
-        self._render_dashboard(snapshot, now)
+        try:
+            self.query_one("#error-banner", Static).update(" | ".join(errors) if errors else "All configured DGX endpoints are healthy.")
+            self._render_dashboard(snapshot, now)
+        except NoMatches:
+            return
         fan_text = ", ".join(f"Fan {i + 1}: {fan.state} {fan.rpm or 0:.0f} RPM" for i, fan in enumerate(snapshot.fans))
         maximum = "N/A" if snapshot.max_temperature_celsius is None else f"{snapshot.max_temperature_celsius:.1f} C"
-        self.query_one("#fan-status", Static).update(f"{snapshot.state} — {snapshot.duty_percent}% PWM ({snapshot.reason})\nMax GPU temp: {maximum}; stage: {snapshot.active_stage}\n{fan_text}")
+        try:
+            self.query_one("#fan-status", Static).update(f"{snapshot.state} — {snapshot.duty_percent}% PWM ({snapshot.reason})\nMax GPU temp: {maximum}; stage: {snapshot.active_stage}\n{fan_text}")
+        except NoMatches:
+            pass
 
     def _render_dashboard(self, snapshot: ControlSnapshot, now: float) -> None:
         scroll = self.query_one("#dashboard-scroll", VerticalScroll)
@@ -122,7 +132,9 @@ class FanAppUI(Static):
             for key in keys:
                 gpu = current.get((endpoint.endpoint_id, key))
                 label = f"{gpu.key} {gpu.name}" if gpu else f"{key} (last seen)"
-                mem = "N/A" if gpu is None or gpu.memory_used_mib is None else f"{gpu.memory_used_mib:.0f} MiB"
+                mem = "N/A"
+                if gpu is not None and gpu.memory_used_mib is not None and gpu.memory_total_mib is not None and gpu.memory_total_mib > 0:
+                    mem = f"{gpu.memory_used_mib:.0f}/{gpu.memory_total_mib:.0f} MiB ({gpu.memory_used_mib / gpu.memory_total_mib * 100:.0f}%)"
                 util = "N/A" if gpu is None or gpu.utilization_percent is None else f"{gpu.utilization_percent:.0f}%"
                 temp = "N/A" if gpu is None or gpu.temperature_celsius is None else f"{gpu.temperature_celsius:.1f} C"
                 lines.extend((label, f"MEM  {mem:>9} {self.history.graph(endpoint.endpoint_id, key, 'mem', now, 36, 100)}", f"UTIL {util:>9} {self.history.graph(endpoint.endpoint_id, key, 'util', now, 36, 100)}", f"TEMP {temp:>9} {self.history.graph(endpoint.endpoint_id, key, 'temp', now, 36, max(100, self.emergency_temperature))}"))
