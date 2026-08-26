@@ -32,6 +32,57 @@ Do not substitute the system `/usr/bin/python` for the activated environment: it
 
 Start with `hardware.backend = "fake"` on a development machine. Its default tach simulation reports plausible running RPM while PWM is nonzero; tests can explicitly inject `NO TACH` readings for stall probes. For a Pi install `.[raspberry-pi]`, enable the kernel PWM overlay, and change the backend to `raspberry-pi` only after wiring has been checked.
 
+## Raspberry Pi clone-local installation and console start
+
+For a Raspberry Pi OS console installation, clone the repository, then keep the editable
+configuration **in that clone**. `install.sh` never copies `config.toml` to `/etc`.
+
+```bash
+git clone <repository-url> dgx-fan
+cd dgx-fan
+cp config.example.toml config.toml
+# Edit DGX URLs and set [hardware] backend = "raspberry-pi" before continuing.
+./install.sh --reboot
+```
+
+`install.sh` runs `uv sync --locked --extra raspberry-pi --no-dev`, validates the clone's
+`config.toml`, adds the required dual-PWM overlay, and configures Raspberry Pi OS console
+auto-login on tty1. If `config.toml` is absent, it creates it from `config.example.toml` and
+stops; edit it and run the installer again. It requires `uv`; install uv with the
+[official uv instructions](https://docs.astral.sh/uv/getting-started/installation/) first if it
+is not already available. Use `./install.sh` without `--reboot` to install first and reboot
+manually, or `./install.sh --dry-run` to inspect the intended action without changing the Pi.
+
+No systemd unit or cron `@reboot` entry is installed. A root-owned tty1 profile hook calls
+the clone's `start.sh` once for the configured local login user, never for SSH, and does not
+`exec` the application: a normal TUI Quit returns to the console shell. `start.sh` uses
+passwordless sudo only for a fixed, root-owned no-argument helper that grants the `gpio` group
+access to PWM0, PWM1, and `/dev/gpiochip0`; it then launches
+`.venv/bin/dgx-fan --config <clone>/config.toml` as the regular user. The Python project is
+never run as root.
+
+For a manual launch after installation, use:
+
+```bash
+./start.sh
+```
+
+To remove only this project's hook, sudoers policy, and hardware helper, while keeping the
+clone and its configuration:
+
+```bash
+./uninstall.sh --yes
+```
+
+Uninstall intentionally leaves the PWM overlay and console auto-login in place. Disable
+console auto-login with `sudo raspi-config`, and remove only the exact
+`dtoverlay=pwm-2chan,pin=18,pin2=19,func=2,func2=2` line (or restore the backup created beside
+the boot configuration) if rollback requires it. The local auto-login grants physical-console
+access to the account and this design has no crash-restart supervisor. A tty1 console is also
+less suitable for terminal mouse/touch reporting than a terminal emulator; keyboard control is
+the supported boot-console interface. Validate boot behavior, PWM waveform, RPM, and fan
+fail-safe behavior on the real Pi before unattended use.
+
 ## Configuration and safety
 
 `config.example.toml` documents schema v2. `hardware.pwm_gpio_bcm` and `control.fan_endpoint_ids` each contain exactly two entries in Fan 1/Fan 2 order. Both endpoint IDs must name configured `[[dgx]]` IDs; for one DGX, repeat its ID. Normal curve, hysteresis, startup boost, tach expectation, duty, and TUI status are independent per fan. The curve and max-speed cap are intentionally shared. All configured endpoints must be fresh and healthy; any endpoint failure, missing mapped temperature, emergency temperature on **any** configured GPU, or a reported fan stall forces **both** PWM channels to 100%. A runtime UI Off is ignored by those safety states. Normal recovery has a dwell period. Version-1 scalar `pwm_gpio_bcm = 18` files are rejected: change to `version = 2`, use `[18, 19]`, and add `fan_endpoint_ids` before starting the app.
@@ -78,18 +129,17 @@ Each fan is 0.187 A typical and 0.26 A maximum; two are 0.374 A typical and 0.52
 
 ### Linux PWM and libgpiod first bring-up
 
-This backend does not use pigpiod. It writes kernel Linux PWM sysfs channels and uses libgpiod falling-edge events with an internal pull-up for tach. Add this overlay to the active boot configuration (`/boot/firmware/config.txt` on current Raspberry Pi OS images), then reboot:
+This backend does not use pigpiod. It writes kernel Linux PWM sysfs channels and uses libgpiod falling-edge events with an internal pull-up for tach. The clone-local installer adds the overlay to the active boot configuration (`/boot/firmware/config.txt` on current Raspberry Pi OS images), installs the access helper, and reboots:
 
 ```bash
 pinout
-uv pip install -e '.[raspberry-pi]'
-sudoedit /boot/firmware/config.txt
-sudo reboot
+./install.sh --reboot
+# After the Pi has rebooted:
 ls -l /sys/class/pwm/pwmchip0 /dev/gpiochip0
-sudo .venv/bin/dgx-fan --config /absolute/path/config.toml
+./start.sh
 ```
 
-Add this uncommented line to `/boot/firmware/config.txt` before the reboot:
+The installer writes this uncommented line. Add it manually only when intentionally not using the installer:
 
 ```ini
 dtoverlay=pwm-2chan,pin=18,pin2=19,func=2,func2=2
@@ -105,7 +155,7 @@ tach_gpio_bcm = [23, 24]
 shutdown_mode = "off" # optional; clean exit only, default is fail-safe "full"
 ```
 
-The process needs permission to write PWM sysfs and open `/dev/gpiochip0`; use an appropriate device-access/udev policy or run the initial bring-up with `sudo`. Do not run analogue audio or another PWM consumer at the same time: PWM channels are shared hardware. Bring up one fan at a time: inspect unpowered wiring, verify 5 V/common ground, connect Fan 1, then measure approximately 25 kHz non-inverted duty, RPM, and curve response before adding Fan 2. Exercise endpoint loss, disconnected tach/stall, and both clean and fault exits. The default release commands full duty and keeps PWM enabled. With the explicit `shutdown_mode = "off"` option, a clean TUI exit commands 0% duty and keeps PWM enabled; any PWM/tach/GPIO cleanup fault falls back to full duty. This repository cannot prove pinmux, waveform, process-kill, boot, or physical speed behavior; measure it before unattended use. To roll back, remove `shutdown_mode = "off"` (or set `"full"`) and restart, or revert the containing commit; no rewiring is required.
+The installer adds the login user to `gpio` and installs a narrow root-owned helper to grant access to PWM sysfs and `/dev/gpiochip0`; use `./start.sh`, not `sudo .venv/bin/dgx-fan`, after installation. Do not run analogue audio or another PWM consumer at the same time: PWM channels are shared hardware. Bring up one fan at a time: inspect unpowered wiring, verify 5 V/common ground, connect Fan 1, then measure approximately 25 kHz non-inverted duty, RPM, and curve response before adding Fan 2. Exercise endpoint loss, disconnected tach/stall, and both clean and fault exits. The default release commands full duty and keeps PWM enabled. With the explicit `shutdown_mode = "off"` option, a clean TUI exit commands 0% duty and keeps PWM enabled; any PWM/tach/GPIO cleanup fault falls back to full duty. This repository cannot prove pinmux, waveform, process-kill, boot, or physical speed behavior; measure it before unattended use. To roll back, remove `shutdown_mode = "off"` (or set `"full"`) and restart, or revert the containing commit; no rewiring is required.
 
 
 Stop and remove power if any GPIO, cable, connector, or supply becomes hot; a Pi GPIO is above 3.3 V; polarity is uncertain; a fan will not start; or measured current exceeds a supply/cable rating. This project cannot validate an unknown fan, assembled circuit, or live DGX data.
@@ -123,4 +173,4 @@ The primary sources above support only the stated Noctua model. They do not veri
 
 ## MVP limitations
 
-There is no systemd daemon, Unix socket, persistent `/etc` configuration, configuration editor, meatball menu, GPU process table, native touch support, `uvx` release package, or live hardware verification yet. Those are intentionally deferred until the direct-Python MVP is proven on a target Pi and DGX.
+There is no systemd daemon, Unix socket, persistent `/etc` configuration, configuration editor, meatball menu, GPU process table, native touch support, `uvx` release package, crash-restart supervisor, or live hardware verification yet. The optional tty1 console integration is deliberately simple and remains subject to target-Pi validation.
