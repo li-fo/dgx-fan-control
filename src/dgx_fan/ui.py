@@ -81,8 +81,17 @@ class DashboardHistory:
                 del self.last_seen[identity]
 
     def area(
-        self, endpoint_id: str, gpu: str, metric: str, now: float, width: int, maximum: float
+        self,
+        endpoint_id: str,
+        gpu: str,
+        metric: str,
+        now: float,
+        width: int,
+        maximum: float,
+        plot_height: int = PLOT_HEIGHT,
     ) -> list[str]:
+        if not 1 <= plot_height <= PLOT_HEIGHT:
+            raise ValueError(f"plot_height must be between 1 and {PLOT_HEIGHT}")
         bins: list[list[float]] = [[] for _ in range(width)]
         latest_at: list[float | None] = [None for _ in range(width)]
         cutoff = now - HISTORY_SECONDS
@@ -125,8 +134,9 @@ class DashboardHistory:
             ):
                 values[index] = previous_value
         rows: list[str] = []
-        for row in range(PLOT_HEIGHT):
-            threshold = (PLOT_HEIGHT - 1 - row) / (PLOT_HEIGHT - 1) * maximum
+        label_rows = {0, plot_height // 2, plot_height - 1}
+        for row in range(plot_height):
+            threshold = (plot_height - 1 - row) / max(1, plot_height - 1) * maximum
             line = "".join(
                 " "
                 if value is None
@@ -137,7 +147,7 @@ class DashboardHistory:
                 else " "
                 for value in values
             )
-            label = f"{threshold:>4.0f} " if row in {0, 2, 4} else "     "
+            label = f"{threshold:>4.0f} " if row in label_rows else "     "
             rows.append(label + line)
         axis = (
             "     120s"
@@ -238,7 +248,6 @@ class FanAppUI(Static):
     def _render_dashboard(self, snapshot: ControlSnapshot, now: float) -> None:
         scroll = self.query_one("#dashboard-scroll", VerticalScroll)
         terminal_width = self.screen.size.width
-        available = scroll.size.width
         warning = self.query_one("#dashboard-warning", Static)
         if terminal_width < MIN_DASHBOARD_WIDTH:
             warning.update(
@@ -258,15 +267,30 @@ class FanAppUI(Static):
             for endpoint in snapshot.endpoint_snapshots
             for gpu in endpoint.gpus
         }
+        keys_by_endpoint = {
+            endpoint.endpoint_id: sorted(
+                key for source, key in self.history.last_seen if source == endpoint.endpoint_id
+            )
+            for endpoint in snapshot.endpoint_snapshots
+        }
+        plot_height = self._plot_height(
+            scroll.size.height,
+            len(snapshot.endpoint_snapshots),
+            sum(len(keys) for keys in keys_by_endpoint.values()),
+        )
+        gpu_count = sum(len(keys) for keys in keys_by_endpoint.values())
+        content_lines = len(snapshot.endpoint_snapshots) + gpu_count * (6 + plot_height * 2)
+        # Textual reserves two cells for a visible vertical scrollbar. Reserve
+        # the same width before composing when the minimum content genuinely
+        # overflows, so chart rows never wrap underneath it.
+        available = max(1, scroll.size.width - (2 if content_lines > scroll.size.height else 0))
         previous: Static | None = None
         for endpoint in snapshot.endpoint_snapshots:
             # Health changes on the fast control tick. Keep them in the banner so
             # a changed health state doesn't imply that cached charts were sampled
             # again or need a costly panel redraw.
             rendered = Text(_safe_display_text(endpoint.name))
-            keys = sorted(
-                key for source, key in self.history.last_seen if source == endpoint.endpoint_id
-            )
+            keys = keys_by_endpoint[endpoint.endpoint_id]
             for key in keys:
                 gpu = current.get((endpoint.endpoint_id, key))
                 mem = "N/A"
@@ -287,38 +311,38 @@ class FanAppUI(Static):
                     if gpu is None or gpu.temperature_celsius is None
                     else f"{gpu.temperature_celsius:.1f} C"
                 )
-                plot_width = max(1, available - 7)
-                for metric, value, maximum in (
-                    ("MEM", mem, 100),
-                    ("UTIL", util, 100),
-                    ("TEMP", temp, max(100, self.emergency_temperature)),
+                left_width = max(7, (available - 1) // 2)
+                right_width = max(7, available - 1 - left_width)
+                memory_lines, memory_color = self._chart_box(
+                    endpoint.endpoint_id, key, "MEM", mem, now, left_width, 100, plot_height
+                )
+                temperature_lines, temperature_color = self._chart_box(
+                    endpoint.endpoint_id,
+                    key,
+                    "TEMP",
+                    temp,
+                    now,
+                    right_width,
+                    max(100, self.emergency_temperature),
+                    plot_height,
+                )
+                utilization_lines, utilization_color = self._chart_box(
+                    endpoint.endpoint_id, key, "UTIL", util, now, available, 100, plot_height
+                )
+                rendered.append("\n")
+                for index, (memory_line, temperature_line) in enumerate(
+                    zip(memory_lines, temperature_lines, strict=True)
                 ):
-                    chart = self.history.area(
-                        endpoint.endpoint_id,
-                        key,
-                        metric.lower(),
-                        now,
-                        max(1, plot_width - 2),
-                        maximum,
-                    )
-                    inner = max(len(row) for row in chart)
-                    box = "\n".join(
-                        (
-                            f"┌ {metric} {value}"[: inner + 1].ljust(inner + 1, "─") + "┐",
-                            *(f"│{row.ljust(inner)}│" for row in chart),
-                            "└" + "─" * inner + "┘",
-                        )
-                    )
-                    rendered.append("\n")
-                    color = {
-                        "MEM": self.dashboard_colors.memory,
-                        "UTIL": self.dashboard_colors.utilization,
-                        "TEMP": self.dashboard_colors.temperature,
-                    }[metric]
-                    if color is None:
-                        rendered.append(box)
-                    else:
-                        rendered.append(box, style=Style(color=color))
+                    self._append_colored(rendered, memory_line, memory_color)
+                    rendered.append(" ")
+                    self._append_colored(rendered, temperature_line, temperature_color)
+                    if index < len(memory_lines) - 1:
+                        rendered.append("\n")
+                rendered.append("\n")
+                for index, utilization_line in enumerate(utilization_lines):
+                    self._append_colored(rendered, utilization_line, utilization_color)
+                    if index < len(utilization_lines) - 1:
+                        rendered.append("\n")
             panel = self.panels.get(endpoint.endpoint_id)
             if panel is None:
                 # Endpoint/GPU names originate outside the UI. Rendering the panel
@@ -333,6 +357,56 @@ class FanAppUI(Static):
             else:
                 scroll.move_child(panel, after=previous)
             previous = panel
+
+    @staticmethod
+    def _plot_height(viewport_height: int, endpoint_count: int, gpu_count: int) -> int:
+        """Reserve endpoint labels and complete borders before adding plot rows."""
+        if gpu_count == 0:
+            return PLOT_HEIGHT
+        fixed_lines = endpoint_count + gpu_count * 6
+        return min(PLOT_HEIGHT, max(1, (max(0, viewport_height) - fixed_lines) // (gpu_count * 2)))
+
+    def _chart_box(
+        self,
+        endpoint_id: str,
+        gpu_key: str,
+        metric: str,
+        value: str,
+        now: float,
+        total_width: int,
+        maximum: float,
+        plot_height: int,
+    ) -> tuple[list[str], str | None]:
+        chart = self.history.area(
+            endpoint_id,
+            gpu_key,
+            metric.lower(),
+            now,
+            max(1, total_width - 7),
+            maximum,
+            plot_height,
+        )
+        inner = max(len(row) for row in chart)
+        box = "\n".join(
+            (
+                f"┌ {metric} {value}"[: inner + 1].ljust(inner + 1, "─") + "┐",
+                *(f"│{row.ljust(inner)}│" for row in chart),
+                "└" + "─" * inner + "┘",
+            )
+        )
+        color = {
+            "MEM": self.dashboard_colors.memory,
+            "UTIL": self.dashboard_colors.utilization,
+            "TEMP": self.dashboard_colors.temperature,
+        }[metric]
+        return box.splitlines(), color
+
+    @staticmethod
+    def _append_colored(rendered: Text, value: str, color: str | None) -> None:
+        if color is None:
+            rendered.append(value)
+        else:
+            rendered.append(value, style=Style(color=color))
 
     def on_resize(self) -> None:
         if self.snapshot is not None and self.last_render_time is not None:

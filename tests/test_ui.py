@@ -151,6 +151,13 @@ def test_area_renderer_locks_geometry_axis_gaps_and_bin_reducers() -> None:
     temp = reducers.area("one", "GPU-a", "temp", now, width, 75)
     assert [line[:5] for line in temp[:5]] == ["  75 ", "     ", "  38 ", "     ", "   0 "]
 
+    for height in range(1, 6):
+        compact = reducers.area("one", "GPU-a", "temp", now, width, 75, height)
+        assert len(compact) == height + 1
+        assert compact[-1].rstrip().endswith("now")
+        assert compact[0].startswith("   0 " if height == 1 else "  75 ")
+        assert compact[-2].startswith("   0 ")
+
 
 class _DashboardApp(App[None]):
     def compose(self) -> ComposeResult:
@@ -373,7 +380,7 @@ def test_area_step_fills_only_the_configured_cadence_and_preserves_reducers() ->
     assert heights == {"mem": 1, "util": 3, "temp": 4}
 
 
-def test_compact_gpu_groups_have_three_boxes_each_without_identity_lines() -> None:
+def test_compact_gpu_groups_pair_memory_and_temperature_without_identity_lines() -> None:
     app = _DashboardApp()
     gpus = (
         GPUStat(
@@ -415,27 +422,20 @@ def test_compact_gpu_groups_have_three_boxes_each_without_identity_lines() -> No
                 and "A100" not in "\n".join(lines)
                 and "H100" not in "\n".join(lines)
             )
-            tops = [line for line in lines if line.startswith("┌ ")]
-            assert len(tops) == 6
-            assert tops[:3] == [
-                next(line for line in tops if line.startswith("┌ MEM 50/100 MiB (50%)")),
-                next(line for line in tops if line.startswith("┌ UTIL 20%")),
-                next(line for line in tops if line.startswith("┌ TEMP 40.0 C")),
-            ]
-            assert tops[3:] == [
-                next(line for line in tops if line.startswith("┌ MEM 20/100 MiB (20%)")),
-                next(line for line in tops if line.startswith("┌ UTIL 10%")),
-                next(line for line in tops if line.startswith("┌ TEMP 30.0 C")),
-            ]
+            paired = [line for line in lines if line.startswith("┌ MEM ")]
+            assert len(paired) == 2
+            assert all(" ┌ TEMP " in line for line in paired)
+            assert paired[0].startswith("┌ MEM 50/100 MiB (50%)")
+            assert paired[1].startswith("┌ MEM 20/100 MiB (20%)")
+            for pair in paired:
+                index = lines.index(pair)
+                assert lines[index + 4].startswith("┌ UTIL ")
             assert "" not in lines
-            for index, line in enumerate(lines):
-                if line.startswith("┌ "):
-                    assert lines[index + 7].startswith("└")
 
     asyncio.run(exercise())
 
 
-def test_mounted_responsive_width_reuses_history() -> None:
+def test_mounted_paired_width_reuses_history() -> None:
     app = _DashboardApp()
     gpu = GPUStat(
         "GPU-a",
@@ -465,36 +465,28 @@ def test_mounted_responsive_width_reuses_history() -> None:
             await pilot.resize_terminal(79, 24)
             await pilot.pause()
             assert scroll.display and len(ui.query(".dgx-panel")) == 1
-            narrow_lines = str(next(iter(ui.query(".dgx-panel"))).render()).splitlines()
 
-            def assert_boxes(lines: list[str], expected_width: int) -> int:
-                widths: list[int] = []
-                for metric, value in (
-                    ("MEM", "50/100 MiB (50%)"),
-                    ("UTIL", "20%"),
-                    ("TEMP", "40.0 C"),
-                ):
-                    top_index = next(
-                        index for index, line in enumerate(lines) if line.startswith(f"┌ {metric} ")
-                    )
-                    box = lines[top_index : top_index + 8]
-                    assert len(box) == 8
-                    assert box[0].startswith(f"┌ {metric} {value}") and box[0].endswith("┐")
-                    assert all(row.startswith("│") and row.endswith("│") for row in box[1:7])
-                    assert box[-1].startswith("└") and box[-1].endswith("┘")
-                    assert len({len(row) for row in box}) == 1
-                    assert all(len(row) <= expected_width for row in box)
-                    widths.append(len(box[1]) - 7)
-                assert len(set(widths)) == 1
-                return widths[0]
+            def assert_paired_width(expected_width: int) -> tuple[int, int, int]:
+                lines = str(next(iter(ui.query(".dgx-panel"))).render()).splitlines()
+                pair = next(line for line in lines if line.startswith("┌ MEM "))
+                split = pair.index(" ┌ TEMP ")
+                util = next(line for line in lines if line.startswith("┌ UTIL "))
+                assert len(pair) == expected_width and len(util) == expected_width
+                assert pair[:split].endswith("┐") and pair[split + 1 :].endswith("┐")
+                assert util.endswith("┐")
+                return split, len(pair) - split - 1, len(util)
 
-            narrow = assert_boxes(narrow_lines, scroll.size.width)
-            assert narrow > 36
+            narrow = assert_paired_width(scroll.size.width)
+            assert narrow[0] + narrow[1] + 1 == scroll.size.width
+            await pilot.resize_terminal(85, 24)
+            await pilot.pause()
+            odd = assert_paired_width(scroll.size.width)
             await pilot.resize_terminal(120, 24)
             await pilot.pause()
-            wide_lines = str(next(iter(ui.query(".dgx-panel"))).render()).splitlines()
-            wide = assert_boxes(wide_lines, scroll.size.width)
-            assert wide > narrow and count == len(ui.history.points[("one", "GPU-a", "util")])
+            wide = assert_paired_width(scroll.size.width)
+            assert wide[0] > narrow[0] and wide[2] > narrow[2]
+            assert abs(odd[0] - odd[1]) <= 1
+            assert count == len(ui.history.points[("one", "GPU-a", "util")])
             await pilot.resize_terminal(78, 24)
             await pilot.resize_terminal(79, 24)
             await pilot.pause()
@@ -579,20 +571,24 @@ def test_dashboard_color_spans_cover_complete_boxes_only() -> None:
             await pilot.pause()
             rendered = next(iter(ui.query(".dgx-panel"))).render()
             assert rendered.plain.startswith("One\n")
-            assert len(rendered.spans) == 3
-            boxes = rendered.plain.splitlines()[1:]
-            offset = len("One\n")
-            for span, color, box in zip(
-                rendered.spans,
-                ("ansi_yellow", "ansi_cyan", "rgb(255,0,0)"),
-                (boxes[:8], boxes[8:16], boxes[16:24]),
-                strict=True,
-            ):
-                assert rendered.plain[span.start : span.end] == "\n".join(box)
+            box_height = (
+                ui._plot_height(ui.query_one("#dashboard-scroll", VerticalScroll).size.height, 1, 1)
+                + 3
+            )
+            assert len(rendered.spans) == box_height * 3
+            previous_end = len("One\n")
+            expected = [("ansi_yellow", "MEM"), ("rgb(255,0,0)", "TEMP")] * box_height + [
+                ("ansi_cyan", "UTIL")
+            ] * box_height
+            for span, (color, metric) in zip(rendered.spans, expected, strict=True):
+                row = rendered.plain[span.start : span.end]
                 assert str(span.style) == color
-                assert rendered.plain[span.start - 1] == "\n"
-                offset = span.end
-            assert offset == len(rendered.plain)
+                assert row.startswith(("┌", "│", "└")) and row.endswith(("┐", "│", "┘"))
+                if row.startswith("┌"):
+                    assert row.startswith(f"┌ {metric} ")
+                assert rendered.plain[previous_end : span.start] in {"", " ", "\n"}
+                previous_end = span.end
+            assert previous_end == len(rendered.plain)
 
     asyncio.run(exercise())
 
@@ -643,5 +639,61 @@ def test_dashboard_without_colors_preserves_plain_geometry_and_sanitizes_externa
                 len(line) <= ui.query_one("#dashboard-scroll", VerticalScroll).size.width
                 for line in rendered.plain.splitlines()
             )
+
+    asyncio.run(exercise())
+
+
+def test_two_single_gpu_endpoints_fit_short_viewports_and_expand_when_tall() -> None:
+    app = _DashboardApp()
+    gpu = GPUStat(
+        "GPU-a",
+        "A100",
+        memory_used_mib=50,
+        memory_total_mib=100,
+        utilization_percent=20,
+        temperature_celsius=40,
+    )
+    snapshot = ControlSnapshot(
+        20,
+        "curve",
+        "AUTO ON",
+        40,
+        0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (
+            EndpointSnapshot("one", "One", True, 0, gpus=(gpu,), sample_revision=1),
+            EndpointSnapshot("two", "Two", True, 0, gpus=(gpu,), sample_revision=1),
+        ),
+    )
+
+    async def exercise() -> None:
+        async with app.run_test(size=(85, 25)) as pilot:
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 1)
+            await pilot.pause()
+            scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
+            assert scroll.max_scroll_y == 0
+            assert len(ui.query(".dgx-panel")) == 2
+            assert all(
+                {"MEM", "TEMP", "UTIL"}
+                == {
+                    line.split()[1]
+                    for line in panel.render().plain.splitlines()
+                    if line.startswith("┌ ") or " ┌ " in line
+                    for line in line.replace(" ┌ ", "\n┌ ").splitlines()
+                }
+                for panel in ui.query(".dgx-panel")
+            )
+            compact_points = len(ui.history.points[("one", "GPU-a", "util")])
+            compact_lines = len(next(iter(ui.query(".dgx-panel"))).render().plain.splitlines())
+            await pilot.resize_terminal(100, 30)
+            await pilot.pause()
+            assert scroll.max_scroll_y == 0
+            await pilot.resize_terminal(120, 40)
+            await pilot.pause()
+            tall_lines = len(next(iter(ui.query(".dgx-panel"))).render().plain.splitlines())
+            assert tall_lines > compact_lines
+            assert ui._plot_height(scroll.size.height, 2, 2) == 5
+            assert compact_points == len(ui.history.points[("one", "GPU-a", "util")])
 
     asyncio.run(exercise())
