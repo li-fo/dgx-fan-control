@@ -5,6 +5,13 @@ id = "dgx-1"
 name = "DGX-1"
 url = "http://192.168.1.10:9400/metrics"
 
+[dashboard.colors]
+# Optional foreground colors for MEM, UTIL, and TEMP charts. Use a Rich color
+# name or exact #RRGGBB; omit any key to retain the terminal default color.
+memory = "yellow"
+utilization = "cyan"
+temperature = "red"
+
 [collection]
 interval_seconds = 2.0
 timeout_seconds = 1.5

@@ -6,7 +6,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import Button
 
 from dgx_fan.app import DGXFanApp
-from dgx_fan.config import load_config
+from dgx_fan.config import DashboardColors, load_config
 from dgx_fan.models import ControlSnapshot, EndpointSnapshot, FanReading, GPUStat
 from dgx_fan.ui import DashboardHistory, FanAppUI, HistoryPoint
 
@@ -14,14 +14,19 @@ from dgx_fan.ui import DashboardHistory, FanAppUI, HistoryPoint
 def test_ui_has_tabs_and_power_toggle() -> None:
     config = load_config(Path("config.example.toml"))
     app = DGXFanApp(config)
+
     async def exercise() -> None:
         async with app.run_test() as pilot:
             assert app.query_one("#dashboard")
             assert app.query_one("#fan-control")
-            assert app.query_one(FanAppUI).history.collection_interval_seconds == config.collection.interval_seconds
+            assert (
+                app.query_one(FanAppUI).history.collection_interval_seconds
+                == config.collection.interval_seconds
+            )
             app.query_one("#power-toggle", Button).press()
             await pilot.pause()
             assert not app.controller.power
+
     asyncio.run(exercise())
 
 
@@ -54,7 +59,9 @@ def test_poll_exception_is_supervised_and_unmount_cleans_up(monkeypatch) -> None
 
 def test_history_deduplicates_revisions_preserves_gaps_and_prunes_missing_gpu() -> None:
     history = DashboardHistory(2)
-    gpu = GPUStat("GPU-a", "A100", memory_used_mib=40, utilization_percent=50, temperature_celsius=60)
+    gpu = GPUStat(
+        "GPU-a", "A100", memory_used_mib=40, utilization_percent=50, temperature_celsius=60
+    )
     history.append("one", 1, (gpu,), 0)
     history.append("one", 1, (gpu,), 0.25)
     assert len(history.points[("one", "GPU-a", "util")]) == 1
@@ -68,7 +75,14 @@ def test_history_deduplicates_revisions_preserves_gaps_and_prunes_missing_gpu() 
 
 def test_memory_history_is_normalized_and_zero_is_not_a_gap() -> None:
     history = DashboardHistory(2)
-    gpu = GPUStat("GPU-a", "A100", memory_used_mib=50, memory_total_mib=100, utilization_percent=0, temperature_celsius=0)
+    gpu = GPUStat(
+        "GPU-a",
+        "A100",
+        memory_used_mib=50,
+        memory_total_mib=100,
+        utilization_percent=0,
+        temperature_celsius=0,
+    )
     history.append("one", 1, (gpu,), 120)
     assert history.points[("one", "GPU-a", "mem")][0].value == 50
     assert history.area("one", "GPU-a", "util", 120, 1, 100)[4][5:] == "▁"
@@ -106,15 +120,30 @@ def test_area_renderer_locks_geometry_axis_gaps_and_bin_reducers() -> None:
         assert positions == expected_positions
         assert positions == tuple(sorted(positions))
         assert positions[0] == 5 and axis.rstrip().endswith("now")
-        assert all(positions[index] + len(label) <= positions[index + 1] for index, label in enumerate(("120s", "60s", "30s")))
+        assert all(
+            positions[index] + len(label) <= positions[index + 1]
+            for index, label in enumerate(("120s", "60s", "30s"))
+        )
 
     reducers = DashboardHistory(2)
     width = 72
-    reducers.points[("one", "GPU-a", "mem")] = [point_for_bin(width, 10, 10), point_for_bin(width, 10, 80)]
-    reducers.points[("one", "GPU-a", "util")] = [point_for_bin(width, 10, 10), point_for_bin(width, 10, 90)]
-    reducers.points[("one", "GPU-a", "temp")] = [point_for_bin(width, 10, 10), point_for_bin(width, 10, 90)]
+    reducers.points[("one", "GPU-a", "mem")] = [
+        point_for_bin(width, 10, 10),
+        point_for_bin(width, 10, 80),
+    ]
+    reducers.points[("one", "GPU-a", "util")] = [
+        point_for_bin(width, 10, 10),
+        point_for_bin(width, 10, 90),
+    ]
+    reducers.points[("one", "GPU-a", "temp")] = [
+        point_for_bin(width, 10, 10),
+        point_for_bin(width, 10, 90),
+    ]
     filled_rows = {
-        metric: sum(line[5 + 10] != " " for line in reducers.area("one", "GPU-a", metric, now, width, 100)[:5])
+        metric: sum(
+            line[5 + 10] != " "
+            for line in reducers.area("one", "GPU-a", metric, now, width, 100)[:5]
+        )
         for metric in ("mem", "util", "temp")
     }
     assert filled_rows == {"mem": 4, "util": 3, "temp": 4}
@@ -130,16 +159,45 @@ class _DashboardApp(App[None]):
 
 def test_panels_are_ordered_retained_and_deduplicated() -> None:
     app = _DashboardApp()
-    gpu = GPUStat("GPU-a", "A100", memory_used_mib=50, memory_total_mib=100, utilization_percent=20, temperature_celsius=40)
-    incomplete = GPUStat("GPU-z", "H100", memory_used_mib=50, utilization_percent=0, temperature_celsius=0)
-    first = ControlSnapshot(20, "curve", "AUTO ON", 40, 0, (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING")), (
-        EndpointSnapshot("rack/1", "Z endpoint", True, 0, gpus=(incomplete,), sample_revision=1),
-        EndpointSnapshot("dgx:one", "A endpoint", True, 0, gpus=(gpu,), sample_revision=1),
-    ))
-    second = ControlSnapshot(20, "curve", "AUTO ON", 40, 0, (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING")), (
-        EndpointSnapshot("dgx:one", "A endpoint", True, 0, gpus=(), sample_revision=2),
-        EndpointSnapshot("rack/1", "Z endpoint", True, 0, gpus=(incomplete,), sample_revision=1),
-    ))
+    gpu = GPUStat(
+        "GPU-a",
+        "A100",
+        memory_used_mib=50,
+        memory_total_mib=100,
+        utilization_percent=20,
+        temperature_celsius=40,
+    )
+    incomplete = GPUStat(
+        "GPU-z", "H100", memory_used_mib=50, utilization_percent=0, temperature_celsius=0
+    )
+    first = ControlSnapshot(
+        20,
+        "curve",
+        "AUTO ON",
+        40,
+        0,
+        (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING")),
+        (
+            EndpointSnapshot(
+                "rack/1", "Z endpoint", True, 0, gpus=(incomplete,), sample_revision=1
+            ),
+            EndpointSnapshot("dgx:one", "A endpoint", True, 0, gpus=(gpu,), sample_revision=1),
+        ),
+    )
+    second = ControlSnapshot(
+        20,
+        "curve",
+        "AUTO ON",
+        40,
+        0,
+        (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING")),
+        (
+            EndpointSnapshot("dgx:one", "A endpoint", True, 0, gpus=(), sample_revision=2),
+            EndpointSnapshot(
+                "rack/1", "Z endpoint", True, 0, gpus=(incomplete,), sample_revision=1
+            ),
+        ),
+    )
 
     async def exercise() -> None:
         async with app.run_test() as _:
@@ -147,7 +205,9 @@ def test_panels_are_ordered_retained_and_deduplicated() -> None:
             ui.update_snapshot(first, 1)
             await asyncio.sleep(0)
             present = [str(panel.render()) for panel in ui.query(".dgx-panel")]
-            assert "50/100 MiB (50%)" in present[1] and "20%" in present[1] and "40.0 C" in present[1]
+            assert (
+                "50/100 MiB (50%)" in present[1] and "20%" in present[1] and "40.0 C" in present[1]
+            )
             ui.update_snapshot(second, 2)
             ui.update_snapshot(second, 2.25)
             await asyncio.sleep(0)
@@ -155,7 +215,11 @@ def test_panels_are_ordered_retained_and_deduplicated() -> None:
             assert len(rendered) == 2
             assert "A endpoint" in rendered[0] and "Z endpoint" in rendered[1]
             assert "N/A" in rendered[1]
-            assert "GPU-a" not in rendered[0] and "A100" not in rendered[0] and "(last seen)" not in rendered[0]
+            assert (
+                "GPU-a" not in rendered[0]
+                and "A100" not in rendered[0]
+                and "(last seen)" not in rendered[0]
+            )
             assert len(ui.history.points[("dgx:one", "GPU-a", "util")]) == 1
 
     asyncio.run(exercise())
@@ -164,7 +228,14 @@ def test_panels_are_ordered_retained_and_deduplicated() -> None:
 def test_dashboard_signature_gates_charts_but_not_fast_status_updates(monkeypatch) -> None:
     """Fast health/fan changes must not make cached chart panels look sampled."""
     app = _DashboardApp()
-    gpu = GPUStat("GPU-a", "A100", memory_used_mib=50, memory_total_mib=100, utilization_percent=20, temperature_celsius=40)
+    gpu = GPUStat(
+        "GPU-a",
+        "A100",
+        memory_used_mib=50,
+        memory_total_mib=100,
+        utilization_percent=20,
+        temperature_celsius=40,
+    )
 
     def snapshot(
         endpoints: tuple[EndpointSnapshot, ...], *, state: str = "AUTO ON", healthy: bool = True
@@ -175,13 +246,23 @@ def test_dashboard_signature_gates_charts_but_not_fast_status_updates(monkeypatc
                 endpoint.name,
                 healthy if endpoint.endpoint_id == "a" else endpoint.healthy,
                 endpoint.age_seconds,
-                error="poll failed" if endpoint.endpoint_id == "a" and not healthy else endpoint.error,
+                error="poll failed"
+                if endpoint.endpoint_id == "a" and not healthy
+                else endpoint.error,
                 gpus=endpoint.gpus,
                 sample_revision=endpoint.sample_revision,
             )
             for endpoint in endpoints
         )
-        return ControlSnapshot(20, "curve", state, 40, 0, (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING")), adjusted)
+        return ControlSnapshot(
+            20,
+            "curve",
+            state,
+            40,
+            0,
+            (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING")),
+            adjusted,
+        )
 
     a1 = EndpointSnapshot("a", "A", True, 0, gpus=(gpu,), sample_revision=1)
     b1 = EndpointSnapshot("b", "B", True, 0, gpus=(gpu,), sample_revision=1)
@@ -195,12 +276,17 @@ def test_dashboard_signature_gates_charts_but_not_fast_status_updates(monkeypatc
             original = ui._render_dashboard
 
             def traced(rendered: ControlSnapshot, now: float) -> None:
-                renders.append(tuple((endpoint.endpoint_id, endpoint.sample_revision) for endpoint in rendered.endpoint_snapshots))
+                renders.append(
+                    tuple(
+                        (endpoint.endpoint_id, endpoint.sample_revision)
+                        for endpoint in rendered.endpoint_snapshots
+                    )
+                )
                 original(rendered, now)
 
             monkeypatch.setattr(ui, "_render_dashboard", traced)
             ui.update_snapshot(snapshot((a1, b1)), 1)
-            assert renders == [(('a', 1), ('b', 1))]
+            assert renders == [(("a", 1), ("b", 1))]
             history_count = len(ui.history.points[("a", "GPU-a", "util")])
 
             ui.update_snapshot(snapshot((a1, b1), state="AUTO OFF", healthy=False), 1.25)
@@ -214,7 +300,13 @@ def test_dashboard_signature_gates_charts_but_not_fast_status_updates(monkeypatc
             ui.update_snapshot(snapshot((a2, b2)), 3)
             ui.update_snapshot(snapshot((b2, a2)), 4)
             ui.update_snapshot(snapshot((a2,)), 5)
-            assert renders == [(('a', 1), ('b', 1)), (('a', 2), ('b', 1)), (('a', 2), ('b', 2)), (('b', 2), ('a', 2)), (('a', 2),)]
+            assert renders == [
+                (("a", 1), ("b", 1)),
+                (("a", 2), ("b", 1)),
+                (("a", 2), ("b", 2)),
+                (("b", 2), ("a", 2)),
+                (("a", 2),),
+            ]
 
             before_resize_count = len(ui.history.points[("a", "GPU-a", "util")])
             before_resize_renders = len(renders)
@@ -234,14 +326,18 @@ def test_area_step_fills_only_the_configured_cadence_and_preserves_reducers() ->
     now = 120.0
     # These are the actual area widths mounted at 79 and 120 columns.
     for width in (70, 111):
-        history.points[("one", "GPU-a", "util")] = [HistoryPoint(0, 25), HistoryPoint(2, 50), HistoryPoint(4, 75)]
+        history.points[("one", "GPU-a", "util")] = [
+            HistoryPoint(0, 25),
+            HistoryPoint(2, 50),
+            HistoryPoint(4, 75),
+        ]
         normal = history.area("one", "GPU-a", "util", now, width, 100)[4][5:]
         first, last = 0, int(4 / 120 * width)
-        assert all(column != " " for column in normal[first:last + 1])
+        assert all(column != " " for column in normal[first : last + 1])
 
         history.points[("one", "GPU-a", "temp")] = [HistoryPoint(0, 60), HistoryPoint(3, 80)]
         boundary = history.area("one", "GPU-a", "temp", now, width, 100)[4][5:]
-        assert all(column != " " for column in boundary[:int(3 / 120 * width) + 1])
+        assert all(column != " " for column in boundary[: int(3 / 120 * width) + 1])
 
         history.points[("one", "GPU-a", "temp")] = [HistoryPoint(0, 60), HistoryPoint(4, 80)]
         outage = history.area("one", "GPU-a", "temp", now, width, 100)[4][5:]
@@ -269,7 +365,9 @@ def test_area_step_fills_only_the_configured_cadence_and_preserves_reducers() ->
     history.points[("one", "GPU-a", "util")] = points
     history.points[("one", "GPU-a", "temp")] = points
     heights = {
-        metric: sum(row[5 + 10] != " " for row in history.area("one", "GPU-a", metric, now, 120, 100)[:5])
+        metric: sum(
+            row[5 + 10] != " " for row in history.area("one", "GPU-a", metric, now, 120, 100)[:5]
+        )
         for metric in ("mem", "util", "temp")
     }
     assert heights == {"mem": 1, "util": 3, "temp": 4}
@@ -278,10 +376,32 @@ def test_area_step_fills_only_the_configured_cadence_and_preserves_reducers() ->
 def test_compact_gpu_groups_have_three_boxes_each_without_identity_lines() -> None:
     app = _DashboardApp()
     gpus = (
-        GPUStat("GPU-z", "H100", memory_used_mib=20, memory_total_mib=100, utilization_percent=10, temperature_celsius=30),
-        GPUStat("GPU-a", "A100", memory_used_mib=50, memory_total_mib=100, utilization_percent=20, temperature_celsius=40),
+        GPUStat(
+            "GPU-z",
+            "H100",
+            memory_used_mib=20,
+            memory_total_mib=100,
+            utilization_percent=10,
+            temperature_celsius=30,
+        ),
+        GPUStat(
+            "GPU-a",
+            "A100",
+            memory_used_mib=50,
+            memory_total_mib=100,
+            utilization_percent=20,
+            temperature_celsius=40,
+        ),
     )
-    snapshot = ControlSnapshot(20, "curve", "AUTO ON", 40, 0, (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")), (EndpointSnapshot("one", "One", True, 0, gpus=gpus, sample_revision=1),))
+    snapshot = ControlSnapshot(
+        20,
+        "curve",
+        "AUTO ON",
+        40,
+        0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (EndpointSnapshot("one", "One", True, 0, gpus=gpus, sample_revision=1),),
+    )
 
     async def exercise() -> None:
         async with app.run_test(size=(100, 24)) as pilot:
@@ -289,7 +409,12 @@ def test_compact_gpu_groups_have_three_boxes_each_without_identity_lines() -> No
             ui.update_snapshot(snapshot, 1)
             await pilot.pause()
             lines = str(next(iter(ui.query(".dgx-panel"))).render()).splitlines()
-            assert lines[0] == "One" and "GPU-" not in "\n".join(lines) and "A100" not in "\n".join(lines) and "H100" not in "\n".join(lines)
+            assert (
+                lines[0] == "One"
+                and "GPU-" not in "\n".join(lines)
+                and "A100" not in "\n".join(lines)
+                and "H100" not in "\n".join(lines)
+            )
             tops = [line for line in lines if line.startswith("┌ ")]
             assert len(tops) == 6
             assert tops[:3] == [
@@ -312,8 +437,24 @@ def test_compact_gpu_groups_have_three_boxes_each_without_identity_lines() -> No
 
 def test_mounted_responsive_width_reuses_history() -> None:
     app = _DashboardApp()
-    gpu = GPUStat("GPU-a", "A100", memory_used_mib=50, memory_total_mib=100, utilization_percent=20, temperature_celsius=40)
-    snapshot = ControlSnapshot(20, "curve", "AUTO ON", 40, 0, (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")), (EndpointSnapshot("one", "One", True, 0, gpus=(gpu,), sample_revision=1),))
+    gpu = GPUStat(
+        "GPU-a",
+        "A100",
+        memory_used_mib=50,
+        memory_total_mib=100,
+        utilization_percent=20,
+        temperature_celsius=40,
+    )
+    snapshot = ControlSnapshot(
+        20,
+        "curve",
+        "AUTO ON",
+        40,
+        0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (EndpointSnapshot("one", "One", True, 0, gpus=(gpu,), sample_revision=1),),
+    )
+
     async def exercise() -> None:
         async with app.run_test(size=(78, 24)) as pilot:
             ui = app.query_one(FanAppUI)
@@ -321,14 +462,22 @@ def test_mounted_responsive_width_reuses_history() -> None:
             scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
             assert "78" in str(ui.query_one("#dashboard-warning").render()) and not scroll.display
             count = len(ui.history.points[("one", "GPU-a", "util")])
-            await pilot.resize_terminal(79, 24); await pilot.pause()
+            await pilot.resize_terminal(79, 24)
+            await pilot.pause()
             assert scroll.display and len(ui.query(".dgx-panel")) == 1
             narrow_lines = str(next(iter(ui.query(".dgx-panel"))).render()).splitlines()
+
             def assert_boxes(lines: list[str], expected_width: int) -> int:
                 widths: list[int] = []
-                for metric, value in (("MEM", "50/100 MiB (50%)"), ("UTIL", "20%"), ("TEMP", "40.0 C")):
-                    top_index = next(index for index, line in enumerate(lines) if line.startswith(f"┌ {metric} "))
-                    box = lines[top_index:top_index + 8]
+                for metric, value in (
+                    ("MEM", "50/100 MiB (50%)"),
+                    ("UTIL", "20%"),
+                    ("TEMP", "40.0 C"),
+                ):
+                    top_index = next(
+                        index for index, line in enumerate(lines) if line.startswith(f"┌ {metric} ")
+                    )
+                    box = lines[top_index : top_index + 8]
                     assert len(box) == 8
                     assert box[0].startswith(f"┌ {metric} {value}") and box[0].endswith("┐")
                     assert all(row.startswith("│") and row.endswith("│") for row in box[1:7])
@@ -341,25 +490,158 @@ def test_mounted_responsive_width_reuses_history() -> None:
 
             narrow = assert_boxes(narrow_lines, scroll.size.width)
             assert narrow > 36
-            await pilot.resize_terminal(120, 24); await pilot.pause()
+            await pilot.resize_terminal(120, 24)
+            await pilot.pause()
             wide_lines = str(next(iter(ui.query(".dgx-panel"))).render()).splitlines()
             wide = assert_boxes(wide_lines, scroll.size.width)
             assert wide > narrow and count == len(ui.history.points[("one", "GPU-a", "util")])
-            await pilot.resize_terminal(78, 24); await pilot.resize_terminal(79, 24); await pilot.pause()
+            await pilot.resize_terminal(78, 24)
+            await pilot.resize_terminal(79, 24)
+            await pilot.pause()
             assert scroll.display and len(ui.query(".dgx-panel")) == 1
             assert count == len(ui.history.points[("one", "GPU-a", "util")])
+
     asyncio.run(exercise())
 
 
 def test_dashboard_scrolls_with_keyboard() -> None:
     app = _DashboardApp()
-    gpus = tuple(GPUStat(f"GPU-{i}", "A100", memory_used_mib=50, memory_total_mib=100, utilization_percent=20, temperature_celsius=40) for i in range(5))
-    snapshot = ControlSnapshot(20, "curve", "AUTO ON", 40, 0, (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")), (EndpointSnapshot("z", "Z", True, 0, gpus=gpus, sample_revision=1), EndpointSnapshot("a", "A", True, 0, gpus=gpus, sample_revision=1)))
+    gpus = tuple(
+        GPUStat(
+            f"GPU-{i}",
+            "A100",
+            memory_used_mib=50,
+            memory_total_mib=100,
+            utilization_percent=20,
+            temperature_celsius=40,
+        )
+        for i in range(5)
+    )
+    snapshot = ControlSnapshot(
+        20,
+        "curve",
+        "AUTO ON",
+        40,
+        0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (
+            EndpointSnapshot("z", "Z", True, 0, gpus=gpus, sample_revision=1),
+            EndpointSnapshot("a", "A", True, 0, gpus=gpus, sample_revision=1),
+        ),
+    )
+
     async def exercise() -> None:
         async with app.run_test(size=(100, 12)) as pilot:
-            ui = app.query_one(FanAppUI); ui.update_snapshot(snapshot, 1); await pilot.pause()
-            scroll = ui.query_one("#dashboard-scroll", VerticalScroll); scroll.focus()
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 1)
+            await pilot.pause()
+            scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
+            scroll.focus()
             assert scroll.can_focus and scroll.max_scroll_y > 0
-            before = scroll.scroll_y; await pilot.press("down"); await pilot.pause()
+            before = scroll.scroll_y
+            await pilot.press("down")
+            await pilot.pause()
             assert scroll.scroll_y > before
+
+    asyncio.run(exercise())
+
+
+def test_dashboard_color_spans_cover_complete_boxes_only() -> None:
+    class ColoredDashboardApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FanAppUI(
+                "config.toml", lambda: None, 75, 2, DashboardColors("yellow", "cyan", "#ff0000")
+            )
+
+    app = ColoredDashboardApp()
+    gpu = GPUStat(
+        "GPU-a",
+        "A100",
+        memory_used_mib=50,
+        memory_total_mib=100,
+        utilization_percent=20,
+        temperature_celsius=40,
+    )
+    snapshot = ControlSnapshot(
+        20,
+        "curve",
+        "AUTO ON",
+        40,
+        0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (EndpointSnapshot("one", "One", True, 0, gpus=(gpu,), sample_revision=1),),
+    )
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 24)) as pilot:
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 1)
+            await pilot.pause()
+            rendered = next(iter(ui.query(".dgx-panel"))).render()
+            assert rendered.plain.startswith("One\n")
+            assert len(rendered.spans) == 3
+            boxes = rendered.plain.splitlines()[1:]
+            offset = len("One\n")
+            for span, color, box in zip(
+                rendered.spans,
+                ("ansi_yellow", "ansi_cyan", "rgb(255,0,0)"),
+                (boxes[:8], boxes[8:16], boxes[16:24]),
+                strict=True,
+            ):
+                assert rendered.plain[span.start : span.end] == "\n".join(box)
+                assert str(span.style) == color
+                assert rendered.plain[span.start - 1] == "\n"
+                offset = span.end
+            assert offset == len(rendered.plain)
+
+    asyncio.run(exercise())
+
+
+def test_dashboard_without_colors_preserves_plain_geometry_and_sanitizes_external_text() -> None:
+    app = _DashboardApp()
+    gpu = GPUStat(
+        "GPU-a",
+        "A100",
+        memory_used_mib=50,
+        memory_total_mib=100,
+        utilization_percent=20,
+        temperature_celsius=40,
+    )
+    snapshot = ControlSnapshot(
+        20,
+        "curve",
+        "AUTO ON",
+        40,
+        0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (
+            EndpointSnapshot(
+                "one",
+                "One\x1b[31m[bad]",
+                False,
+                0,
+                error="oops\x1b]0;bad\x07",
+                gpus=(gpu,),
+                sample_revision=1,
+            ),
+        ),
+    )
+
+    async def exercise() -> None:
+        async with app.run_test(size=(79, 24)) as pilot:
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 1)
+            await pilot.pause()
+            rendered = next(iter(ui.query(".dgx-panel"))).render()
+            assert rendered.spans == []
+            assert (
+                "\x1b" not in rendered.plain
+                and "\x1b" not in ui.query_one("#error-banner").render().plain
+            )
+            assert "�" in rendered.plain and "�" in ui.query_one("#error-banner").render().plain
+            assert all(
+                len(line) <= ui.query_one("#dashboard-scroll", VerticalScroll).size.width
+                for line in rendered.plain.splitlines()
+            )
+
     asyncio.run(exercise())

@@ -93,7 +93,11 @@ class DGXFanApp(App[None]):
         self.config = config
         self.hardware: FanHardware | None = None
         self.controller = FanController(config.control, config.hardware)
-        self.collector = DCGMCollector(config.endpoints, config.collection.timeout_seconds, config.collection.stale_after_seconds)
+        self.collector = DCGMCollector(
+            config.endpoints,
+            config.collection.timeout_seconds,
+            config.collection.stale_after_seconds,
+        )
         self.endpoints: tuple[EndpointSnapshot, ...] = ()
         self.latest: ControlSnapshot | None = None
         self._poll_task: Task[None] | None = None
@@ -104,6 +108,7 @@ class DGXFanApp(App[None]):
             self.toggle_power,
             self.config.control.emergency_temperature_celsius,
             self.config.collection.interval_seconds,
+            self.config.dashboard_colors,
         )
 
     async def on_mount(self) -> None:
@@ -152,7 +157,9 @@ class DGXFanApp(App[None]):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DGX DCGM fan controller TUI")
-    parser.add_argument("--config", help="TOML config path; overrides DGX_FAN_CONFIG and ./config.toml")
+    parser.add_argument(
+        "--config", help="TOML config path; overrides DGX_FAN_CONFIG and ./config.toml"
+    )
     return parser
 
 

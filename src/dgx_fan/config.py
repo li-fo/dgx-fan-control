@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import isfinite
 from pathlib import Path
 from urllib.parse import urlparse
+
+from rich.color import Color, ColorParseError
 
 from .models import Stage
 
@@ -51,12 +54,22 @@ class HardwareConfig:
 
 
 @dataclass(frozen=True)
+class DashboardColors:
+    """Optional foreground colors for the dashboard's three chart metrics."""
+
+    memory: str | None = None
+    utilization: str | None = None
+    temperature: str | None = None
+
+
+@dataclass(frozen=True)
 class AppConfig:
     path: Path
     endpoints: tuple[EndpointConfig, ...]
     collection: CollectionConfig
     control: ControlConfig
     hardware: HardwareConfig
+    dashboard_colors: DashboardColors = field(default_factory=DashboardColors)
 
 
 def resolve_config_path(explicit: str | None) -> Path:
@@ -79,10 +92,54 @@ def _number(value: object, name: str, *, minimum: float = 0) -> float:
 
 
 def _integer(value: object, name: str, *, minimum: int = 0, maximum: int | None = None) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < minimum or (maximum is not None and value > maximum):
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < minimum
+        or (maximum is not None and value > maximum)
+    ):
         suffix = f" and <= {maximum}" if maximum is not None else ""
         raise ConfigError(f"{name} must be an integer >= {minimum}{suffix}")
     return value
+
+
+_COLOR_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*\Z")
+_HEX_COLOR = re.compile(r"#[0-9A-Fa-f]{6}\Z")
+
+
+def _reject_unknown_keys(table: dict[str, object], name: str, allowed: set[str]) -> None:
+    unknown = sorted(set(table) - allowed)
+    if unknown:
+        raise ConfigError(f"{name} contains unknown key: {unknown[0]}")
+
+
+def _dashboard_color(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ConfigError(f"{name} must be a non-empty foreground color name or #RRGGBB")
+    normalized = value.lower()
+    if normalized == "default" or not (_COLOR_NAME.fullmatch(value) or _HEX_COLOR.fullmatch(value)):
+        raise ConfigError(f"{name} must be a foreground color name or exact #RRGGBB")
+    try:
+        Color.parse(value)
+    except ColorParseError as error:
+        raise ConfigError(f"{name} must be a valid Rich foreground color") from error
+    return normalized
+
+
+def _dashboard_colors(raw: dict[str, object]) -> DashboardColors:
+    dashboard_raw = raw.get("dashboard")
+    if dashboard_raw is None:
+        return DashboardColors()
+    dashboard = _mapping(dashboard_raw, "dashboard")
+    _reject_unknown_keys(dashboard, "dashboard", {"colors"})
+    colors_raw = dashboard.get("colors")
+    if colors_raw is None:
+        return DashboardColors()
+    colors = _mapping(colors_raw, "dashboard.colors")
+    _reject_unknown_keys(colors, "dashboard.colors", {"memory", "utilization", "temperature"})
+    return DashboardColors(
+        **{key: _dashboard_color(value, f"dashboard.colors.{key}") for key, value in colors.items()}
+    )
 
 
 def load_config(path: Path) -> AppConfig:
@@ -95,6 +152,7 @@ def load_config(path: Path) -> AppConfig:
         raise ConfigError(f"invalid TOML in {path}: {error}") from error
     if raw.get("version") != 1:
         raise ConfigError("version must be 1")
+    dashboard_colors = _dashboard_colors(raw)
     raw_endpoints = raw.get("dgx")
     if not isinstance(raw_endpoints, list) or not 1 <= len(raw_endpoints) <= 2:
         raise ConfigError("dgx must contain one or two endpoint tables")
@@ -109,13 +167,17 @@ def load_config(path: Path) -> AppConfig:
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ConfigError(f"dgx[{index}].url must be an http(s) URL")
         endpoints.append(EndpointConfig(endpoint_id, name, url))
-    if len({item.id for item in endpoints}) != len(endpoints) or len({item.name for item in endpoints}) != len(endpoints):
+    if len({item.id for item in endpoints}) != len(endpoints) or len(
+        {item.name for item in endpoints}
+    ) != len(endpoints):
         raise ConfigError("dgx ids and names must be unique")
     collection = _mapping(raw.get("collection"), "collection")
     collection_config = CollectionConfig(
         _number(collection.get("interval_seconds"), "collection.interval_seconds", minimum=0.1),
         _number(collection.get("timeout_seconds"), "collection.timeout_seconds", minimum=0.1),
-        _number(collection.get("stale_after_seconds"), "collection.stale_after_seconds", minimum=0.1),
+        _number(
+            collection.get("stale_after_seconds"), "collection.stale_after_seconds", minimum=0.1
+        ),
     )
     if collection_config.stale_after_seconds < collection_config.interval_seconds:
         raise ConfigError("collection.stale_after_seconds must be >= interval_seconds")
@@ -138,7 +200,9 @@ def load_config(path: Path) -> AppConfig:
             if temperature <= previous_temperature:
                 raise ConfigError("control stage temperatures must be strictly ascending")
             previous_temperature = temperature
-        speed = _integer(item.get("speed_percent"), f"control.stages[{index}].speed_percent", maximum=100)
+        speed = _integer(
+            item.get("speed_percent"), f"control.stages[{index}].speed_percent", maximum=100
+        )
         if speed < previous_speed:
             raise ConfigError("control stage speeds must be ascending")
         previous_speed = speed
@@ -147,10 +211,16 @@ def load_config(path: Path) -> AppConfig:
     if not isinstance(enabled, bool):
         raise ConfigError("control.enabled_at_startup must be true or false")
     control_config = ControlConfig(
-        enabled, _integer(control.get("max_speed_percent"), "control.max_speed_percent", minimum=1, maximum=100),
+        enabled,
+        _integer(
+            control.get("max_speed_percent"), "control.max_speed_percent", minimum=1, maximum=100
+        ),
         _number(control.get("hysteresis_celsius"), "control.hysteresis_celsius"),
-        _number(control.get("emergency_temperature_celsius"), "control.emergency_temperature_celsius"),
-        _number(control.get("recovery_seconds"), "control.recovery_seconds"), tuple(stages),
+        _number(
+            control.get("emergency_temperature_celsius"), "control.emergency_temperature_celsius"
+        ),
+        _number(control.get("recovery_seconds"), "control.recovery_seconds"),
+        tuple(stages),
     )
     hardware = _mapping(raw.get("hardware"), "hardware")
     backend = hardware.get("backend")
@@ -159,18 +229,38 @@ def load_config(path: Path) -> AppConfig:
     tach = hardware.get("tach_gpio_bcm")
     ppr = hardware.get("pulses_per_revolution")
     if not isinstance(tach, list) or not isinstance(ppr, list) or len(tach) != 2 or len(ppr) != 2:
-        raise ConfigError("hardware tach_gpio_bcm and pulses_per_revolution must each contain two finite integer values")
-    tach_pair = tuple(_integer(value, f"hardware.tach_gpio_bcm[{i}]") for i, value in enumerate(tach))
-    ppr_pair = tuple(_integer(value, f"hardware.pulses_per_revolution[{i}]", minimum=1) for i, value in enumerate(ppr))
+        raise ConfigError(
+            "hardware tach_gpio_bcm and pulses_per_revolution must each contain two finite integer values"
+        )
+    tach_pair = tuple(
+        _integer(value, f"hardware.tach_gpio_bcm[{i}]") for i, value in enumerate(tach)
+    )
+    ppr_pair = tuple(
+        _integer(value, f"hardware.pulses_per_revolution[{i}]", minimum=1)
+        for i, value in enumerate(ppr)
+    )
     pwm = _integer(hardware.get("pwm_gpio_bcm"), "hardware.pwm_gpio_bcm")
     if pwm in tach_pair or len(set(tach_pair)) != 2:
         raise ConfigError("PWM and tach GPIOs must be distinct")
     inverted = hardware.get("pwm_inverted")
     if not isinstance(inverted, bool):
         raise ConfigError("hardware.pwm_inverted must be true or false")
-    return AppConfig(path, tuple(endpoints), collection_config, control_config, HardwareConfig(
-        backend, pwm, _integer(hardware.get("pwm_frequency_hz"), "hardware.pwm_frequency_hz", minimum=1), inverted,
-        (tach_pair[0], tach_pair[1]), (ppr_pair[0], ppr_pair[1]),
-        _number(hardware.get("startup_boost_seconds"), "hardware.startup_boost_seconds"),
-        _number(hardware.get("stall_timeout_seconds"), "hardware.stall_timeout_seconds", minimum=0.1),
-    ))
+    return AppConfig(
+        path,
+        tuple(endpoints),
+        collection_config,
+        control_config,
+        HardwareConfig(
+            backend,
+            pwm,
+            _integer(hardware.get("pwm_frequency_hz"), "hardware.pwm_frequency_hz", minimum=1),
+            inverted,
+            (tach_pair[0], tach_pair[1]),
+            (ppr_pair[0], ppr_pair[1]),
+            _number(hardware.get("startup_boost_seconds"), "hardware.startup_boost_seconds"),
+            _number(
+                hardware.get("stall_timeout_seconds"), "hardware.stall_timeout_seconds", minimum=0.1
+            ),
+        ),
+        dashboard_colors,
+    )
