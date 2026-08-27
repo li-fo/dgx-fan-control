@@ -3,11 +3,12 @@ from dgx_fan.controller import FanController
 from dgx_fan.models import EndpointSnapshot, FanReading, GPUStat, Stage
 
 
-def _controller() -> FanController:
+def _controller(fallback_speed_percent: int = 100) -> FanController:
     control = ControlConfig(
         True, 90, 2, 75, 10,
         (Stage(45, 20), Stage(55, 50), Stage(70, 80), Stage(None, 100)),
         ("one", "two"),
+        fallback_speed_percent,
     )
     hardware = HardwareConfig("fake", (18, 19), 25000, True, (23, 24), (2, 2), 1, 5)
     return FanController(control, hardware)
@@ -46,12 +47,25 @@ def test_global_off_and_per_fan_startup_boost() -> None:
     assert controller.update(_endpoints(40, 60), FANS, 2).duty_percents == (20, 80)
 
 
-def test_any_endpoint_failure_missing_temperature_or_emergency_couples_safety() -> None:
-    controller = _controller()
-    assert controller.update(_endpoints(40, 80), FANS, 0).duty_percents == (100, 100)
-    assert controller.update(_endpoints(40, None), FANS, 1).reason == "no valid GPU temperature"
-    unhealthy = _endpoints(40, 40, healthy=False)
-    assert controller.update(unhealthy, FANS, 2).reason == "endpoint unavailable"
+def test_configured_fallback_couples_all_immediate_safety_reasons() -> None:
+    controller = _controller(35)
+    cases = (
+        ((), "endpoint unavailable"),
+        (_endpoints(40, None), "no valid GPU temperature"),
+        (_endpoints(40, 80), "emergency temperature"),
+        (_endpoints(40, 40, healthy=False), "endpoint unavailable"),
+    )
+    for endpoints, reason in cases:
+        snapshot = controller.update(endpoints, FANS, 0)
+        assert snapshot.reason == reason
+        assert snapshot.state == "SAFETY OVERRIDE"
+        assert snapshot.duty_percents == (35, 35)
+
+
+def test_fallback_speed_is_not_limited_by_max_speed_percent() -> None:
+    snapshot = _controller(95).update((), FANS, 0)
+    assert snapshot.state == "SAFETY OVERRIDE"
+    assert snapshot.duty_percents == (95, 95)
 
 
 def test_unmapped_configured_endpoint_emergency_still_couples_safety() -> None:
@@ -79,17 +93,22 @@ def test_unmapped_endpoint_must_clear_global_recovery_boundary() -> None:
     assert controller.update(_endpoints(40, 72), FANS, 6).reason == "safety recovery dwell"
 
 
-def test_safety_recovery_and_one_fan_stall_latch_couple_both_outputs() -> None:
-    controller = _controller()
+def test_configured_fallback_couples_safety_recovery_and_fan_stall() -> None:
+    controller = _controller(35)
     assert controller.update(_endpoints(80, 40), FANS, 0).state == "SAFETY OVERRIDE"
-    assert controller.update(_endpoints(40, 40), FANS, 5).state == "SAFETY OVERRIDE"
-    assert controller.update(_endpoints(40, 40), FANS, 15).state == "AUTO ON"
+    recovery_temperature = controller.update(_endpoints(40, 74), FANS, 5)
+    assert recovery_temperature.reason == "safety recovery temperature"
+    assert recovery_temperature.duty_percents == (35, 35)
+    recovery_dwell = controller.update(_endpoints(40, 40), FANS, 6)
+    assert recovery_dwell.reason == "safety recovery dwell"
+    assert recovery_dwell.duty_percents == (35, 35)
+    assert controller.update(_endpoints(40, 40), FANS, 16).state == "AUTO ON"
     no_tach = (FanReading(None, "NO TACH"), FanReading(1000, "RUNNING"))
-    controller.update(_endpoints(40, 40), no_tach, 16)
-    controller.update(_endpoints(40, 40), no_tach, 21)
-    snapshot = controller.update(_endpoints(40, 40), no_tach, 26)
+    controller.update(_endpoints(40, 40), no_tach, 17)
+    controller.update(_endpoints(40, 40), no_tach, 22)
+    snapshot = controller.update(_endpoints(40, 40), no_tach, 27)
     assert snapshot.reason == "fan stalled"
-    assert snapshot.duty_percents == (100, 100)
+    assert snapshot.duty_percents == (35, 35)
     assert snapshot.fans[0].state == "STALLED"
 
 

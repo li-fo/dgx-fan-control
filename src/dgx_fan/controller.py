@@ -17,7 +17,7 @@ class FanController:
         self._recovery_since: float | None = None
         self._safety_active = False
         self._boost_until: list[float | None] = [None, None]
-        self._previous_duties = [100, 100]
+        self._previous_duties = [config.fallback_speed_percent, config.fallback_speed_percent]
         self._no_tach_since: list[float | None] = [None, None]
         self._restart_attempted = [False, False]
         self._stalled = [False, False]
@@ -57,9 +57,15 @@ class FanController:
         if safety_reason:
             self._safety_active = True
             self._recovery_since = None
-            self._previous_duties = [100, 100]
+            self._previous_duties = list(self._fallback_duties)
             return self._snapshot(
-                (100, 100), safety_reason, "SAFETY OVERRIDE", maximum, temperatures, fans, endpoints
+                self._fallback_duties,
+                safety_reason,
+                "SAFETY OVERRIDE",
+                maximum,
+                temperatures,
+                fans,
+                endpoints,
             )
         assert temperatures[0] is not None and temperatures[1] is not None
         normal_temperatures = (temperatures[0], temperatures[1])
@@ -72,13 +78,19 @@ class FanController:
                     self._recovery_since = now
                 if now - self._recovery_since < self.config.recovery_seconds:
                     return self._snapshot(
-                        (100, 100), "safety recovery dwell", "SAFETY OVERRIDE", maximum,
+                        self._fallback_duties,
+                        "safety recovery dwell",
+                        "SAFETY OVERRIDE",
+                        maximum,
                         temperatures, fans, endpoints,
                     )
             else:
                 self._recovery_since = None
                 return self._snapshot(
-                    (100, 100), "safety recovery temperature", "SAFETY OVERRIDE", maximum,
+                    self._fallback_duties,
+                    "safety recovery temperature",
+                    "SAFETY OVERRIDE",
+                    maximum,
                     temperatures, fans, endpoints,
                 )
             self._safety_active = False
@@ -108,6 +120,10 @@ class FanController:
             (duties[0], duties[1]), "startup boost" if boosting else "temperature curve",
             "STARTUP BOOST" if boosting else "AUTO ON", maximum, temperatures, fans, endpoints, stages,
         )
+
+    @property
+    def _fallback_duties(self) -> tuple[int, int]:
+        return (self.config.fallback_speed_percent, self.config.fallback_speed_percent)
 
     def _snapshot(
         self,

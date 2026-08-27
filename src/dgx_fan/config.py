@@ -42,6 +42,7 @@ class ControlConfig:
     recovery_seconds: float
     stages: tuple[Stage, ...]
     fan_endpoint_ids: tuple[str, str]
+    fallback_speed_percent: int = 100
 
 
 @dataclass(frozen=True)
@@ -247,6 +248,11 @@ def load_config(path: Path) -> AppConfig:
         _number(control.get("recovery_seconds"), "control.recovery_seconds"),
         tuple(stages),
         (fan_endpoint_ids[0], fan_endpoint_ids[1]),
+        _integer(
+            control.get("fallback_speed_percent", 100),
+            "control.fallback_speed_percent",
+            maximum=100,
+        ),
     )
     hardware = _mapping(raw.get("hardware"), "hardware")
     backend = hardware.get("backend")

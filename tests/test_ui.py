@@ -55,6 +55,20 @@ def test_control_tick_is_bounded_below_dcgm_poll_interval() -> None:
     assert DGXFanApp.CONTROL_TICK_SECONDS <= 0.25
 
 
+def test_app_uses_configured_fallback_before_first_telemetry_read() -> None:
+    original = load_config(Path("config.example.toml"))
+    config = replace(original, control=replace(original.control, fallback_speed_percent=35))
+    app = DGXFanApp(config)
+
+    async def exercise() -> None:
+        async with app.run_test():
+            assert app.hardware is not None
+            assert getattr(app.hardware, "duties", None) == (35, 35)
+            assert app.latest is not None and app.latest.duty_percents == (35, 35)
+
+    asyncio.run(exercise())
+
+
 def test_fan_gauge_ring_fill_boundaries_are_monotonic() -> None:
     previous = -1
     expected_filled = {0: 0, 20: 2, 50: 6, 80: 10, 100: 12}

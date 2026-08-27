@@ -64,6 +64,7 @@ def test_load_valid_config(tmp_path: Path) -> None:
     assert config.hardware.gpio_chip_path == "/dev/gpiochip0"
     assert config.hardware.shutdown_mode == "full"
     assert config.control.fan_endpoint_ids == ("one", "one")
+    assert config.control.fallback_speed_percent == 100
     assert config.dashboard_colors == DashboardColors()
     assert config.collection.retry_count == 0
     assert config.collection.retry_delay_seconds == 10.0
@@ -80,6 +81,21 @@ def test_loads_optional_collection_retry_settings(tmp_path: Path) -> None:
     config = load_config(path)
     assert config.collection.retry_count == 3
     assert config.collection.retry_delay_seconds == 2.5
+
+
+@pytest.mark.parametrize("value", [0, 35, 100])
+def test_loads_optional_control_fallback_speed_percent(tmp_path: Path, value: int) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config().replace("max_speed_percent = 90", f"max_speed_percent = 90\nfallback_speed_percent = {value}"))
+    assert load_config(path).control.fallback_speed_percent == value
+
+
+@pytest.mark.parametrize("value", ["-1", "101", "1.5", "true", '"35"'])
+def test_rejects_invalid_control_fallback_speed_percent(tmp_path: Path, value: str) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config().replace("max_speed_percent = 90", f"max_speed_percent = 90\nfallback_speed_percent = {value}"))
+    with pytest.raises(ConfigError, match=r"control\.fallback_speed_percent"):
+        load_config(path)
 
 
 @pytest.mark.parametrize(

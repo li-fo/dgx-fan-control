@@ -26,6 +26,9 @@ retry_delay_seconds = 10.0
 fan_endpoint_ids = ["dgx-1", "dgx-1"]
 enabled_at_startup = true
 max_speed_percent = 100
+# Optional integer 0..100 (default 100) for missing/stale/failed telemetry,
+# emergency temperature, fan stall, and safety recovery; independent of max_speed_percent.
+fallback_speed_percent = 100
 hysteresis_celsius = 2.0
 emergency_temperature_celsius = 75.0
 recovery_seconds = 10.0

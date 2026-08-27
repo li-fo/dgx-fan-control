@@ -153,7 +153,9 @@ class DGXFanApp(App[None]):
 
     async def on_mount(self) -> None:
         self.hardware = create_hardware(self.config.hardware)
-        self.hardware.set_duties((100, 100))  # Safe-full before any external read.
+        self.hardware.set_duties(
+            (self.config.control.fallback_speed_percent,) * 2
+        )  # Application fallback before any external read.
         self.set_interval(self.CONTROL_TICK_SECONDS, self.control_tick)
         self._poll_tasks = tuple(
             create_task(self._poll_loop(endpoint)) for endpoint in self.config.endpoints
