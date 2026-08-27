@@ -4,6 +4,7 @@ import asyncio
 import math
 import time
 from collections import defaultdict
+from collections.abc import Callable
 
 import httpx
 from prometheus_client.parser import text_string_to_metric_families
@@ -24,6 +25,7 @@ _METRICS = {
     "DCGM_FI_DEV_FB_FREE": "memory_free_mib",
     "DCGM_FI_DEV_FB_RESERVED": "memory_reserved_mib",
 }
+Clock = Callable[[], float]
 
 
 def _valid(value: float, metric: str) -> bool:
@@ -81,14 +83,20 @@ class DCGMCollector:
         self._failed_attempts: dict[str, int] = {}
         self._revisions: dict[str, int] = defaultdict(int)
 
-    async def collect(self, now: float | None = None) -> tuple[EndpointSnapshot, ...]:
+    async def collect(self, now: float | Clock | None = None) -> tuple[EndpointSnapshot, ...]:
         await asyncio.gather(*(self.collect_endpoint(endpoint, now) for endpoint in self.endpoints))
         return self.snapshots(now)
 
     async def collect_endpoint(
-        self, endpoint: EndpointConfig, now: float | None = None
+        self, endpoint: EndpointConfig, now: float | Clock | None = None
     ) -> EndpointSnapshot:
-        """Collect one endpoint through a complete, non-overlapping retry cycle."""
+        """Collect one endpoint through a complete, non-overlapping retry cycle.
+
+        A numeric ``now`` is a deterministic direct-success seam. A retried
+        successful request is stamped with real completion time so its
+        freshness cannot predate the request. Tests that need deterministic
+        retry timing may provide a zero-argument advancing clock instead.
+        """
         for attempt in range(self.retry_count + 1):
             try:
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -106,7 +114,9 @@ class DCGMCollector:
                     # retry_attempt is one-based from the operator's point of
                     # view: it identifies the next extra attempt to be made.
                     self._retrying[endpoint.id] = attempt + 1
-                    self._errors[endpoint.id] = None
+                    # A prior terminal failure is a safety latch. Keep it
+                    # through a later cycle's retry wait; only usable metrics
+                    # may clear it. The UI still prioritizes retrying state.
                     await asyncio.sleep(self.retry_delay_seconds)
                     continue
                 self._retrying.pop(endpoint.id, None)
@@ -127,7 +137,7 @@ class DCGMCollector:
                 # The request may have waited/retried, so freshness starts when
                 # usable metrics actually arrive rather than at cycle launch.
                 self._last_good[endpoint.id] = (
-                    time.monotonic() if now is None else now,
+                    self._completed_at(now, retried=attempt > 0),
                     gpus,
                 )
                 self._errors[endpoint.id] = None
@@ -137,8 +147,22 @@ class DCGMCollector:
                 break
         return self.snapshot(endpoint, now)
 
-    def snapshot(self, endpoint: EndpointConfig, now: float | None = None) -> EndpointSnapshot:
-        current = time.monotonic() if now is None else now
+    @staticmethod
+    def _completed_at(now: float | Clock | None, *, retried: bool) -> float:
+        if callable(now):
+            return now()
+        if now is None or retried:
+            return time.monotonic()
+        return now
+
+    @staticmethod
+    def _current_at(now: float | Clock | None) -> float:
+        return time.monotonic() if now is None else now() if callable(now) else now
+
+    def snapshot(
+        self, endpoint: EndpointConfig, now: float | Clock | None = None
+    ) -> EndpointSnapshot:
+        current = self._current_at(now)
         prior = self._last_good.get(endpoint.id)
         age = None if prior is None else max(0.0, current - prior[0])
         stale = age is None or age > self.stale_after
@@ -165,9 +189,9 @@ class DCGMCollector:
             self._failed_attempts.get(endpoint.id, 0),
         )
 
-    def snapshots(self, now: float | None = None) -> tuple[EndpointSnapshot, ...]:
+    def snapshots(self, now: float | Clock | None = None) -> tuple[EndpointSnapshot, ...]:
         """Recompute freshness between polls; controller consumers must call this every tick."""
-        current = time.monotonic() if now is None else now
+        current = self._current_at(now)
         return tuple(self.snapshot(endpoint, current) for endpoint in self.endpoints)
 
     def mark_unhealthy(self, error: Exception | str) -> None:

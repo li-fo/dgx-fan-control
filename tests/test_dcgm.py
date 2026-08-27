@@ -115,6 +115,90 @@ async def test_transient_exhaustion_is_immediately_unhealthy_and_next_cycle_reco
 
 
 @pytest.mark.asyncio
+async def test_terminal_failure_stays_fail_safe_through_next_retry_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = EndpointConfig("one", "One", "http://example/metrics")
+    collector = DCGMCollector((endpoint,), 1, 20, retry_count=1, retry_delay_seconds=5)
+    calls = 0
+    retry_waiting = asyncio.Event()
+    allow_retry = asyncio.Event()
+
+    async def fake_get(self: httpx.AsyncClient, url: str) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls in {1, 5}:
+            return httpx.Response(200, text=METRICS, request=httpx.Request("GET", url))
+        raise httpx.ConnectError("offline")
+
+    async def fake_sleep(delay: float) -> None:
+        assert delay == 5
+        if calls == 4:
+            retry_waiting.set()
+            await allow_retry.wait()
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    monkeypatch.setattr("dgx_fan.dcgm.asyncio.sleep", fake_sleep)
+    await collector.collect_endpoint(endpoint, 0)
+    exhausted = await collector.collect_endpoint(endpoint, 1)
+    assert not exhausted.healthy and exhausted.sample_revision == 1
+
+    retrying = asyncio.create_task(collector.collect_endpoint(endpoint, 2))
+    await retry_waiting.wait()
+    waiting = collector.snapshots(2)[0]
+    assert waiting.retrying and not waiting.healthy and waiting.sample_revision == 1
+    controller = FanController(
+        ControlConfig(
+            True,
+            100,
+            2,
+            75,
+            10,
+            (Stage(45, 20), Stage(55, 50), Stage(70, 80), Stage(None, 100)),
+            ("one", "one"),
+        ),
+        HardwareConfig("fake", (18, 19), 25000, True, (23, 24), (2, 2), 1, 5),
+    )
+    fans = (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING"))
+    assert controller.update((waiting,), fans, 2).duty_percents == (100, 100)
+    allow_retry.set()
+    recovered = await retrying
+    assert recovered.healthy and recovered.sample_revision == 2
+
+
+@pytest.mark.asyncio
+async def test_advancing_clock_stamps_retried_success_at_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = EndpointConfig("one", "One", "http://example/metrics")
+    collector = DCGMCollector((endpoint,), 1, 20, retry_count=1, retry_delay_seconds=3)
+    clock = 10.0
+    calls = 0
+
+    def now() -> float:
+        return clock
+
+    async def fake_get(self: httpx.AsyncClient, url: str) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ConnectTimeout("temporary")
+        return httpx.Response(200, text=METRICS, request=httpx.Request("GET", url))
+
+    async def fake_sleep(delay: float) -> None:
+        nonlocal clock
+        assert delay == 3
+        clock = 13.0
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    monkeypatch.setattr("dgx_fan.dcgm.asyncio.sleep", fake_sleep)
+    completed = await collector.collect_endpoint(endpoint, now)
+    assert completed.healthy and completed.age_seconds == 0
+    assert collector._last_good[endpoint.id][0] == 13.0
+    assert collector.snapshots(now)[0].age_seconds == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", [400, 404, 401])
 async def test_non_retryable_http_status_fails_once(
     monkeypatch: pytest.MonkeyPatch, status: int
