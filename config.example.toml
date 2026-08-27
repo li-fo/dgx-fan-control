@@ -16,6 +16,10 @@ temperature = "red"
 interval_seconds = 2.0
 timeout_seconds = 1.5
 stale_after_seconds = 6.0
+# Extra attempts after the first DCGM request. Only transport errors and HTTP
+# 408, 429, and 5xx responses retry; stale or exhausted telemetry is fail-safe.
+retry_count = 3
+retry_delay_seconds = 10.0
 
 [control]
 # Fan 1 and Fan 2 are explicitly mapped. For one DGX, use the same ID twice.

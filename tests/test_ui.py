@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
@@ -9,7 +10,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import Button, Static, TabbedContent
 
 from dgx_fan.app import DGXFanApp
-from dgx_fan.config import DashboardColors, load_config
+from dgx_fan.config import DashboardColors, EndpointConfig, load_config
 from dgx_fan.models import ControlSnapshot, EndpointSnapshot, FanReading, GPUStat
 from dgx_fan.ui import DashboardHistory, FanAppUI, FanGauge, HistoryPoint
 
@@ -278,23 +279,60 @@ def _assert_gauge_content_fits(gauge: FanGauge) -> None:
     assert gauge.content_region.height >= len(lines)
 
 
-def test_poll_exception_is_supervised_and_unmount_cancels_poll_without_releasing_hardware(monkeypatch) -> None:
+def test_poll_exception_is_supervised_per_endpoint_and_unmount_cancels_tasks(monkeypatch) -> None:
     config = load_config(Path("config.example.toml"))
     app = DGXFanApp(config)
 
-    async def failing_collect(now: float):
+    async def failing_collect(endpoint, now: float | None = None):
         raise RuntimeError("poll boom")
 
     async def exercise() -> None:
         async with app.run_test() as pilot:
-            monkeypatch.setattr(app.collector, "collect", failing_collect)
-            await app._poll_once(0)
+            monkeypatch.setattr(app.collector, "collect_endpoint", failing_collect)
+            await app._poll_once(config.endpoints[0], 0)
             app.control_tick(1)
             await pilot.pause()
             assert app.latest is not None and app.latest.duty_percents == (100, 100)
             assert not app.endpoints[0].healthy
         assert app.hardware is not None
         assert not getattr(app.hardware, "released", False)
+
+    asyncio.run(exercise())
+
+
+def test_endpoint_poll_loops_do_not_wait_for_each_other(monkeypatch) -> None:
+    original = load_config(Path("config.example.toml"))
+    config = replace(
+        original,
+        endpoints=(
+            original.endpoints[0],
+            EndpointConfig("two", "Two", "http://two:9400/metrics"),
+        ),
+    )
+    app = DGXFanApp(config)
+    first_entered = asyncio.Event()
+    allow_first = asyncio.Event()
+    second_completed = asyncio.Event()
+
+    async def fake_poll_once(endpoint, now=None) -> None:
+        if endpoint.id == "dgx-1":
+            first_entered.set()
+            await allow_first.wait()
+        else:
+            second_completed.set()
+
+    monkeypatch.setattr(app, "_poll_once", fake_poll_once)
+
+    async def exercise() -> None:
+        first = asyncio.create_task(app._poll_loop(config.endpoints[0]))
+        second = asyncio.create_task(app._poll_loop(config.endpoints[1]))
+        await first_entered.wait()
+        await asyncio.wait_for(second_completed.wait(), timeout=0.2)
+        first.cancel()
+        second.cancel()
+        for task in (first, second):
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
     asyncio.run(exercise())
 
@@ -427,6 +465,51 @@ def test_compact_plot_heights_preserve_zero_missing_and_low_positive_baselines()
 class _DashboardApp(App[None]):
     def compose(self) -> ComposeResult:
         yield FanAppUI("config.toml", lambda: None, 75, 2)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    [
+        (EndpointSnapshot("one", "One", False, None), "WAITING"),
+        (
+            EndpointSnapshot(
+                "one", "One", True, 1, gpus=(), retrying=True, retry_attempt=1, retry_count=3
+            ),
+            "RETRYING 1/3",
+        ),
+        (
+            EndpointSnapshot(
+                "one", "One", False, 7, stale=True, retrying=True, retry_attempt=2, retry_count=3
+            ),
+            "RETRYING · STALE",
+        ),
+        (
+            EndpointSnapshot(
+                "one", "One", False, 1, error="HTTP 503", retry_count=3, failed_attempts=4
+            ),
+            "FAILED after 4 attempts",
+        ),
+        (EndpointSnapshot("one", "One", True, 0), "All configured DGX endpoints are healthy."),
+    ],
+)
+def test_retry_aware_error_banner_states(endpoint: EndpointSnapshot, expected: str) -> None:
+    app = _DashboardApp()
+    snapshot = _fan_snapshot(
+        100,
+        "safe",
+        "SAFETY OVERRIDE",
+        None,
+        None,
+        (FanReading(None, "NO TACH"), FanReading(None, "NO TACH")),
+        (endpoint,),
+    )
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 24)):
+            app.query_one(FanAppUI).update_snapshot(snapshot, 10)
+            assert expected in app.query_one("#error-banner", Static).render().plain
+
+    asyncio.run(exercise())
 
 
 def _single_gpu_snapshot(name: str = "One") -> ControlSnapshot:

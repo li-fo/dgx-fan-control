@@ -30,6 +30,10 @@ class EndpointSnapshot:
     error: str | None = None
     gpus: tuple[GPUStat, ...] = ()
     sample_revision: int = 0
+    retrying: bool = False
+    retry_attempt: int = 0
+    retry_count: int = 0
+    failed_attempts: int = 0
 
 
 @dataclass(frozen=True)

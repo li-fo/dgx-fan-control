@@ -287,12 +287,23 @@ class FanAppUI(Static):
         self.last_render_time = now
         for endpoint in snapshot.endpoint_snapshots:
             self.history.append(endpoint.endpoint_id, endpoint.sample_revision, endpoint.gpus, now)
-        errors = [
-            f"{_safe_display_text(e.name)}: {_safe_display_text(e.error or 'stale')} "
-            f"(sample age: {'N/A' if e.age_seconds is None else f'{e.age_seconds:.1f}s'})"
-            for e in snapshot.endpoint_snapshots
-            if not e.healthy
-        ]
+        errors = []
+        for endpoint in snapshot.endpoint_snapshots:
+            age = "N/A" if endpoint.age_seconds is None else f"{endpoint.age_seconds:.1f}s"
+            name = _safe_display_text(endpoint.name)
+            if endpoint.retrying:
+                status = "RETRYING · STALE" if endpoint.stale else (
+                    f"RETRYING {endpoint.retry_attempt}/{endpoint.retry_count}"
+                )
+                errors.append(f"{name}: {status} (sample age: {age})")
+            elif endpoint.error and endpoint.error != "awaiting first sample":
+                attempts = endpoint.failed_attempts or endpoint.retry_count + 1
+                errors.append(
+                    f"{name}: FAILED after {attempts} attempts: "
+                    f"{_safe_display_text(endpoint.error)} (sample age: {age})"
+                )
+            elif not endpoint.healthy:
+                errors.append(f"{name}: WAITING (sample age: {age})")
         self.query_one("#error-banner", Static).update(
             " | ".join(errors) if errors else "All configured DGX endpoints are healthy."
         )

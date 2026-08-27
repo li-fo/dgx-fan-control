@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 import pytest
 
@@ -47,6 +49,148 @@ async def test_collector_retains_fresh_sample_then_expires(monkeypatch: pytest.M
     assert not (await collector.collect(11))[0].healthy
     assert not (await collector.collect(13))[0].healthy
     assert (await collector.collect(13))[0].stale
+
+
+@pytest.mark.asyncio
+async def test_transient_failure_retries_with_fresh_cache_then_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = EndpointConfig("one", "One", "http://example/metrics")
+    collector = DCGMCollector((endpoint,), 1, 5, retry_count=1, retry_delay_seconds=3)
+    calls = 0
+    retry_waiting = asyncio.Event()
+    release_retry = asyncio.Event()
+
+    async def fake_get(self: httpx.AsyncClient, url: str) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1 or calls == 3:
+            return httpx.Response(200, text=METRICS, request=httpx.Request("GET", url))
+        raise httpx.ConnectTimeout("temporary outage")
+
+    async def fake_sleep(delay: float) -> None:
+        assert delay == 3
+        retry_waiting.set()
+        await release_retry.wait()
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    monkeypatch.setattr("dgx_fan.dcgm.asyncio.sleep", fake_sleep)
+    await collector.collect_endpoint(endpoint, 10)
+    retry = asyncio.create_task(collector.collect_endpoint(endpoint, 11))
+    await retry_waiting.wait()
+    waiting = collector.snapshots(12)[0]
+    assert waiting.healthy and waiting.retrying
+    assert waiting.retry_attempt == 1 and waiting.retry_count == 1
+    assert waiting.sample_revision == 1
+    release_retry.set()
+    completed = await retry
+    assert completed.healthy and not completed.retrying and completed.sample_revision == 2
+    assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_transient_exhaustion_is_immediately_unhealthy_and_next_cycle_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = EndpointConfig("one", "One", "http://example/metrics")
+    collector = DCGMCollector((endpoint,), 1, 20, retry_count=1, retry_delay_seconds=0)
+    calls = 0
+
+    async def fake_get(self: httpx.AsyncClient, url: str) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1 or calls == 4:
+            return httpx.Response(200, text=METRICS, request=httpx.Request("GET", url))
+        raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    await collector.collect_endpoint(endpoint, 0)
+    failed = await collector.collect_endpoint(endpoint, 1)
+    assert not failed.healthy and not failed.retrying
+    assert failed.gpus and failed.age_seconds == 1
+    assert "offline" in (failed.error or "") and failed.sample_revision == 1
+    assert failed.failed_attempts == 2
+    recovered = await collector.collect_endpoint(endpoint, 2)
+    assert recovered.healthy and recovered.sample_revision == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 404, 401])
+async def test_non_retryable_http_status_fails_once(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    endpoint = EndpointConfig("one", "One", "http://example/metrics")
+    collector = DCGMCollector((endpoint,), 1, 5, retry_count=3, retry_delay_seconds=0)
+    calls = 0
+
+    async def fake_get(self: httpx.AsyncClient, url: str) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(status, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    snapshot = await collector.collect_endpoint(endpoint, 1)
+    assert calls == 1 and not snapshot.healthy and not snapshot.retrying
+    assert snapshot.failed_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_retryable_http_status_and_unusable_metrics_have_distinct_attempt_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = EndpointConfig("one", "One", "http://example/metrics")
+    collector = DCGMCollector((endpoint,), 1, 5, retry_count=1, retry_delay_seconds=0)
+    calls = 0
+
+    async def server_error(self: httpx.AsyncClient, url: str) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", server_error)
+    failed = await collector.collect_endpoint(endpoint, 1)
+    assert calls == 2 and failed.failed_attempts == 2
+
+    async def empty_metrics(self: httpx.AsyncClient, url: str) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, text="# no GPUs\n", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", empty_metrics)
+    unusable = await collector.collect_endpoint(endpoint, 2)
+    assert calls == 3 and unusable.failed_attempts == 1
+    assert "no usable GPU data" in (unusable.error or "")
+
+
+@pytest.mark.asyncio
+async def test_retry_stale_boundary_and_cancellation_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
+    endpoint = EndpointConfig("one", "One", "http://example/metrics")
+    collector = DCGMCollector((endpoint,), 1, 5, retry_count=1, retry_delay_seconds=60)
+    calls = 0
+    sleeping = asyncio.Event()
+
+    async def fake_get(self: httpx.AsyncClient, url: str) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(200, text=METRICS, request=httpx.Request("GET", url))
+        raise httpx.ReadTimeout("gone")
+
+    async def fake_sleep(delay: float) -> None:
+        sleeping.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    monkeypatch.setattr("dgx_fan.dcgm.asyncio.sleep", fake_sleep)
+    await collector.collect_endpoint(endpoint, 0)
+    task = asyncio.create_task(collector.collect_endpoint(endpoint, 1))
+    await sleeping.wait()
+    stale = collector.snapshots(6.1)[0]
+    assert stale.retrying and stale.stale and not stale.healthy and stale.gpus == ()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert collector.snapshots(1)[0].retrying
 
 
 def test_parse_rejects_positive_sentinels_and_out_of_range_util() -> None:

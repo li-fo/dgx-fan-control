@@ -86,6 +86,23 @@ backup을 복원하세요. 로컬 자동 로그인은 물리 콘솔에서 해당
 
 `config.example.toml`은 schema v2를 설명합니다. `hardware.pwm_gpio_bcm`과 `control.fan_endpoint_ids`는 각각 Fan 1/Fan 2 순서의 정확히 두 항목이어야 합니다. endpoint ID는 설정된 `[[dgx]]` ID를 가리켜야 하며, DGX 한 대면 같은 ID를 두 번 씁니다. 정상 곡선, hysteresis, startup boost, tach 기대값, duty, TUI 상태는 팬별로 독립적이고 곡선/최대 속도 제한만 공통입니다. 모든 설정 endpoint가 최신·정상이 아니거나, 매핑된 온도가 없거나, **어느** 설정 GPU든 비상 온도이거나, 팬 stall이면 **두** PWM 채널 모두 100%가 됩니다. UI Off는 그 안전 상태를 해제하지 않습니다. 기존 v1의 `pwm_gpio_bcm = 18`은 시작 시 거부됩니다. `version = 2`, `[18, 19]`, `fan_endpoint_ids`로 마이그레이션하세요.
 
+### DCGM 네트워크 재시도
+
+전역 선택 설정인 `[collection]`으로 잠깐의 네트워크 단절에서 최신 DCGM 샘플을 재시도하는 동안 유지할 수 있습니다.
+
+```toml
+[collection]
+interval_seconds = 2.0
+timeout_seconds = 1.5
+stale_after_seconds = 6.0
+retry_count = 3          # 최초 요청 뒤의 추가 시도 횟수
+retry_delay_seconds = 10.0
+```
+
+기존 v2 파일에서 두 키를 생략하면 호환성을 유지하며 `retry_count = 0`, `retry_delay_seconds = 10.0`이 적용됩니다. 한 주기는 최초 요청 1회와 `retry_count`만큼의 추가 시도로 구성되고, 시도 사이에는 고정 대기 시간이 있으며 각 요청에는 `timeout_seconds`가 각각 적용됩니다. DNS/연결/timeout 등을 포함한 전송 오류와 HTTP 408, 429, 5xx만 재시도합니다. 그 밖의 4xx, 잘못된 metrics, 사용 가능한 GPU 데이터가 없는 응답은 즉시 실패합니다.
+
+각 DGX는 독립적으로 수집하므로 한 endpoint의 재시도가 정상 endpoint 수집을 지연시키지 않습니다. 재시도 중에는 캐시 샘플도 `stale_after_seconds` 안에서만 사용할 수 있습니다. 샘플이 stale해지거나 모든 시도가 끝나면 그 endpoint는 즉시 비정상이 되고, 기존 안전 규칙에 따라 두 팬은 100%가 됩니다. 다음 수집 주기에서 네트워크가 복구되면 정상 복구할 수 있습니다. Dashboard 배너는 `WAITING`, `RETRYING n/N`, `RETRYING · STALE`, `FAILED after N attempts`, 정상 상태를 구분하며, 재시도만으로 그래프 샘플이 중복 추가되지는 않습니다.
+
 `hardware.shutdown_mode`은 선택 항목이며 기본값은 `"full"`입니다. 시작/초기화 실패나 앱 오류를 포함한 모든 release에서 두 팬에 full duty를 명령합니다. 직결 Noctua NF-A6x25 5V PWM처럼 제조사 사양상 0% PWM에서 0 RPM임을 확인한 팬에서만 `shutdown_mode = "off"`를 설정하세요. Textual이 exit code 0으로 정상 반환한 경우에만 두 팬을 0% duty로 멈추고 PWM channel은 enabled 상태로 유지합니다. Textual 내부/비정상 종료, 예외, 0% 쓰기 실패, tach join timeout, GPIO release 실패는 두 channel을 full duty로 되돌립니다. 이는 부팅 시, SIGKILL·터미널 강제 종료, 전원 손실 시 OFF를 보장하지 않습니다. 그런 기본 OFF가 필요하면 별도 하드웨어 전원 스위치가 필요합니다.
 
 DGX 두 대는 물리 공기 흐름 매핑을 명시적으로 고정합니다.

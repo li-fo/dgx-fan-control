@@ -29,6 +29,8 @@ class CollectionConfig:
     interval_seconds: float
     timeout_seconds: float
     stale_after_seconds: float
+    retry_count: int = 0
+    retry_delay_seconds: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -187,6 +189,11 @@ def load_config(path: Path) -> AppConfig:
         _number(collection.get("timeout_seconds"), "collection.timeout_seconds", minimum=0.1),
         _number(
             collection.get("stale_after_seconds"), "collection.stale_after_seconds", minimum=0.1
+        ),
+        _integer(collection.get("retry_count", 0), "collection.retry_count"),
+        _number(
+            collection.get("retry_delay_seconds", 10.0),
+            "collection.retry_delay_seconds",
         ),
     )
     if collection_config.stale_after_seconds < collection_config.interval_seconds:

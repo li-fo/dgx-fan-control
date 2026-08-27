@@ -43,7 +43,7 @@ def _create_no_kitty_linux_driver() -> type[Driver] | None:
 
 _NO_KITTY_LINUX_DRIVER = _create_no_kitty_linux_driver()
 
-from .config import AppConfig, ConfigError, load_config, resolve_config_path
+from .config import AppConfig, ConfigError, EndpointConfig, load_config, resolve_config_path
 from .controller import FanController
 from .dcgm import DCGMCollector
 from .hardware import FanHardware, create_hardware
@@ -135,10 +135,12 @@ class DGXFanApp(App[None]):
             config.endpoints,
             config.collection.timeout_seconds,
             config.collection.stale_after_seconds,
+            config.collection.retry_count,
+            config.collection.retry_delay_seconds,
         )
         self.endpoints: tuple[EndpointSnapshot, ...] = ()
         self.latest: ControlSnapshot | None = None
-        self._poll_task: Task[None] | None = None
+        self._poll_tasks: tuple[Task[None], ...] = ()
 
     def compose(self) -> ComposeResult:
         yield FanAppUI(
@@ -153,21 +155,23 @@ class DGXFanApp(App[None]):
         self.hardware = create_hardware(self.config.hardware)
         self.hardware.set_duties((100, 100))  # Safe-full before any external read.
         self.set_interval(self.CONTROL_TICK_SECONDS, self.control_tick)
-        self._poll_task = create_task(self._poll_loop())
+        self._poll_tasks = tuple(
+            create_task(self._poll_loop(endpoint)) for endpoint in self.config.endpoints
+        )
         self.control_tick()
 
-    async def _poll_loop(self) -> None:
+    async def _poll_loop(self, endpoint: EndpointConfig) -> None:
         while True:
-            await self._poll_once(time.monotonic())
+            await self._poll_once(endpoint)
             await sleep(self.config.collection.interval_seconds)
 
-    async def _poll_once(self, now: float) -> None:
+    async def _poll_once(self, endpoint: EndpointConfig, now: float | None = None) -> None:
         try:
-            await self.collector.collect(now)
+            await self.collector.collect_endpoint(endpoint, now)
         except CancelledError:
             raise
         except Exception as error:  # noqa: BLE001 - a supervisor must convert unexpected poll failures to fail-safe state.
-            self.collector.mark_unhealthy(error)
+            self.collector.mark_endpoint_unhealthy(endpoint, error)
 
     def control_tick(self, now: float | None = None) -> None:
         current = time.monotonic() if now is None else now
@@ -183,12 +187,14 @@ class DGXFanApp(App[None]):
         self.controller.set_power(not self.controller.power)
 
     async def on_unmount(self) -> None:
-        if self._poll_task is not None:
-            self._poll_task.cancel()
+        for task in self._poll_tasks:
+            task.cancel()
+        for task in self._poll_tasks:
             try:
-                await self._poll_task
+                await task
             except CancelledError:
                 pass
+        self._poll_tasks = ()
 
 
 def build_parser() -> argparse.ArgumentParser:

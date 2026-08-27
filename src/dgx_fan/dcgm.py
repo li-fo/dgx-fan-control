@@ -65,48 +65,126 @@ def parse_metrics(endpoint_id: str, name: str, text: str) -> tuple[GPUStat, ...]
 
 
 class DCGMCollector:
-    def __init__(self, endpoints: tuple[EndpointConfig, ...], timeout_seconds: float, stale_after_seconds: float) -> None:
+    def __init__(
+        self,
+        endpoints: tuple[EndpointConfig, ...],
+        timeout_seconds: float,
+        stale_after_seconds: float,
+        retry_count: int = 0,
+        retry_delay_seconds: float = 10.0,
+    ) -> None:
         self.endpoints, self.timeout, self.stale_after = endpoints, timeout_seconds, stale_after_seconds
+        self.retry_count, self.retry_delay_seconds = retry_count, retry_delay_seconds
         self._last_good: dict[str, tuple[float, tuple[GPUStat, ...]]] = {}
         self._errors: dict[str, str | None] = {}
+        self._retrying: dict[str, int] = {}
+        self._failed_attempts: dict[str, int] = {}
         self._revisions: dict[str, int] = defaultdict(int)
 
     async def collect(self, now: float | None = None) -> tuple[EndpointSnapshot, ...]:
+        await asyncio.gather(*(self.collect_endpoint(endpoint, now) for endpoint in self.endpoints))
+        return self.snapshots(now)
+
+    async def collect_endpoint(
+        self, endpoint: EndpointConfig, now: float | None = None
+    ) -> EndpointSnapshot:
+        """Collect one endpoint through a complete, non-overlapping retry cycle."""
+        for attempt in range(self.retry_count + 1):
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.get(endpoint.url)
+                if response.status_code in {408, 429} or 500 <= response.status_code <= 599:
+                    raise _RetryableHTTPStatus(response.status_code)
+                response.raise_for_status()
+                gpus = parse_metrics(endpoint.id, endpoint.name, response.text)
+                if not gpus:
+                    raise ValueError("no usable GPU data")
+            except asyncio.CancelledError:
+                raise
+            except (httpx.TransportError, _RetryableHTTPStatus) as error:
+                if attempt < self.retry_count:
+                    # retry_attempt is one-based from the operator's point of
+                    # view: it identifies the next extra attempt to be made.
+                    self._retrying[endpoint.id] = attempt + 1
+                    self._errors[endpoint.id] = None
+                    await asyncio.sleep(self.retry_delay_seconds)
+                    continue
+                self._retrying.pop(endpoint.id, None)
+                self._errors[endpoint.id] = str(error)
+                self._failed_attempts[endpoint.id] = attempt + 1
+                break
+            except (httpx.HTTPError, ValueError) as error:
+                self._retrying.pop(endpoint.id, None)
+                self._errors[endpoint.id] = str(error)
+                self._failed_attempts[endpoint.id] = attempt + 1
+                break
+            except Exception as error:  # noqa: BLE001 - isolate an endpoint supervisor failure.
+                self._retrying.pop(endpoint.id, None)
+                self._errors[endpoint.id] = f"collector failure: {str(error) or type(error).__name__}"
+                self._failed_attempts[endpoint.id] = attempt + 1
+                break
+            else:
+                # The request may have waited/retried, so freshness starts when
+                # usable metrics actually arrive rather than at cycle launch.
+                self._last_good[endpoint.id] = (
+                    time.monotonic() if now is None else now,
+                    gpus,
+                )
+                self._errors[endpoint.id] = None
+                self._retrying.pop(endpoint.id, None)
+                self._failed_attempts.pop(endpoint.id, None)
+                self._revisions[endpoint.id] += 1
+                break
+        return self.snapshot(endpoint, now)
+
+    def snapshot(self, endpoint: EndpointConfig, now: float | None = None) -> EndpointSnapshot:
         current = time.monotonic() if now is None else now
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            await asyncio.gather(*(self._fetch(client, endpoint, current) for endpoint in self.endpoints))
-        return self.snapshots(current)
+        prior = self._last_good.get(endpoint.id)
+        age = None if prior is None else max(0.0, current - prior[0])
+        stale = age is None or age > self.stale_after
+        error = self._errors.get(endpoint.id)
+        retry_attempt = self._retrying.get(endpoint.id, 0)
+        retrying = retry_attempt > 0
+        if prior is None and error is None and not retrying:
+            error = "awaiting first sample"
+        # A retry may use only a fresh prior sample. A terminal error always
+        # wins, even when the cache has not yet aged out.
+        healthy = prior is not None and not stale and error is None
+        return EndpointSnapshot(
+            endpoint.id,
+            endpoint.name,
+            healthy,
+            age,
+            stale,
+            error,
+            () if prior is None or stale else prior[1],
+            self._revisions[endpoint.id],
+            retrying,
+            retry_attempt,
+            self.retry_count,
+            self._failed_attempts.get(endpoint.id, 0),
+        )
 
     def snapshots(self, now: float | None = None) -> tuple[EndpointSnapshot, ...]:
         """Recompute freshness between polls; controller consumers must call this every tick."""
         current = time.monotonic() if now is None else now
-        snapshots: list[EndpointSnapshot] = []
-        for endpoint in self.endpoints:
-            prior = self._last_good.get(endpoint.id)
-            age = None if prior is None else max(0.0, current - prior[0])
-            stale = age is None or age > self.stale_after
-            error = self._errors.get(endpoint.id)
-            if prior is None and error is None:
-                error = "awaiting first sample"
-            snapshots.append(EndpointSnapshot(
-                endpoint.id, endpoint.name, prior is not None and not stale and error is None,
-                age, stale, error, () if prior is None or stale else prior[1], self._revisions[endpoint.id],
-            ))
-        return tuple(snapshots)
+        return tuple(self.snapshot(endpoint, current) for endpoint in self.endpoints)
 
     def mark_unhealthy(self, error: Exception | str) -> None:
         """Publish unexpected poll-loop failures as unsafe without discarding fresh diagnostics."""
         message = str(error) or type(error).__name__
         for endpoint in self.endpoints:
             self._errors[endpoint.id] = f"collector failure: {message}"
+            self._failed_attempts[endpoint.id] = 0
 
-    async def _fetch(self, client: httpx.AsyncClient, endpoint: EndpointConfig, now: float) -> None:
-        try:
-            response = await client.get(endpoint.url)
-            response.raise_for_status()
-            gpus = parse_metrics(endpoint.id, endpoint.name, response.text)
-            self._last_good[endpoint.id] = (now, gpus)
-            self._errors[endpoint.id] = None
-            self._revisions[endpoint.id] += 1
-        except (httpx.HTTPError, ValueError) as error:
-            self._errors[endpoint.id] = str(error)
+    def mark_endpoint_unhealthy(self, endpoint: EndpointConfig, error: Exception | str) -> None:
+        """Publish an unexpected task-level failure without affecting peers."""
+        message = str(error) or type(error).__name__
+        self._retrying.pop(endpoint.id, None)
+        self._errors[endpoint.id] = f"collector failure: {message}"
+        self._failed_attempts[endpoint.id] = 0
+
+
+class _RetryableHTTPStatus(Exception):
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"HTTP {status_code}")

@@ -65,6 +65,41 @@ def test_load_valid_config(tmp_path: Path) -> None:
     assert config.hardware.shutdown_mode == "full"
     assert config.control.fan_endpoint_ids == ("one", "one")
     assert config.dashboard_colors == DashboardColors()
+    assert config.collection.retry_count == 0
+    assert config.collection.retry_delay_seconds == 10.0
+
+
+def test_loads_optional_collection_retry_settings(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        _config().replace(
+            "stale_after_seconds = 6",
+            "stale_after_seconds = 6\nretry_count = 3\nretry_delay_seconds = 2.5",
+        )
+    )
+    config = load_config(path)
+    assert config.collection.retry_count == 3
+    assert config.collection.retry_delay_seconds == 2.5
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("retry_count", "-1"),
+        ("retry_count", "1.5"),
+        ("retry_count", "true"),
+        ("retry_delay_seconds", "-1"),
+        ("retry_delay_seconds", "nan"),
+        ("retry_delay_seconds", "true"),
+    ],
+)
+def test_rejects_invalid_collection_retry_settings(
+    tmp_path: Path, key: str, value: str
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config().replace("stale_after_seconds = 6", f"stale_after_seconds = 6\n{key} = {value}"))
+    with pytest.raises(ConfigError, match=key):
+        load_config(path)
 
 
 def test_loads_optional_linux_device_paths_without_schema_change(tmp_path: Path) -> None:
