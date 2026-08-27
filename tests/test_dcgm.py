@@ -199,6 +199,30 @@ async def test_advancing_clock_stamps_retried_success_at_completion(
 
 
 @pytest.mark.asyncio
+async def test_numeric_retry_keeps_the_deterministic_freshness_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = EndpointConfig("one", "One", "http://example/metrics")
+    collector = DCGMCollector((endpoint,), 1, 5, retry_count=1, retry_delay_seconds=0)
+    calls = 0
+
+    async def fake_get(self: httpx.AsyncClient, url: str) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ConnectTimeout("temporary")
+        return httpx.Response(200, text=METRICS, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    completed = await collector.collect_endpoint(endpoint, 10)
+    assert completed.healthy and collector._last_good[endpoint.id][0] == 10
+    fresh = collector.snapshots(15)[0]
+    stale = collector.snapshots(15.1)[0]
+    assert fresh.healthy and fresh.age_seconds == 5
+    assert stale.stale and not stale.healthy and stale.age_seconds == 5.1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", [400, 404, 401])
 async def test_non_retryable_http_status_fails_once(
     monkeypatch: pytest.MonkeyPatch, status: int

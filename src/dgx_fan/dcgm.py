@@ -92,10 +92,10 @@ class DCGMCollector:
     ) -> EndpointSnapshot:
         """Collect one endpoint through a complete, non-overlapping retry cycle.
 
-        A numeric ``now`` is a deterministic direct-success seam. A retried
-        successful request is stamped with real completion time so its
-        freshness cannot predate the request. Tests that need deterministic
-        retry timing may provide a zero-argument advancing clock instead.
+        A numeric ``now`` is a deterministic fixed-time seam for the whole
+        call. Production uses ``None`` and stamps the real monotonic
+        completion time. Tests that need deterministic retry timing may pass
+        a zero-argument advancing clock instead.
         """
         for attempt in range(self.retry_count + 1):
             try:
@@ -134,10 +134,10 @@ class DCGMCollector:
                 self._failed_attempts[endpoint.id] = attempt + 1
                 break
             else:
-                # The request may have waited/retried, so freshness starts when
-                # usable metrics actually arrive rather than at cycle launch.
+                # Production/callable clocks stamp usable metrics at request
+                # completion; a numeric seam intentionally remains fixed.
                 self._last_good[endpoint.id] = (
-                    self._completed_at(now, retried=attempt > 0),
+                    self._completed_at(now),
                     gpus,
                 )
                 self._errors[endpoint.id] = None
@@ -148,12 +148,10 @@ class DCGMCollector:
         return self.snapshot(endpoint, now)
 
     @staticmethod
-    def _completed_at(now: float | Clock | None, *, retried: bool) -> float:
+    def _completed_at(now: float | Clock | None) -> float:
         if callable(now):
             return now()
-        if now is None or retried:
-            return time.monotonic()
-        return now
+        return time.monotonic() if now is None else now
 
     @staticmethod
     def _current_at(now: float | Clock | None) -> float:
