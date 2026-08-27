@@ -3,6 +3,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from rich.color import ColorSystem
+from rich.segment import Segment
+from rich.style import Style
+from rich.terminal_theme import DEFAULT_TERMINAL_THEME
+from textual.color import Color
+from textual.filter import ANSIToTruecolor
+from textual.strip import Strip
 
 import dgx_fan.app as app_module
 from dgx_fan.app import (
@@ -57,6 +64,25 @@ def test_app_transports_dashboard_colors_to_ui() -> None:
     import asyncio
 
     asyncio.run(exercise())
+
+
+def test_app_preserves_named_chart_colors_on_standard_ansi_terminals() -> None:
+    """The app's ANSI filter must retain the standard Linux console slots."""
+    config = load_config(Path("config.example.toml"))
+    app = DGXFanApp(config)
+
+    assert app.ansi_theme_dark is DEFAULT_TERMINAL_THEME
+    assert app.ansi_theme_light is DEFAULT_TERMINAL_THEME
+
+    ansi_filter = next(
+        filter for filter in app._filters if isinstance(filter, ANSIToTruecolor)
+    )
+    for color, expected_sgr in (("yellow", "33"), ("cyan", "36"), ("red", "31")):
+        segment = ansi_filter.apply(
+            [Segment("chart", Style(color=color))], Color(0, 0, 0)
+        )[0]
+        assert segment.style is not None
+        assert Strip.render_ansi(segment.style, ColorSystem.STANDARD) == expected_sgr
 
 
 def test_terminal_capture_is_a_noop_for_non_tty(monkeypatch: pytest.MonkeyPatch) -> None:

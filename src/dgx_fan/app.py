@@ -10,9 +10,11 @@ from asyncio import CancelledError, Task, create_task, sleep
 from dataclasses import dataclass
 from typing import Any
 
+from rich.terminal_theme import DEFAULT_TERMINAL_THEME
 from textual import constants
 from textual.app import App, ComposeResult
 from textual.driver import Driver
+from textual.reactive import Reactive
 
 
 def _create_no_kitty_linux_driver() -> type[Driver] | None:
@@ -119,6 +121,13 @@ def _restore_terminal_state(state: _TerminalState | None) -> None:
 class DGXFanApp(App[None]):
     TITLE = "DGX Fan Controller"
     CONTROL_TICK_SECONDS = 0.25
+    # Textual normally maps Rich ANSI names through its Monokai/Alabaster
+    # palettes.  On an 8-color Linux console that remapping changes the
+    # intended ANSI slots (for example red can become magenta).  Use Rich's
+    # canonical terminal palette for both modes so named chart colors retain
+    # their standard SGR codes after Textual's conversion path.
+    ansi_theme_dark = Reactive(DEFAULT_TERMINAL_THEME, init=False)
+    ansi_theme_light = Reactive(DEFAULT_TERMINAL_THEME, init=False)
 
     def __init__(self, config: AppConfig) -> None:
         # Preserve Textual's Windows/headless paths and an explicit custom
