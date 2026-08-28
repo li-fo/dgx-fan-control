@@ -9,6 +9,7 @@ from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Button, Static, TabbedContent
 
+import dgx_fan.ui as ui_module
 from dgx_fan.app import DGXFanApp
 from dgx_fan.config import DashboardColors, EndpointConfig, load_config
 from dgx_fan.models import (
@@ -592,6 +593,54 @@ def test_area_renderer_keeps_missing_blank_zero_baseline_and_clamps_bounds() -> 
     assert tuple(row[-1] for row in history.area(*key, now, 1, 100, height)[:-1]) == (" ", "▁")
     history.points[key] = [HistoryPoint(now, 150)]
     assert tuple(row[-1] for row in history.area(*key, now, 1, 100, height)[:-1]) == ("█", "█")
+
+
+def test_partial_block_profile_detects_linux_console_and_safe_unicode_fallback(monkeypatch) -> None:
+    assert (
+        ui_module._partial_blocks_for_runtime({"TERM": "linux"}, 3, lambda _fd: "/dev/pts/0")
+        == ".:-=+*#"
+    )
+    assert (
+        ui_module._partial_blocks_for_runtime({"TERM": "xterm-256color"}, 8, lambda _fd: "/dev/tty8")
+        == ".:-=+*#"
+    )
+    assert (
+        ui_module._partial_blocks_for_runtime({"TERM": "xterm-256color"}, 3, lambda _fd: "/dev/pts/3")
+        == "▁▂▃▄▅▆▇"
+    )
+
+    def failing_ttyname(_fd: int) -> str:
+        raise OSError("unavailable")
+
+    assert ui_module._partial_blocks_for_runtime({}, 3, failing_ttyname) == "▁▂▃▄▅▆▇"
+
+    class FailingStdin:
+        def fileno(self) -> int:
+            raise ValueError("no file descriptor")
+
+    monkeypatch.setattr(ui_module.sys, "stdin", FailingStdin())
+    assert ui_module._partial_blocks_for_runtime({}, ttyname=lambda _fd: "/dev/tty8") == "▁▂▃▄▅▆▇"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    ((2, (" ", ".")), (29, (" ", "+")), (50, (" ", "█")), (100, ("█", "█"))),
+)
+def test_ascii_partial_blocks_preserve_compact_proportions(value: float, expected: tuple[str, ...]) -> None:
+    history = DashboardHistory(2, ".:-=+*#")
+    history.points[("one", "GPU-a", "mem")] = [HistoryPoint(120, value)]
+    rows = history.area("one", "GPU-a", "mem", 120, 1, 100, 2)
+    assert tuple(row[-1] for row in rows[:-1]) == expected
+
+    history.points[("one", "GPU-a", "mem")] = [HistoryPoint(120, 0)]
+    assert tuple(row[-1] for row in history.area("one", "GPU-a", "mem", 120, 1, 100, 2)[:-1]) == (
+        " ",
+        ".",
+    )
+    assert tuple(
+        row[-1]
+        for row in DashboardHistory(2, ".:-=+*#").area("one", "GPU-a", "mem", 120, 1, 100, 2)[:-1]
+    ) == (" ", " ")
 
 
 class _DashboardApp(App[None]):
@@ -1382,7 +1431,8 @@ def test_dashboard_without_colors_preserves_plain_geometry_and_sanitizes_externa
     asyncio.run(exercise())
 
 
-def test_two_single_gpu_endpoints_fit_short_viewports_and_expand_when_tall() -> None:
+def test_two_single_gpu_endpoints_fit_short_viewports_and_expand_when_tall(monkeypatch) -> None:
+    monkeypatch.setattr(ui_module, "_partial_blocks_for_runtime", lambda: ".:-=+*#")
     app = _DashboardApp()
     gpu = GPUStat(
         "GPU-a",
@@ -1413,6 +1463,9 @@ def test_two_single_gpu_endpoints_fit_short_viewports_and_expand_when_tall() -> 
             scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
             assert scroll.max_scroll_y == 0
             assert len(ui.query(".dgx-panel")) == 2
+            rendered_panels = [panel.render().plain for panel in ui.query(".dgx-panel")]
+            assert all(not set("▁▂▃▄▅▆▇").intersection(rendered) for rendered in rendered_panels)
+            assert any(set(".:-=+*#").intersection(rendered) for rendered in rendered_panels)
             assert all(
                 {"MEM", "TEMP", "UTIL"}
                 == {

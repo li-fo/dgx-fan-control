@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
+import re
+import sys
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from math import ceil
 
@@ -19,6 +22,33 @@ HISTORY_SECONDS = 120.0
 MIN_DASHBOARD_WIDTH = 79
 PLOT_HEIGHT = 5
 MAX_LAYOUT_CONVERGENCE_PASSES = 2
+UNICODE_PARTIAL_BLOCKS = "▁▂▃▄▅▆▇"
+ASCII_PARTIAL_BLOCKS = ".:-=+*#"
+_LINUX_VIRTUAL_CONSOLE = re.compile(r"/dev/tty\d+")
+
+
+def _partial_blocks_for_runtime(
+    environment: Mapping[str, str] | None = None,
+    file_descriptor: int | None = None,
+    ttyname: Callable[[int], str] = os.ttyname,
+) -> str:
+    """Choose safe partial-cell glyphs for Linux virtual consoles.
+
+    ``openvt`` can retain a non-Linux TERM value, so TERM alone is not enough.
+    PTYs keep the Unicode ramp; any unreadable controlling TTY safely defaults
+    to that same capable-terminal profile.
+    """
+    if (os.environ if environment is None else environment).get("TERM") == "linux":
+        return ASCII_PARTIAL_BLOCKS
+    try:
+        descriptor = sys.stdin.fileno() if file_descriptor is None else file_descriptor
+        return (
+            ASCII_PARTIAL_BLOCKS
+            if _LINUX_VIRTUAL_CONSOLE.fullmatch(ttyname(descriptor))
+            else UNICODE_PARTIAL_BLOCKS
+        )
+    except (AttributeError, OSError, ValueError):
+        return UNICODE_PARTIAL_BLOCKS
 
 
 def _safe_display_text(value: object) -> str:
@@ -51,8 +81,15 @@ class HistoryPoint:
 class DashboardHistory:
     """Revision-deduplicated, bounded in-memory metric history."""
 
-    def __init__(self, collection_interval_seconds: float) -> None:
+    def __init__(
+        self,
+        collection_interval_seconds: float,
+        partial_blocks: str = UNICODE_PARTIAL_BLOCKS,
+    ) -> None:
+        if len(partial_blocks) != 7:
+            raise ValueError("partial_blocks must contain seven levels")
         self.collection_interval_seconds = collection_interval_seconds
+        self.partial_blocks = partial_blocks
         self.points: dict[tuple[str, str, str], list[HistoryPoint]] = defaultdict(list)
         self.last_seen: dict[tuple[str, str], float] = {}
         self.revisions: dict[str, int] = {}
@@ -164,24 +201,23 @@ class DashboardHistory:
         # layout: at height two, every non-zero value previously occupied half
         # the graph.  Keep the same cell geometry, but resolve each column into
         # eighths of a cell so the bottom cell can express 1/8 through 7/8.
-        partial_blocks = "▁▂▃▄▅▆▇"
-
         def column(value: float | None, row: int) -> str:
             if value is None:
                 return " "
-            if value == 0:
-                return "▁" if row == plot_height - 1 else " "
+            clamped = min(max(value, 0), maximum)
+            if clamped == 0:
+                return self.partial_blocks[0] if row == plot_height - 1 else " "
 
             # Clamp first so malformed over-range telemetry cannot draw beyond
             # the plot. ceil preserves a visible positive minimum without
             # inflating it to a complete terminal row.
-            occupied = max(1, ceil(min(max(value, 0), maximum) / maximum * plot_height * 8))
+            occupied = max(1, ceil(clamped / maximum * plot_height * 8))
             full_rows, partial = divmod(occupied, 8)
             rows_from_bottom = plot_height - 1 - row
             if rows_from_bottom < full_rows:
                 return "█"
             if rows_from_bottom == full_rows and partial:
-                return partial_blocks[partial - 1]
+                return self.partial_blocks[partial - 1]
             return " "
 
         rows: list[str] = []
@@ -281,7 +317,9 @@ class FanAppUI(Static):
         )
         self.dashboard_colors = dashboard_colors or DashboardColors()
         self.snapshot: ControlSnapshot | None = None
-        self.history = DashboardHistory(collection_interval_seconds)
+        self.history = DashboardHistory(
+            collection_interval_seconds, _partial_blocks_for_runtime()
+        )
         self.panels: dict[str, Static] = {}
         self.last_render_time: float | None = None
         self.last_signature: tuple[tuple[str, int, int, bool, bool, str | None], ...] | None = None
