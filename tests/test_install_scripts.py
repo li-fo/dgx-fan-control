@@ -60,6 +60,14 @@ def _sandbox(tmp_path: Path) -> Path:
         "#!/bin/sh\nprintf 'uv cwd=%s args=%s\\n' \"$PWD\" \"$*\" >> \"$DGX_FAN_TEST_ROOT/command.log\"\n"
     )
     fake_uv.chmod(0o755)
+    for command, body in {
+        "systemctl": 'case "$1" in show) printf "not-found\\n";; esac\n',
+        "systemd-run": "exit 0\n",
+    }.items():
+        tool = sandbox / "usr/bin" / command
+        tool.parent.mkdir(parents=True, exist_ok=True)
+        tool.write_text("#!/bin/sh\nset -eu\n" + body)
+        tool.chmod(0o755)
     return sandbox
 
 
@@ -378,6 +386,29 @@ def test_uninstall_preserves_unmanaged_or_symlink_destinations(tmp_path: Path) -
     assert "preserving unsafe" in result.stderr
 
 
+def test_uninstall_cleanup_failure_preserves_all_managed_artifacts(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    _fake_command(sandbox / "usr/bin/chvt", "exit 1\n")
+    marker = sandbox / "run/dgx-fan-display-tty8"
+    marker.parent.mkdir()
+    marker.write_text("tty2\n")
+    result = _run(clone / "uninstall.sh", "--yes", sandbox=sandbox)
+    assert result.returncode == 1
+    assert "stop/cleanup failed" in result.stderr
+    for path in (
+        sandbox / "etc/profile.d/dgx-fan-autostart.sh",
+        sandbox / "etc/sudoers.d/dgx-fan",
+        sandbox / "usr/local/libexec/dgx-fan-prepare-hardware",
+        sandbox / "usr/local/libexec/dgx-fan-display-manager",
+        sandbox / "usr/local/libexec/dgx-fan-display-session",
+        sandbox / "usr/local/libexec/dgx-fan-display-tty-acquired",
+        sandbox / "usr/local/libexec/dgx-fan-display-cleanup",
+    ):
+        assert path.exists()
+
+
 def test_uninstall_uses_root_marker_inspection_for_production_sudoers() -> None:
     source = (ROOT / "uninstall.sh").read_text()
 
@@ -385,7 +416,7 @@ def test_uninstall_uses_root_marker_inspection_for_production_sudoers() -> None:
     assert 'can_read=( run_root test -r "$path" )' in source
     assert 'display_helpers_managed=true' in source
     assert 'run_root grep -Fxq "$MARKER" "$display_manager"' in source
-    assert 'sudo systemctl stop dgx-fan-display.service' in source
+    assert 'run_root "$display_manager" stop' in source
 
 
 def test_start_dry_run_uses_fixed_helper_and_clone_local_configuration() -> None:
@@ -537,6 +568,34 @@ def test_fake_manager_covers_stale_start_refusals_stop_and_status(tmp_path: Path
     assert entries.count("systemd-run ") == 2
     assert "systemctl stop dgx-fan-display.service" in entries
     assert "systemctl status --no-pager dgx-fan-display.service" in entries
+
+
+def test_fake_manager_unload_timeout_prevents_cleanup_or_relaunch(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    _fake_command(sandbox / "usr/bin/systemctl", 'case "$1" in is-active) printf "inactive\\n";; show) printf "loaded\\n";; esac\n')
+    manager = sandbox / "usr/local/libexec/dgx-fan-display-manager"
+    result = subprocess.run(["sh", str(manager), "start"], env=_environment(sandbox), text=True, capture_output=True, check=False)
+    assert result.returncode == 1
+    assert "timed out waiting" in result.stderr
+
+
+def test_fake_manager_restart_cleans_stale_marker_in_one_action(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    _fake_command(sandbox / "usr/bin/systemctl", 'case "$1" in show) printf "not-found\\n";; esac\n')
+    _fake_command(sandbox / "usr/bin/systemd-run", "exit 0\n")
+    _fake_command(sandbox / "usr/bin/chvt", "exit 0\n")
+    _fake_command(sandbox / "usr/bin/deallocvt", "exit 0\n")
+    marker = sandbox / "run/dgx-fan-display-tty8"
+    marker.parent.mkdir()
+    marker.write_text("tty2\n")
+    manager = sandbox / "usr/local/libexec/dgx-fan-display-manager"
+    result = subprocess.run(["sh", str(manager), "restart"], env=_environment(sandbox), text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
 
 
 def test_generated_helper_rejects_arguments_before_touching_real_pwm(tmp_path: Path) -> None:

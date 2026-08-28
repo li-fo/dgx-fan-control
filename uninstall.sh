@@ -45,25 +45,31 @@ run_root() {
 
 status=0
 display_helpers_managed=false
-if [[ -z "$TEST_ROOT" ]]; then
-    # Do not act on an unrelated unit that merely shares this fixed name.  The
-    # two root-owned helpers are the ownership evidence for our transient unit.
-    display_manager=/usr/local/libexec/dgx-fan-display-manager
-    display_session=/usr/local/libexec/dgx-fan-display-session
-    if [[ -f "$display_manager" && ! -L "$display_manager" \
-        && -f "$display_session" && ! -L "$display_session" ]] \
-        && [[ $(run_root stat -c '%h' -- "$display_manager") == 1 ]] \
-        && [[ $(run_root stat -c '%h' -- "$display_session") == 1 ]] \
-        && run_root grep -Fxq "$MARKER" "$display_manager" \
-        && run_root grep -Fxq "$MARKER" "$display_session"; then
-        display_helpers_managed=true
-    fi
+display_manager=$(target_path /usr/local/libexec/dgx-fan-display-manager)
+display_session=$(target_path /usr/local/libexec/dgx-fan-display-session)
+display_acquired=$(target_path /usr/local/libexec/dgx-fan-display-tty-acquired)
+display_cleanup=$(target_path /usr/local/libexec/dgx-fan-display-cleanup)
+if [[ -f "$display_manager" && ! -L "$display_manager" \
+    && -f "$display_session" && ! -L "$display_session" \
+    && -f "$display_acquired" && ! -L "$display_acquired" \
+    && -f "$display_cleanup" && ! -L "$display_cleanup" ]] \
+    && [[ $(run_root stat -c '%h' -- "$display_manager") == 1 ]] \
+    && [[ $(run_root stat -c '%h' -- "$display_session") == 1 ]] \
+    && [[ $(run_root stat -c '%h' -- "$display_acquired") == 1 ]] \
+    && [[ $(run_root stat -c '%h' -- "$display_cleanup") == 1 ]] \
+    && run_root grep -Fxq "$MARKER" "$display_manager" \
+    && run_root grep -Fxq "$MARKER" "$display_session" \
+    && run_root grep -Fxq "$MARKER" "$display_acquired" \
+    && run_root grep -Fxq "$MARKER" "$display_cleanup"; then
+    display_helpers_managed=true
 fi
 if [[ "$display_helpers_managed" == true ]]; then
-    # A transient unit has no unit file to remove. Stop only the verified,
-    # fixed-name unit before removing the helpers it uses.
-    sudo systemctl stop dgx-fan-display.service >/dev/null 2>&1 || true
-    sudo systemctl reset-failed dgx-fan-display.service >/dev/null 2>&1 || true
+    # Use the same fixed manager path as operators. A failed cleanup retains
+    # every artifact below so a later `./uninstall.sh --yes` can retry safely.
+    if ! run_root "$display_manager" stop; then
+        printf '%s\n' 'dgx-fan uninstall: display stop/cleanup failed; preserving managed integration for retry.' >&2
+        exit 1
+    fi
 fi
 for path in \
     "$(target_path /etc/profile.d/dgx-fan-autostart.sh)" \

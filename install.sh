@@ -340,6 +340,9 @@ wait_unloaded() {
   done
   echo "timed out waiting for \$unit to unload" >&2; return 1
 }
+run_cleanup() {
+  "\$cleanup"
+}
 case "\${1:-}" in
   start)
     [ "\$#" -eq 1 ] || exit 64
@@ -348,18 +351,22 @@ case "\${1:-}" in
     "\$systemctl" reset-failed "\$unit" >/dev/null 2>&1 || true
     "\$systemctl" stop "\$unit" >/dev/null 2>&1 || true
     wait_unloaded
+    run_cleanup
     exec "\$systemd_run" --quiet --collect --service-type=exec --unit=dgx-fan-display --property=TimeoutStopSec=10s --property=ExecStopPost="\$cleanup" "\$session"
     ;;
   restart)
     [ "\$#" -eq 1 ] || exit 64
     "\$systemctl" stop "\$unit" >/dev/null 2>&1 || true
     wait_unloaded
+    run_cleanup
     "\$systemctl" reset-failed "\$unit" >/dev/null 2>&1 || true
     exec "\$systemd_run" --quiet --collect --service-type=exec --unit=dgx-fan-display --property=TimeoutStopSec=10s --property=ExecStopPost="\$cleanup" "\$session"
     ;;
   stop)
     [ "\$#" -eq 1 ] || exit 64
-    exec "\$systemctl" stop "\$unit"
+    "\$systemctl" stop "\$unit"
+    wait_unloaded
+    run_cleanup
     ;;
   status)
     [ "\$#" -eq 1 ] || exit 64
