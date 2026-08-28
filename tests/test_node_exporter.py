@@ -95,3 +95,35 @@ async def test_node_collector_stale_failure_and_cancellation(monkeypatch: pytest
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_node_collector_state_attributes_remain_authoritative_after_runtime_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = EndpointConfig("one", "One", "http://dcgm/metrics", "node-exporter", "http://node/metrics")
+    collector = NodeExporterCollector((endpoint,), 1, 5, retry_count=0, retry_delay_seconds=3)
+    collector._last_good = {}
+    collector._last_good[endpoint.id] = (0, parse_memory_metrics(METRICS))
+    collector.stale_after = 10
+    assert collector.snapshots(6)[0].healthy
+    collector.stale_after = 5
+    assert collector.snapshots(6)[0].stale
+
+    calls = 0
+
+    async def fake_get(self: httpx.AsyncClient, url: str) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ConnectTimeout("temporary")
+        return httpx.Response(200, text=METRICS, request=httpx.Request("GET", url))
+
+    async def fake_sleep(delay: float) -> None:
+        assert delay == 3
+
+    collector.retry_count = 1
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    monkeypatch.setattr("dgx_fan.node_exporter.asyncio.sleep", fake_sleep)
+    retried = await collector.collect_endpoint(endpoint, 10)
+    assert calls == 2 and retried.healthy and retried.retry_count == 1

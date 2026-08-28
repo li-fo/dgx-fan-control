@@ -7,7 +7,7 @@ from collections import defaultdict
 import httpx
 from prometheus_client.parser import text_string_to_metric_families
 
-from ._collector import Clock, CollectorState
+from ._collector import Clock, CollectorStateMixin
 from .config import EndpointConfig
 from .models import EndpointSnapshot, GPUStat
 
@@ -62,7 +62,7 @@ def parse_metrics(endpoint_id: str, name: str, text: str) -> tuple[GPUStat, ...]
     return tuple(sorted(result, key=lambda gpu: gpu.key))
 
 
-class DCGMCollector:
+class DCGMCollector(CollectorStateMixin[tuple[GPUStat, ...]]):
     def __init__(
         self,
         endpoints: tuple[EndpointConfig, ...],
@@ -73,13 +73,11 @@ class DCGMCollector:
     ) -> None:
         self.endpoints, self.timeout, self.stale_after = endpoints, timeout_seconds, stale_after_seconds
         self.retry_count, self.retry_delay_seconds = retry_count, retry_delay_seconds
-        state = CollectorState[tuple[GPUStat, ...]](stale_after_seconds, retry_count)
-        self._last_good = state.last_good
-        self._errors = state.errors
-        self._retrying = state.retrying
-        self._failed_attempts = state.failed_attempts
-        self._revisions = state.revisions
-        self._state = state
+        self._last_good: dict[str, tuple[float, tuple[GPUStat, ...]]] = {}
+        self._errors: dict[str, str | None] = {}
+        self._retrying: dict[str, int] = {}
+        self._failed_attempts: dict[str, int] = {}
+        self._revisions: dict[str, int] = defaultdict(int)
 
     async def collect(self, now: float | Clock | None = None) -> tuple[EndpointSnapshot, ...]:
         await asyncio.gather(*(self.collect_endpoint(endpoint, now) for endpoint in self.endpoints))
@@ -111,19 +109,19 @@ class DCGMCollector:
                 if attempt < self.retry_count:
                     # retry_attempt is one-based from the operator's point of
                     # view: it identifies the next extra attempt to be made.
-                    self._state.record_retry_wait(endpoint.id, attempt)
+                    self._record_retry_wait(endpoint.id, attempt)
                     # A prior terminal failure is a safety latch. Keep it
                     # through a later cycle's retry wait; only usable metrics
                     # may clear it. The UI still prioritizes retrying state.
                     await asyncio.sleep(self.retry_delay_seconds)
                     continue
-                self._state.record_failure(endpoint.id, str(error), attempt + 1)
+                self._record_failure(endpoint.id, str(error), attempt + 1)
                 break
             except (httpx.HTTPError, ValueError) as error:
-                self._state.record_failure(endpoint.id, str(error), attempt + 1)
+                self._record_failure(endpoint.id, str(error), attempt + 1)
                 break
             except Exception as error:  # noqa: BLE001 - isolate an endpoint supervisor failure.
-                self._state.record_failure(
+                self._record_failure(
                     endpoint.id,
                     f"collector failure: {str(error) or type(error).__name__}",
                     attempt + 1,
@@ -132,14 +130,14 @@ class DCGMCollector:
             else:
                 # Production/callable clocks stamp usable metrics at request
                 # completion; a numeric seam intentionally remains fixed.
-                self._state.record_success(endpoint.id, gpus, now)
+                self._record_success(endpoint.id, gpus, now)
                 break
         return self.snapshot(endpoint, now)
 
     def snapshot(
         self, endpoint: EndpointConfig, now: float | Clock | None = None
     ) -> EndpointSnapshot:
-        state = self._state.snapshot(endpoint.id, now)
+        state = self._snapshot_state(endpoint.id, now)
         # A retry may use only a fresh prior sample. A terminal error always
         # wins, even when the cache has not yet aged out.
         healthy = state.prior is not None and not state.stale and state.error is None
@@ -161,19 +159,19 @@ class DCGMCollector:
 
     def snapshots(self, now: float | Clock | None = None) -> tuple[EndpointSnapshot, ...]:
         """Recompute freshness between polls; controller consumers must call this every tick."""
-        current = self._state.current_at(now)
+        current = self._current_at(now)
         return tuple(self.snapshot(endpoint, current) for endpoint in self.endpoints)
 
     def mark_unhealthy(self, error: Exception | str) -> None:
         """Publish unexpected poll-loop failures as unsafe without discarding fresh diagnostics."""
         message = str(error) or type(error).__name__
         for endpoint in self.endpoints:
-            self._state.record_failure(endpoint.id, f"collector failure: {message}", 0)
+            self._record_failure(endpoint.id, f"collector failure: {message}", 0)
 
     def mark_endpoint_unhealthy(self, endpoint: EndpointConfig, error: Exception | str) -> None:
         """Publish an unexpected task-level failure without affecting peers."""
         message = str(error) or type(error).__name__
-        self._state.record_failure(endpoint.id, f"collector failure: {message}", 0)
+        self._record_failure(endpoint.id, f"collector failure: {message}", 0)
 
 
 class _RetryableHTTPStatus(Exception):

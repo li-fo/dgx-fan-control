@@ -7,7 +7,7 @@ from collections import defaultdict
 import httpx
 from prometheus_client.parser import text_string_to_metric_families
 
-from ._collector import Clock, CollectorState
+from ._collector import Clock, CollectorStateMixin
 from .config import EndpointConfig
 from .models import MemoryStat, NodeMemorySnapshot
 
@@ -46,7 +46,7 @@ def parse_memory_metrics(text: str) -> MemoryStat:
     return MemoryStat((total - available) / mib, total / mib)
 
 
-class NodeExporterCollector:
+class NodeExporterCollector(CollectorStateMixin[MemoryStat]):
     """Best-effort node memory collector isolated from DCGM safety telemetry."""
 
     def __init__(
@@ -59,13 +59,11 @@ class NodeExporterCollector:
     ) -> None:
         self.endpoints, self.timeout, self.stale_after = endpoints, timeout_seconds, stale_after_seconds
         self.retry_count, self.retry_delay_seconds = retry_count, retry_delay_seconds
-        state = CollectorState[MemoryStat](stale_after_seconds, retry_count)
-        self._last_good = state.last_good
-        self._errors = state.errors
-        self._retrying = state.retrying
-        self._failed_attempts = state.failed_attempts
-        self._revisions = state.revisions
-        self._state = state
+        self._last_good: dict[str, tuple[float, MemoryStat]] = {}
+        self._errors: dict[str, str | None] = {}
+        self._retrying: dict[str, int] = {}
+        self._failed_attempts: dict[str, int] = {}
+        self._revisions: dict[str, int] = defaultdict(int)
 
     async def collect_endpoint(
         self, endpoint: EndpointConfig, now: float | Clock | None = None
@@ -83,28 +81,28 @@ class NodeExporterCollector:
                 raise
             except (httpx.TransportError, _RetryableHTTPStatus) as error:
                 if attempt < self.retry_count:
-                    self._state.record_retry_wait(endpoint.id, attempt)
+                    self._record_retry_wait(endpoint.id, attempt)
                     await asyncio.sleep(self.retry_delay_seconds)
                     continue
-                self._state.record_failure(endpoint.id, str(error), attempt + 1)
+                self._record_failure(endpoint.id, str(error), attempt + 1)
                 break
             except (httpx.HTTPError, ValueError) as error:
-                self._state.record_failure(endpoint.id, str(error), attempt + 1)
+                self._record_failure(endpoint.id, str(error), attempt + 1)
                 break
             except Exception as error:  # noqa: BLE001 - endpoint isolation.
-                self._state.record_failure(
+                self._record_failure(
                     endpoint.id,
                     f"collector failure: {str(error) or type(error).__name__}",
                     attempt + 1,
                 )
                 break
             else:
-                self._state.record_success(endpoint.id, memory, now)
+                self._record_success(endpoint.id, memory, now)
                 break
         return self.snapshot(endpoint, now)
 
     def snapshot(self, endpoint: EndpointConfig, now: float | Clock | None = None) -> NodeMemorySnapshot:
-        state = self._state.snapshot(endpoint.id, now)
+        state = self._snapshot_state(endpoint.id, now)
         return NodeMemorySnapshot(
             endpoint.id,
             state.prior is not None and not state.stale and state.error is None,
@@ -120,11 +118,11 @@ class NodeExporterCollector:
         )
 
     def snapshots(self, now: float | Clock | None = None) -> tuple[NodeMemorySnapshot, ...]:
-        current = self._state.current_at(now)
+        current = self._current_at(now)
         return tuple(self.snapshot(endpoint, current) for endpoint in self.endpoints)
 
     def mark_endpoint_unhealthy(self, endpoint: EndpointConfig, error: Exception | str) -> None:
-        self._state.record_failure(
+        self._record_failure(
             endpoint.id,
             f"collector failure: {str(error) or type(error).__name__}",
             0,
