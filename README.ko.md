@@ -210,4 +210,4 @@ GPIO, 케이블, 커넥터, 전원이 뜨거워지거나, GPIO가 3.3 V보다 �
 
 ## MVP 한계
 
-systemd daemon, Unix socket, 영구 `/etc` 설정, 설정 편집기, meatball 메뉴, GPU process table, native touch 지원, `uvx` 릴리스 패키지, 충돌 후 재시작 감독, 실제 하드웨어 검증은 아직 없습니다. 선택 가능한 tty1 콘솔 통합은 단순한 방식이며 대상 Pi에서 별도 검증이 필요합니다.
+영구 systemd unit 또는 restart daemon, filesystem Unix socket, 영구 `/etc` 설정, 설정 편집기, meatball 메뉴, GPU process table, native touch 지원, `uvx` 릴리스 패키지, 충돌 후 재시작 감독, 실제 하드웨어 검증은 아직 없습니다. 선택 가능한 tty1 콘솔 통합은 transient systemd unit을 사용하고 Raspberry Pi hardware 경로는 kernel abstract Unix socket을 사용하며, 모두 대상 Pi에서 별도 검증이 필요합니다.

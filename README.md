@@ -214,4 +214,4 @@ The primary sources above support only the stated Noctua model. They do not veri
 
 ## MVP limitations
 
-There is no systemd daemon, Unix socket, persistent `/etc` configuration, configuration editor, meatball menu, GPU process table, native touch support, `uvx` release package, crash-restart supervisor, or live hardware verification yet. The optional tty1 console integration is deliberately simple and remains subject to target-Pi validation.
+There is no persistent systemd unit or restart daemon, filesystem Unix socket, persistent `/etc` configuration, configuration editor, meatball menu, GPU process table, native touch support, `uvx` release package, crash-restart supervisor, or live hardware verification yet. The optional tty1 console integration uses a transient systemd unit and the Raspberry Pi hardware path uses a kernel abstract Unix socket; both remain subject to target-Pi validation.
