@@ -236,7 +236,7 @@ EOF
 }
 
 write_display_helpers() {
-    local manager session acquired cleanup rendered project_quoted user_quoted marker_quoted tty_active_quoted openvt_quoted runuser_quoted chvt_quoted deallocvt_quoted systemctl_quoted systemd_run_quoted acquired_quoted cleanup_quoted session_quoted
+    local manager session acquired cleanup rendered project_quoted user_quoted marker_quoted tty_active_quoted tty8_quoted openvt_quoted runuser_quoted chvt_quoted deallocvt_quoted systemctl_quoted systemd_run_quoted acquired_quoted cleanup_quoted session_quoted
     manager=$(target_path "/usr/local/libexec/$DISPLAY_MANAGER_NAME")
     session=$(target_path "/usr/local/libexec/$DISPLAY_SESSION_NAME")
     acquired=$(target_path "/usr/local/libexec/$DISPLAY_TTY_ACQUIRED_NAME")
@@ -245,6 +245,7 @@ write_display_helpers() {
     user_quoted=$(posix_quote "$INSTALL_USER")
     marker_quoted=$(posix_quote "$(target_path /run/dgx-fan-display-tty8)")
     tty_active_quoted=$(posix_quote "$(target_path /sys/class/tty/tty0/active)")
+    tty8_quoted=$(posix_quote "$(target_path /dev/tty8)")
     openvt_quoted=$(posix_quote "$(target_path /usr/bin/openvt)")
     runuser_quoted=$(posix_quote "$(target_path /usr/sbin/runuser)")
     chvt_quoted=$(posix_quote "$(target_path /usr/bin/chvt)")
@@ -305,6 +306,7 @@ set -eu
 marker=$marker_quoted
 chvt=$chvt_quoted
 deallocvt=$deallocvt_quoted
+tty8=$tty8_quoted
 if [ -L "\$marker" ] || { [ -e "\$marker" ] && [ ! -f "\$marker" ]; }; then
     echo "unsafe tty8 ownership marker: \$marker" >&2; exit 1
 fi
@@ -312,7 +314,10 @@ if [ -f "\$marker" ]; then
     previous_vt=\$(cat "\$marker" 2>/dev/null || true)
     case "\$previous_vt" in tty[1-9]|tty[1-9][0-9]*) ;; *) echo "invalid tty8 ownership marker" >&2; exit 1;; esac
     "\$chvt" "\${previous_vt#tty}" || exit 1
-    "\$deallocvt" 8 || exit 1
+    if ! "\$deallocvt" 8 2>/dev/null; then
+        printf '\r' >"\$tty8" || exit 1
+        "\$deallocvt" 8 || exit 1
+    fi
     rm -f -- "\$marker"
 fi
 EOF

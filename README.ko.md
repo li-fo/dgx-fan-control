@@ -80,7 +80,7 @@ sudo journalctl -u dgx-fan-display.service --no-pager
 ```
 
 transient 프로세스는 `openvt -c 8 -s -w`로 tty8을 열므로 SSH 연결을 종료해도 1024x600 HDMI 콘솔의
-모니터링은 유지됩니다. Pi에 연결한 키보드에서는 **Ctrl+Q**로 정상 종료하며 service의 고정 `ExecStopPost` cleanup이 검증된 이전 virtual terminal로 돌아가 tty8을 해제합니다.
+모니터링은 유지됩니다. Pi에 연결한 키보드에서는 **Ctrl+Q**로 정상 종료하며 service의 고정 `ExecStopPost` cleanup이 검증된 이전 virtual terminal로 돌아가 tty8을 해제합니다. 첫 tty8 deallocation이 실패하면 tty8에 carriage return 하나를 쓰고 한 번만 재시도하며, 실제 kernel 동작은 Pi에서 확인해야 합니다.
 `./display.sh stop`과 `restart`의 stop 단계는 unit의 dedicated clean-stop signal을 사용하므로 `shutdown_mode = "off"`에서 팬을 멈춥니다. 처리 가능한 비정상 SIGTERM과 예외는 기존 fan fail-safe release(기본 full duty)가 적용됩니다. SIGKILL과 전원 손실은 cleanup을 실행할 수 없어 마지막 PWM duty가 유지될 수 있습니다. display가 동작하는 동안 두 번째
 `./start.sh`를 실행하지 마세요. hardware-bound socket lock이 두 번째 소유자를 거부하며, 첫 프로세스를 종료하지 않습니다.
 `uv run dgx-fan --config config.toml`과 `uvx`는 기존처럼 현재 터미널의 foreground 명령입니다.

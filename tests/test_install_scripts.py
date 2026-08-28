@@ -531,6 +531,7 @@ def test_fake_vt_lifecycle_runs_cleanup_only_after_tty_marker(tmp_path: Path) ->
         "chvt 3",
         "deallocvt 8",
     ]
+    assert not (sandbox / "dev/tty8").exists()
 
     log.unlink()
     no_marker_cleanup = subprocess.run(["sh", str(cleanup)], env=environment, text=True, capture_output=True, check=False)
@@ -545,6 +546,69 @@ def test_fake_vt_lifecycle_runs_cleanup_only_after_tty_marker(tmp_path: Path) ->
     retried_cleanup = subprocess.run(["sh", str(cleanup)], env=environment, text=True, capture_output=True, check=False)
     assert retried_cleanup.returncode == 0
     assert not marker.exists()
+
+
+def test_cleanup_retries_dealloc_after_tty8_carriage_return(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    _fake_command(sandbox / "usr/bin/chvt", 'printf "chvt %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/retry.log"\n')
+    _fake_command(sandbox / "usr/bin/deallocvt", 'printf "deallocvt %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/retry.log"\nif [ ! -e "$DGX_FAN_TEST_ROOT/dealloc-once" ]; then : > "$DGX_FAN_TEST_ROOT/dealloc-once"; exit 1; fi\n')
+    marker = sandbox / "run/dgx-fan-display-tty8"
+    marker.parent.mkdir()
+    marker.write_text("tty3\n")
+    tty8 = sandbox / "dev/tty8"
+    tty8.parent.mkdir()
+    tty8.write_text("")
+    cleanup = sandbox / "usr/local/libexec/dgx-fan-display-cleanup"
+
+    result = subprocess.run(["sh", str(cleanup)], env=_environment(sandbox), text=True, capture_output=True, check=False)
+    assert result.returncode == 0
+    assert not marker.exists()
+    assert tty8.read_bytes() == b"\r"
+    assert (sandbox / "retry.log").read_text().splitlines() == ["chvt 3", "deallocvt 8", "deallocvt 8"]
+
+
+def test_cleanup_retains_marker_when_dealloc_retry_fails(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    _fake_command(sandbox / "usr/bin/chvt", 'printf "chvt %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/fail.log"\n')
+    _fake_command(sandbox / "usr/bin/deallocvt", 'printf "deallocvt %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/fail.log"\nif [ -e "$DGX_FAN_TEST_ROOT/dealloc-failed-once" ]; then\n    [ "$(od -An -tx1 "$DGX_FAN_TEST_ROOT/dev/tty8" | tr -d " \\n")" = "0d" ] || exit 99\n    printf "%s\\n" "second dealloc failed" >&2\nfi\n: > "$DGX_FAN_TEST_ROOT/dealloc-failed-once"\nexit 1\n')
+    marker = sandbox / "run/dgx-fan-display-tty8"
+    marker.parent.mkdir()
+    marker.write_text("tty3\n")
+    tty8 = sandbox / "dev/tty8"
+    tty8.parent.mkdir()
+    tty8.write_text("")
+    cleanup = sandbox / "usr/local/libexec/dgx-fan-display-cleanup"
+
+    result = subprocess.run(["sh", str(cleanup)], env=_environment(sandbox), text=True, capture_output=True, check=False)
+    assert result.returncode == 1
+    assert marker.read_text() == "tty3\n"
+    assert tty8.read_bytes() == b"\r"
+    assert (sandbox / "fail.log").read_text().splitlines() == ["chvt 3", "deallocvt 8", "deallocvt 8"]
+    assert result.stderr
+
+
+def test_cleanup_retains_marker_when_tty8_write_fails(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    _fake_command(sandbox / "usr/bin/chvt", 'printf "chvt %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/write-fail.log"\n')
+    _fake_command(sandbox / "usr/bin/deallocvt", 'printf "deallocvt %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/write-fail.log"\nexit 1\n')
+    marker = sandbox / "run/dgx-fan-display-tty8"
+    marker.parent.mkdir()
+    marker.write_text("tty3\n")
+    tty8 = sandbox / "dev/tty8"
+    tty8.mkdir(parents=True)
+    cleanup = sandbox / "usr/local/libexec/dgx-fan-display-cleanup"
+
+    result = subprocess.run(["sh", str(cleanup)], env=_environment(sandbox), text=True, capture_output=True, check=False)
+    assert result.returncode == 1
+    assert marker.read_text() == "tty3\n"
+    assert (sandbox / "write-fail.log").read_text().splitlines() == ["chvt 3", "deallocvt 8"]
+    assert result.stderr
 
 
 def test_fake_manager_refuses_active_and_orders_restart(tmp_path: Path) -> None:
