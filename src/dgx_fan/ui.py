@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
+from math import ceil
 
 from rich.cells import cell_len
 from rich.style import Style
@@ -159,20 +160,35 @@ class DashboardHistory:
                 and bin_end <= previous_at + hold_seconds
             ):
                 values[index] = previous_value
+        # A full terminal cell is far too coarse for the compact, two-endpoint
+        # layout: at height two, every non-zero value previously occupied half
+        # the graph.  Keep the same cell geometry, but resolve each column into
+        # eighths of a cell so the bottom cell can express 1/8 through 7/8.
+        partial_blocks = "▁▂▃▄▅▆▇"
+
+        def column(value: float | None, row: int) -> str:
+            if value is None:
+                return " "
+            if value == 0:
+                return "▁" if row == plot_height - 1 else " "
+
+            # Clamp first so malformed over-range telemetry cannot draw beyond
+            # the plot. ceil preserves a visible positive minimum without
+            # inflating it to a complete terminal row.
+            occupied = max(1, ceil(min(max(value, 0), maximum) / maximum * plot_height * 8))
+            full_rows, partial = divmod(occupied, 8)
+            rows_from_bottom = plot_height - 1 - row
+            if rows_from_bottom < full_rows:
+                return "█"
+            if rows_from_bottom == full_rows and partial:
+                return partial_blocks[partial - 1]
+            return " "
+
         rows: list[str] = []
         label_rows = {0, plot_height // 2, plot_height - 1}
         for row in range(plot_height):
             threshold = (plot_height - 1 - row) / max(1, plot_height - 1) * maximum
-            line = "".join(
-                " "
-                if value is None
-                else "▁"
-                if value == 0 and row == plot_height - 1
-                else "█"
-                if value > 0 and (row == plot_height - 1 or value >= threshold)
-                else " "
-                for value in values
-            )
+            line = "".join(column(value, row) for value in values)
             label = f"{threshold:>4.0f} " if row in label_rows else "     "
             rows.append(label + line)
         axis = (

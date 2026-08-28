@@ -514,7 +514,7 @@ def test_area_renderer_locks_geometry_axis_gaps_and_bin_reducers() -> None:
         )
         for metric in ("mem", "util", "temp")
     }
-    assert filled_rows == {"mem": 4, "util": 3, "temp": 4}
+    assert filled_rows == {"mem": 4, "util": 3, "temp": 5}
 
     temp = reducers.area("one", "GPU-a", "temp", now, width, 75)
     assert [line[:5] for line in temp[:5]] == ["  75 ", "     ", "  38 ", "     ", "   0 "]
@@ -546,8 +546,52 @@ def test_compact_plot_heights_preserve_zero_missing_and_low_positive_baselines()
         assert sum(line.count("▁") for line in zero_glyphs) == 1
         assert zero_glyphs[height - 1].endswith("▁")
         assert all(line == " " * width for line in (row[5:] for row in missing_rows[:-1]))
-        assert sum(line.count("█") for line in positive_glyphs) == 1
-        assert positive_glyphs[height - 1].endswith("█")
+        assert sum(line.count("▁") for line in positive_glyphs) == 1
+        assert positive_glyphs[height - 1].endswith("▁")
+
+
+@pytest.mark.parametrize(
+    ("height", "value", "expected"),
+    (
+        (1, 2, ("▁",)),
+        (1, 29, ("▃",)),
+        (1, 50, ("▄",)),
+        (1, 100, ("█",)),
+        (2, 2, (" ", "▁")),
+        (2, 29, (" ", "▅")),
+        (2, 50, (" ", "█")),
+        (2, 100, ("█", "█")),
+        (5, 2, (" ", " ", " ", " ", "▁")),
+        (5, 29, (" ", " ", " ", "▄", "█")),
+        (5, 50, (" ", " ", "▄", "█", "█")),
+        (5, 100, ("█", "█", "█", "█", "█")),
+    ),
+)
+def test_area_renderer_uses_fractional_blocks_at_compact_heights(
+    height: int, value: float, expected: tuple[str, ...]
+) -> None:
+    """Positive values retain their relative height even in a short terminal."""
+    now = 120.0
+    history = DashboardHistory(2)
+    history.points[("one", "GPU-a", "mem")] = [HistoryPoint(now, value)]
+
+    rows = history.area("one", "GPU-a", "mem", now, 1, 100, height)
+    assert tuple(row[-1] for row in rows[:-1]) == expected
+
+
+def test_area_renderer_keeps_missing_blank_zero_baseline_and_clamps_bounds() -> None:
+    now = 120.0
+    height = 2
+    history = DashboardHistory(2)
+    key = ("one", "GPU-a", "util")
+
+    assert tuple(row[-1] for row in history.area(*key, now, 1, 100, height)[:-1]) == (" ", " ")
+    history.points[key] = [HistoryPoint(now, 0)]
+    assert tuple(row[-1] for row in history.area(*key, now, 1, 100, height)[:-1]) == (" ", "▁")
+    history.points[key] = [HistoryPoint(now, -5)]
+    assert tuple(row[-1] for row in history.area(*key, now, 1, 100, height)[:-1]) == (" ", "▁")
+    history.points[key] = [HistoryPoint(now, 150)]
+    assert tuple(row[-1] for row in history.area(*key, now, 1, 100, height)[:-1]) == ("█", "█")
 
 
 class _DashboardApp(App[None]):
@@ -924,7 +968,7 @@ def test_area_step_fills_only_the_configured_cadence_and_preserves_reducers() ->
         )
         for metric in ("mem", "util", "temp")
     }
-    assert heights == {"mem": 1, "util": 3, "temp": 4}
+    assert heights == {"mem": 1, "util": 3, "temp": 5}
 
 
 def test_compact_gpu_groups_pair_memory_and_temperature_without_identity_lines() -> None:
