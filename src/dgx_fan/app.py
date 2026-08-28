@@ -239,24 +239,31 @@ def main(argv: list[str] | None = None) -> None:
 
     if threading.current_thread() is threading.main_thread():
         previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
-        previous_clean_stop_handler = signal.getsignal(signal.SIGUSR1)
+        clean_stop_signal = getattr(signal, "SIGUSR1", None)
 
         def _terminate_non_cleanly(signum: int, _frame: object) -> None:
             # Ordinary SIGTERM is an abnormal path. Exit through the finally
             # block so PWM is released with the existing fail-safe behavior.
             raise SystemExit(128 + signum)
 
-        def _terminate_cleanly(signum: int, _frame: object) -> None:
-            nonlocal clean_stop_requested
-            clean_stop_requested = True
-            raise SystemExit(0)
-
         signal.signal(signal.SIGTERM, _terminate_non_cleanly)
-        signal.signal(signal.SIGUSR1, _terminate_cleanly)
+        if clean_stop_signal is not None:
+            previous_clean_stop_handler = signal.getsignal(clean_stop_signal)
 
-        def restore_signal_handlers() -> None:
-            signal.signal(signal.SIGTERM, previous_sigterm_handler)
-            signal.signal(signal.SIGUSR1, previous_clean_stop_handler)
+            def _terminate_cleanly(signum: int, _frame: object) -> None:
+                nonlocal clean_stop_requested
+                clean_stop_requested = True
+                raise SystemExit(0)
+
+            signal.signal(clean_stop_signal, _terminate_cleanly)
+
+            def restore_signal_handlers() -> None:
+                signal.signal(signal.SIGTERM, previous_sigterm_handler)
+                signal.signal(clean_stop_signal, previous_clean_stop_handler)
+        else:
+
+            def restore_signal_handlers() -> None:
+                signal.signal(signal.SIGTERM, previous_sigterm_handler)
     try:
         app.run()
         # Textual catches some internal fatal exceptions and returns with a

@@ -266,6 +266,33 @@ def test_closed_stdin_does_not_prevent_app_run(monkeypatch: pytest.MonkeyPatch) 
     assert events == ["run", "release:True"]
 
 
+def test_missing_sigusr1_keeps_foreground_completion_portable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    releases: list[bool] = []
+
+    class Hardware:
+        def release(self, *, normal_shutdown: bool = False) -> None:
+            releases.append(normal_shutdown)
+
+    class ReturningApp:
+        return_code = 0
+
+        def __init__(self, config: object) -> None:
+            self.hardware = Hardware()
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.delattr(app_module.signal, "SIGUSR1", raising=False)
+    monkeypatch.setattr(app_module, "load_config", lambda path: object())
+    monkeypatch.setattr(app_module, "DGXFanApp", ReturningApp)
+    monkeypatch.setattr(app_module, "_capture_terminal_state", lambda: None)
+
+    main(["--config", "unused.toml"])
+    assert releases == [True]
+
+
 def test_terminal_restore_failure_is_contained_and_hardware_releases(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

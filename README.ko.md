@@ -123,7 +123,7 @@ retry_delay_seconds = 10.0
 
 각 DGX는 독립적으로 수집하므로 한 endpoint의 재시도가 정상 endpoint 수집을 지연시키지 않습니다. 재시도 중에는 캐시 샘플도 `stale_after_seconds` 안에서만 사용할 수 있습니다. 샘플이 stale해지거나 모든 시도가 끝나면 그 endpoint는 즉시 비정상이 되고, 두 팬은 `control.fallback_speed_percent`(기본 100%)로 동작합니다. 다음 수집 주기에서 네트워크가 복구되면 정상 복구할 수 있습니다. Dashboard 배너는 `WAITING`, `RETRYING n/N`, `RETRYING · STALE`, `FAILED after N attempts`, 정상 상태를 구분하며, 재시도만으로 그래프 샘플이 중복 추가되지는 않습니다.
 
-`hardware.shutdown_mode`은 선택 항목이며 기본값은 `"full"`입니다. 시작/초기화 실패나 앱 오류를 포함한 모든 release에서 두 팬에 full duty를 명령합니다. 직결 Noctua NF-A6x25 5V PWM처럼 제조사 사양상 0% PWM에서 0 RPM임을 확인한 팬에서만 `shutdown_mode = "off"`를 설정하세요. Textual이 exit code 0으로 정상 반환한 경우에만 두 팬을 0% duty로 멈추고 PWM channel은 enabled 상태로 유지합니다. Textual 내부/비정상 종료, 예외, 0% 쓰기 실패, tach join timeout, GPIO release 실패는 두 channel을 full duty로 되돌립니다. 이는 부팅 시, SIGKILL·터미널 강제 종료, 전원 손실 시 OFF를 보장하지 않습니다. 그런 기본 OFF가 필요하면 별도 하드웨어 전원 스위치가 필요합니다.
+`hardware.shutdown_mode`은 선택 항목이며 기본값은 `"full"`입니다. SIGTERM, 시작/초기화 실패, 앱 오류를 포함해 소프트웨어가 처리할 수 있는 비정상 release에서는 두 팬에 full duty를 명령합니다. 직결 Noctua NF-A6x25 5V PWM처럼 제조사 사양상 0% PWM에서 0 RPM임을 확인한 팬에서만 `shutdown_mode = "off"`를 설정하세요. Textual이 exit code 0으로 정상 반환한 경우에만 두 팬을 0% duty로 멈추고 PWM channel은 enabled 상태로 유지합니다. Textual 내부/비정상 종료, 예외, 0% 쓰기 실패, tach join timeout, GPIO release 실패는 두 channel을 full duty로 되돌립니다. SIGKILL과 전원 손실은 소프트웨어 cleanup을 실행할 수 없으므로, hardware 또는 전원 상태가 바뀔 때까지 마지막 PWM duty가 유지될 수 있습니다.
 
 DGX 두 대는 물리 공기 흐름 매핑을 명시적으로 고정합니다.
 
