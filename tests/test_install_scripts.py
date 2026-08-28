@@ -278,7 +278,14 @@ def test_unsafe_destination_parent_fails_before_any_system_mutation(tmp_path: Pa
     assert result.returncode == 1
     assert "unsafe parent directory" in result.stderr
     assert "dtoverlay=pwm-2chan" not in (sandbox / "boot/firmware/config.txt").read_text()
-    assert not (sandbox / "usr/local/libexec/dgx-fan-prepare-hardware").exists()
+    for helper in (
+        "dgx-fan-prepare-hardware",
+        "dgx-fan-display-manager",
+        "dgx-fan-display-session",
+        "dgx-fan-display-tty-acquired",
+        "dgx-fan-display-cleanup",
+    ):
+        assert not (sandbox / "usr/local/libexec" / helper).exists()
     assert not (sandbox / "etc/profile.d/dgx-fan-autostart.sh").exists()
     command_log = (sandbox / "command.log").read_text()
     assert "usermod" not in command_log
@@ -409,6 +416,26 @@ def test_uninstall_cleanup_failure_preserves_all_managed_artifacts(tmp_path: Pat
         assert path.exists()
 
 
+def test_uninstall_removes_all_artifacts_when_stop_reports_missing_unit(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    _fake_command(sandbox / "usr/bin/systemctl", 'case "$1" in stop) exit 1;; show) printf "not-found\\n";; esac\n')
+
+    result = _run(clone / "uninstall.sh", "--yes", sandbox=sandbox)
+    assert result.returncode == 0, result.stderr
+    for path in (
+        sandbox / "etc/profile.d/dgx-fan-autostart.sh",
+        sandbox / "etc/sudoers.d/dgx-fan",
+        sandbox / "usr/local/libexec/dgx-fan-prepare-hardware",
+        sandbox / "usr/local/libexec/dgx-fan-display-manager",
+        sandbox / "usr/local/libexec/dgx-fan-display-session",
+        sandbox / "usr/local/libexec/dgx-fan-display-tty-acquired",
+        sandbox / "usr/local/libexec/dgx-fan-display-cleanup",
+    ):
+        assert not path.exists()
+
+
 def test_uninstall_uses_root_marker_inspection_for_production_sudoers() -> None:
     source = (ROOT / "uninstall.sh").read_text()
 
@@ -523,7 +550,7 @@ def test_fake_manager_refuses_active_and_orders_restart(tmp_path: Path) -> None:
     clone = _clone(tmp_path)
     sandbox = _sandbox(tmp_path)
     assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
-    _fake_command(sandbox / "usr/bin/systemctl", 'printf "systemctl %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/manager.log"\ncase "$1" in is-active) printf "%s\\n" "${DGX_TEST_UNIT_STATE:-inactive}";; show) printf "not-found\\n";; esac\n')
+    _fake_command(sandbox / "usr/bin/systemctl", 'printf "systemctl %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/manager.log"\ncase "$1" in is-active) printf "%s\\n" "${DGX_TEST_UNIT_STATE:-inactive}";; show) if [ ! -e "$DGX_FAN_TEST_ROOT/show-seen" ]; then : > "$DGX_FAN_TEST_ROOT/show-seen"; printf "loaded\\n"; else printf "not-found\\n"; fi;; esac\n')
     _fake_command(sandbox / "usr/bin/systemd-run", 'printf "systemd-run %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/manager.log"\n')
     manager = sandbox / "usr/local/libexec/dgx-fan-display-manager"
     environment = _environment(sandbox)
@@ -535,11 +562,12 @@ def test_fake_manager_refuses_active_and_orders_restart(tmp_path: Path) -> None:
     restarted = subprocess.run(["sh", str(manager), "restart"], env=environment, text=True, capture_output=True, check=False)
     assert restarted.returncode == 0, restarted.stderr
     entries = (sandbox / "manager.log").read_text().splitlines()
-    assert entries[:3] == [
+    assert entries[:2] == [
         "systemctl stop dgx-fan-display.service",
         "systemctl show --property=LoadState --value dgx-fan-display.service",
-        "systemctl reset-failed dgx-fan-display.service",
     ]
+    assert entries[2] == "systemctl show --property=LoadState --value dgx-fan-display.service"
+    assert entries[3] == "systemctl reset-failed dgx-fan-display.service"
     assert "--property=TimeoutStopSec=10s" in entries[-1]
     assert "--property=ExecStopPost=" + str(sandbox / "usr/local/libexec/dgx-fan-display-cleanup") in entries[-1]
 
@@ -556,7 +584,7 @@ def test_fake_manager_covers_stale_start_refusals_stop_and_status(tmp_path: Path
         environment["DGX_TEST_UNIT_STATE"] = state
         result = subprocess.run(["sh", str(manager), "start"], env=environment, text=True, capture_output=True, check=False)
         assert result.returncode == 0, result.stderr
-    for state in ("activating", "deactivating"):
+    for state in ("activating", "deactivating", "reloading"):
         environment["DGX_TEST_UNIT_STATE"] = state
         result = subprocess.run(["sh", str(manager), "start"], env=environment, text=True, capture_output=True, check=False)
         assert result.returncode == 1

@@ -364,7 +364,7 @@ case "\${1:-}" in
     ;;
   stop)
     [ "\$#" -eq 1 ] || exit 64
-    "\$systemctl" stop "\$unit"
+    "\$systemctl" stop "\$unit" || true
     wait_unloaded
     run_cleanup
     ;;
