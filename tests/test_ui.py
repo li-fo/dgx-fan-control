@@ -9,7 +9,6 @@ from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Button, Static, TabbedContent
 
-import dgx_fan.ui as ui_module
 from dgx_fan.app import DGXFanApp
 from dgx_fan.config import DashboardColors, EndpointConfig, load_config
 from dgx_fan.models import (
@@ -454,7 +453,7 @@ def test_memory_history_is_normalized_and_zero_is_not_a_gap() -> None:
     )
     history.append("one", 1, (gpu,), 120)
     assert history.points[("one", "GPU-a", "mem")][0].value == 50
-    assert history.area("one", "GPU-a", "util", 120, 1, 100)[4][5:] == "▁"
+    assert history.area("one", "GPU-a", "util", 120, 1, 100)[4][5:] == "."
     assert history.area("one", "GPU-a", "util", 250, 1, 100)[4][5:] == " "
 
 
@@ -480,7 +479,7 @@ def test_area_renderer_locks_geometry_axis_gaps_and_bin_reducers() -> None:
         assert all(len(line) == width + 5 for line in rendered)
         assert [line[:5] for line in rendered[:5]] == [" 100 ", "     ", "  50 ", "     ", "   0 "]
         assert all(line[5 + 1] == " " for line in rendered[:5])
-        assert [line[5 + 2] for line in rendered[:5]] == [" ", " ", " ", " ", "▁"]
+        assert [line[5 + 2] for line in rendered[:5]] == [" ", " ", " ", " ", "."]
         filled = [sum(line[5 + column] != " " for line in rendered[:5]) for column in (3, 4, 5)]
         assert filled[0] < filled[1] < filled[2]
 
@@ -544,40 +543,46 @@ def test_compact_plot_heights_preserve_zero_missing_and_low_positive_baselines()
         zero_glyphs = [row[5:] for row in zero_rows[:-1]]
         positive_glyphs = [row[5:] for row in positive_rows[:-1]]
 
-        assert sum(line.count("▁") for line in zero_glyphs) == 1
-        assert zero_glyphs[height - 1].endswith("▁")
+        assert sum(line.count(".") for line in zero_glyphs) == 1
+        assert zero_glyphs[height - 1].endswith(".")
         assert all(line == " " * width for line in (row[5:] for row in missing_rows[:-1]))
-        assert sum(line.count("▁") for line in positive_glyphs) == 1
-        assert positive_glyphs[height - 1].endswith("▁")
+        assert sum(line.count(".") for line in positive_glyphs) == 1
+        assert positive_glyphs[height - 1].endswith(".")
 
 
 @pytest.mark.parametrize(
     ("height", "value", "expected"),
     (
-        (1, 2, ("▁",)),
-        (1, 29, ("▃",)),
-        (1, 50, ("▄",)),
-        (1, 100, ("█",)),
-        (2, 2, (" ", "▁")),
-        (2, 29, (" ", "▅")),
-        (2, 50, (" ", "█")),
-        (2, 100, ("█", "█")),
-        (5, 2, (" ", " ", " ", " ", "▁")),
-        (5, 29, (" ", " ", " ", "▄", "█")),
-        (5, 50, (" ", " ", "▄", "█", "█")),
-        (5, 100, ("█", "█", "█", "█", "█")),
+        (1, 10, (".",)),
+        (1, 100, (":",)),
+        (2, 2, (" ", ".")),
+        (2, 29, (" ", ":")),
+        (2, 50, (" ", ":")),
+        (2, 100, (":", ":")),
+        (4, 10, (" ", " ", " ", ".")),
+        (4, 20, (" ", " ", " ", ":")),
+        (4, 30, (" ", " ", ".", ":")),
+        (4, 100, (":", ":", ":", ":")),
+        (5, 10, (" ", " ", " ", " ", ".")),
+        (5, 20, (" ", " ", " ", " ", ":")),
+        (5, 30, (" ", " ", " ", ".", ":")),
+        (5, 40, (" ", " ", " ", ":", ":")),
+        (5, 50, (" ", " ", ".", ":", ":")),
+        (5, 100, (":", ":", ":", ":", ":")),
     ),
 )
-def test_area_renderer_uses_fractional_blocks_at_compact_heights(
+def test_area_renderer_uses_dot_colon_levels_at_compact_heights(
     height: int, value: float, expected: tuple[str, ...]
 ) -> None:
-    """Positive values retain their relative height even in a short terminal."""
+    """Positive values retain their relative height in portable ASCII cells."""
     now = 120.0
     history = DashboardHistory(2)
     history.points[("one", "GPU-a", "mem")] = [HistoryPoint(now, value)]
 
     rows = history.area("one", "GPU-a", "mem", now, 1, 100, height)
-    assert tuple(row[-1] for row in rows[:-1]) == expected
+    glyphs = tuple(row[-1] for row in rows[:-1])
+    assert glyphs == expected
+    assert set(glyphs) <= {" ", ".", ":"}
 
 
 def test_area_renderer_keeps_missing_blank_zero_baseline_and_clamps_bounds() -> None:
@@ -588,59 +593,11 @@ def test_area_renderer_keeps_missing_blank_zero_baseline_and_clamps_bounds() -> 
 
     assert tuple(row[-1] for row in history.area(*key, now, 1, 100, height)[:-1]) == (" ", " ")
     history.points[key] = [HistoryPoint(now, 0)]
-    assert tuple(row[-1] for row in history.area(*key, now, 1, 100, height)[:-1]) == (" ", "▁")
+    assert tuple(row[-1] for row in history.area(*key, now, 1, 100, height)[:-1]) == (" ", ".")
     history.points[key] = [HistoryPoint(now, -5)]
-    assert tuple(row[-1] for row in history.area(*key, now, 1, 100, height)[:-1]) == (" ", "▁")
+    assert tuple(row[-1] for row in history.area(*key, now, 1, 100, height)[:-1]) == (" ", ".")
     history.points[key] = [HistoryPoint(now, 150)]
-    assert tuple(row[-1] for row in history.area(*key, now, 1, 100, height)[:-1]) == ("█", "█")
-
-
-def test_partial_block_profile_detects_linux_console_and_safe_unicode_fallback(monkeypatch) -> None:
-    assert (
-        ui_module._partial_blocks_for_runtime({"TERM": "linux"}, 3, lambda _fd: "/dev/pts/0")
-        == ".:-=+*#"
-    )
-    assert (
-        ui_module._partial_blocks_for_runtime({"TERM": "xterm-256color"}, 8, lambda _fd: "/dev/tty8")
-        == ".:-=+*#"
-    )
-    assert (
-        ui_module._partial_blocks_for_runtime({"TERM": "xterm-256color"}, 3, lambda _fd: "/dev/pts/3")
-        == "▁▂▃▄▅▆▇"
-    )
-
-    def failing_ttyname(_fd: int) -> str:
-        raise OSError("unavailable")
-
-    assert ui_module._partial_blocks_for_runtime({}, 3, failing_ttyname) == "▁▂▃▄▅▆▇"
-
-    class FailingStdin:
-        def fileno(self) -> int:
-            raise ValueError("no file descriptor")
-
-    monkeypatch.setattr(ui_module.sys, "stdin", FailingStdin())
-    assert ui_module._partial_blocks_for_runtime({}, ttyname=lambda _fd: "/dev/tty8") == "▁▂▃▄▅▆▇"
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    ((2, (" ", ".")), (29, (" ", "+")), (50, (" ", "█")), (100, ("█", "█"))),
-)
-def test_ascii_partial_blocks_preserve_compact_proportions(value: float, expected: tuple[str, ...]) -> None:
-    history = DashboardHistory(2, ".:-=+*#")
-    history.points[("one", "GPU-a", "mem")] = [HistoryPoint(120, value)]
-    rows = history.area("one", "GPU-a", "mem", 120, 1, 100, 2)
-    assert tuple(row[-1] for row in rows[:-1]) == expected
-
-    history.points[("one", "GPU-a", "mem")] = [HistoryPoint(120, 0)]
-    assert tuple(row[-1] for row in history.area("one", "GPU-a", "mem", 120, 1, 100, 2)[:-1]) == (
-        " ",
-        ".",
-    )
-    assert tuple(
-        row[-1]
-        for row in DashboardHistory(2, ".:-=+*#").area("one", "GPU-a", "mem", 120, 1, 100, 2)[:-1]
-    ) == (" ", " ")
+    assert tuple(row[-1] for row in history.area(*key, now, 1, 100, height)[:-1]) == (":", ":")
 
 
 class _DashboardApp(App[None]):
@@ -998,7 +955,7 @@ def test_area_step_fills_only_the_configured_cadence_and_preserves_reducers() ->
 
     history.points[("one", "GPU-a", "mem")] = [HistoryPoint(0, 0)]
     isolated = history.area("one", "GPU-a", "mem", now, 120, 100)[4][5:]
-    assert isolated[:3] == "▁▁▁"
+    assert isolated[:3] == "..."
     assert isolated[3] == " "
 
     history.points[("one", "GPU-a", "mem")] = [HistoryPoint(119, 10), HistoryPoint(121, 90)]
@@ -1431,8 +1388,18 @@ def test_dashboard_without_colors_preserves_plain_geometry_and_sanitizes_externa
     asyncio.run(exercise())
 
 
-def test_two_single_gpu_endpoints_fit_short_viewports_and_expand_when_tall(monkeypatch) -> None:
-    monkeypatch.setattr(ui_module, "_partial_blocks_for_runtime", lambda: ".:-=+*#")
+def test_two_single_gpu_endpoints_fit_short_viewports_and_expand_when_tall() -> None:
+    def chart_data_cells(rendered: str) -> list[str]:
+        """Extract only the chart plot cells, excluding labels, values, and axes."""
+        cells: list[str] = []
+        for line in rendered.splitlines():
+            for interior in line.split("│")[1:-1]:
+                if len(interior) < 5 or any(label in interior[5:] for label in ("120s", "60s", "30s", "now")):
+                    continue
+                if interior[:5] == "     " or interior[:5].strip().isdigit():
+                    cells.append(interior[5:])
+        return cells
+
     app = _DashboardApp()
     gpu = GPUStat(
         "GPU-a",
@@ -1450,8 +1417,8 @@ def test_two_single_gpu_endpoints_fit_short_viewports_and_expand_when_tall(monke
         0,
         (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
         (
-            EndpointSnapshot("one", "One", True, 0, gpus=(gpu,), sample_revision=1),
-            EndpointSnapshot("two", "Two", True, 0, gpus=(gpu,), sample_revision=1),
+            EndpointSnapshot("one", "DGX-1#=+*", True, 0, gpus=(gpu,), sample_revision=1),
+            EndpointSnapshot("two", "DGX-2▁", True, 0, gpus=(gpu,), sample_revision=1),
         ),
     )
 
@@ -1464,8 +1431,11 @@ def test_two_single_gpu_endpoints_fit_short_viewports_and_expand_when_tall(monke
             assert scroll.max_scroll_y == 0
             assert len(ui.query(".dgx-panel")) == 2
             rendered_panels = [panel.render().plain for panel in ui.query(".dgx-panel")]
-            assert all(not set("▁▂▃▄▅▆▇").intersection(rendered) for rendered in rendered_panels)
-            assert any(set(".:-=+*#").intersection(rendered) for rendered in rendered_panels)
+            assert all("DGX-1#=+*" in rendered or "DGX-2▁" in rendered for rendered in rendered_panels)
+            plot_cells = [cell for rendered in rendered_panels for cell in chart_data_cells(rendered)]
+            assert plot_cells
+            assert all(set(cell) <= {" ", ".", ":"} for cell in plot_cells)
+            assert any(set(".:").intersection(cell) for cell in plot_cells)
             assert all(
                 {"MEM", "TEMP", "UTIL"}
                 == {
