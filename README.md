@@ -59,8 +59,8 @@ No persistent systemd unit or cron `@reboot` entry is installed. A root-owned tt
 starts the same transient physical-display path once for the configured local login user, never
 for SSH. It creates `dgx-fan-display.service` only while the application runs, places it on tty8,
 and does not restart a crashed app. `start.sh` uses passwordless sudo only for fixed root-owned
-helpers that grant the `gpio` group access to PWM0, PWM1, `/dev/gpiochip0`, and the shared runtime
-lock; it then launches
+helpers that grant the `gpio` group access to PWM0, PWM1, and `/dev/gpiochip0`; Raspberry Pi PWM
+ownership is instead held by a kernel-managed abstract UNIX socket for the hardware object's lifetime. It then launches
 `.venv/bin/dgx-fan --config <clone>/config.toml` as the regular user. The Python project is
 never run as root.
 
@@ -83,10 +83,10 @@ sudo journalctl -u dgx-fan-display.service --no-pager
 
 The transient process opens tty8 with `openvt -c 8 -s -w`, so the 1024x600 HDMI console continues
 after the SSH session ends. A keyboard connected to the Pi can exit the TUI cleanly with **Ctrl+Q**;
-the console returns to the previous VT. `./display.sh stop` or a system-manager stop is an abnormal
-termination: the existing fan fail-safe release behavior applies (normally full duty), rather than
+the service's fixed `ExecStopPost` cleanup returns to tty1 and releases tty8. `./display.sh stop` or a system-manager stop is an abnormal
+termination: its bounded SIGTERM handler releases PWM through the existing fan fail-safe path (normally full duty), rather than
 the optional clean `shutdown_mode = "off"` path. Do not launch a second foreground `./start.sh` while
-the display is active: the shared non-blocking lock refuses the second owner and never kills the
+the display is active: the hardware-bound socket lock refuses the second owner and never kills the
 first. `uv run dgx-fan --config config.toml` and `uvx` remain foreground terminal commands.
 
 To remove only this project's hook, sudoers policy, fixed display helpers, and hardware helper, while keeping the
@@ -96,7 +96,7 @@ clone and its configuration:
 ./uninstall.sh --yes
 ```
 
-Uninstall stops the owned transient unit if present, then intentionally leaves the PWM overlay and console auto-login in place. Disable
+Uninstall synchronously stops the owned transient unit so its cleanup runs before removing marked helpers, then intentionally leaves the PWM overlay and console auto-login in place. Disable
 console auto-login with `sudo raspi-config`, and remove only the exact
 `dtoverlay=pwm-2chan,pin=18,pin2=19,func=2,func2=2` line (or restore the backup created beside
 the boot configuration) if rollback requires it. The local auto-login grants physical-console

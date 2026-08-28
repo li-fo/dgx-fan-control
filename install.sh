@@ -6,6 +6,8 @@ readonly OVERLAY='dtoverlay=pwm-2chan,pin=18,pin2=19,func=2,func2=2'
 readonly HELPER_NAME='dgx-fan-prepare-hardware'
 readonly DISPLAY_MANAGER_NAME='dgx-fan-display-manager'
 readonly DISPLAY_SESSION_NAME='dgx-fan-display-session'
+readonly DISPLAY_TTY_ACQUIRED_NAME='dgx-fan-display-tty-acquired'
+readonly DISPLAY_CLEANUP_NAME='dgx-fan-display-cleanup'
 readonly PROFILE_NAME='dgx-fan-autostart.sh'
 readonly SUDOERS_NAME='dgx-fan'
 
@@ -143,7 +145,7 @@ check_platform() {
     [[ "$model" == *'Raspberry Pi 4'* ]] || fail "unsupported platform (Raspberry Pi 4 required): $model"
     command -v raspi-config >/dev/null 2>&1 || fail 'raspi-config is required for tty1 console auto-login'
     command -v visudo >/dev/null 2>&1 || fail 'visudo is required to validate the sudoers policy'
-    for required_tool in systemctl systemd-run openvt runuser flock deallocvt; do
+    for required_tool in systemctl systemd-run openvt runuser chvt deallocvt; do
         command -v "$required_tool" >/dev/null 2>&1 || fail "$required_tool is required for physical-display integration"
     done
 }
@@ -226,27 +228,6 @@ for channel in 0 1; do
 done
 chgrp gpio /dev/gpiochip0
 chmod g+rw /dev/gpiochip0
-runtime=/run/dgx-fan
-lock="$runtime/instance.lock"
-if [ -L "$runtime" ] || { [ -e "$runtime" ] && [ ! -d "$runtime" ]; }; then
-    echo "unsafe runtime directory: $runtime" >&2; exit 1
-fi
-if [ ! -d "$runtime" ]; then
-    install -d -o root -g root -m 0755 "$runtime"
-fi
-# Reclaim the old group-writable directory from earlier releases before
-# examining or creating the lock within it.
-chown root:root "$runtime"
-chmod 0755 "$runtime"
-if [ -L "$lock" ] || { [ -e "$lock" ] && [ ! -f "$lock" ]; }; then
-    echo "unsafe runtime lock: $lock" >&2; exit 1
-fi
-if [ ! -e "$lock" ]; then
-    : >"$lock"
-fi
-[ "$(stat -c %h "$lock")" -eq 1 ] || { echo "unsafe runtime lock link count" >&2; exit 1; }
-chown root:gpio "$lock"
-chmod 0660 "$lock"
 EOF
     } >"$rendered"
     install_managed_file "$rendered" "$helper" "$HELPER_MARKER" 0755
@@ -255,11 +236,23 @@ EOF
 }
 
 write_display_helpers() {
-    local manager session rendered project_quoted user_quoted
+    local manager session acquired cleanup rendered project_quoted user_quoted marker_quoted openvt_quoted runuser_quoted chvt_quoted deallocvt_quoted systemctl_quoted systemd_run_quoted acquired_quoted cleanup_quoted session_quoted
     manager=$(target_path "/usr/local/libexec/$DISPLAY_MANAGER_NAME")
     session=$(target_path "/usr/local/libexec/$DISPLAY_SESSION_NAME")
+    acquired=$(target_path "/usr/local/libexec/$DISPLAY_TTY_ACQUIRED_NAME")
+    cleanup=$(target_path "/usr/local/libexec/$DISPLAY_CLEANUP_NAME")
     project_quoted=$(posix_quote "$PROJECT_ROOT")
     user_quoted=$(posix_quote "$INSTALL_USER")
+    marker_quoted=$(posix_quote "$(target_path /run/dgx-fan-display-tty8)")
+    openvt_quoted=$(posix_quote "$(target_path /usr/bin/openvt)")
+    runuser_quoted=$(posix_quote "$(target_path /usr/sbin/runuser)")
+    chvt_quoted=$(posix_quote "$(target_path /usr/bin/chvt)")
+    deallocvt_quoted=$(posix_quote "$(target_path /usr/bin/deallocvt)")
+    systemctl_quoted=$(posix_quote "$(target_path /usr/bin/systemctl)")
+    systemd_run_quoted=$(posix_quote "$(target_path /usr/bin/systemd-run)")
+    acquired_quoted=$(posix_quote "$acquired")
+    cleanup_quoted=$(posix_quote "$cleanup")
+    session_quoted=$(posix_quote "$session")
     rendered=$(mktemp)
     trap 'rm -f -- "$rendered"' RETURN
     {
@@ -269,13 +262,9 @@ $HELPER_MARKER
 set -eu
 project_root=$project_quoted
 install_user=$user_quoted
-set +e
-/usr/bin/openvt -c 8 -s -w -- /usr/sbin/runuser -u "\$install_user" -- "\$project_root/start.sh"
-status=\$?
-set -e
-# openvt -s -w returns to the previous VT; release tty8 only after its child exits.
-/usr/bin/deallocvt 8 >/dev/null 2>&1 || true
-exit "\$status"
+openvt=$openvt_quoted
+acquired=$acquired_quoted
+exec "\$openvt" -c 8 -s -w -- "\$acquired" "\$install_user" "\$project_root/start.sh"
 EOF
     } >"$rendered"
     install_managed_file "$rendered" "$session" "$HELPER_MARKER" 0755
@@ -287,30 +276,75 @@ EOF
 #!/bin/sh
 $HELPER_MARKER
 set -eu
+marker=$marker_quoted
+runuser=$runuser_quoted
+[ "\$#" -eq 2 ] || exit 64
+case "\$1" in *[!A-Za-z0-9._-]*|'') exit 64;; esac
+[ -x "\$2" ] || exit 1
+[ ! -e "\$marker" ] && [ ! -L "\$marker" ] || { echo "stale tty8 ownership marker" >&2; exit 1; }
+umask 077
+: >"\$marker"
+exec "\$runuser" -u "\$1" -- "\$2"
+EOF
+    } >"$rendered"
+    install_managed_file "$rendered" "$acquired" "$HELPER_MARKER" 0755
+    rm -f -- "$rendered"
+    rendered=$(mktemp)
+    trap 'rm -f -- "$rendered"' RETURN
+    {
+        cat <<EOF
+#!/bin/sh
+$HELPER_MARKER
+set -eu
+marker=$marker_quoted
+chvt=$chvt_quoted
+deallocvt=$deallocvt_quoted
+if [ -L "\$marker" ] || { [ -e "\$marker" ] && [ ! -f "\$marker" ]; }; then
+    echo "unsafe tty8 ownership marker: \$marker" >&2; exit 1
+fi
+if [ -f "\$marker" ]; then
+    "\$chvt" 1 >/dev/null 2>&1 || true
+    "\$deallocvt" 8 >/dev/null 2>&1 || true
+    rm -f -- "\$marker"
+fi
+EOF
+    } >"$rendered"
+    install_managed_file "$rendered" "$cleanup" "$HELPER_MARKER" 0755
+    rm -f -- "$rendered"
+    rendered=$(mktemp)
+    trap 'rm -f -- "$rendered"' RETURN
+    {
+        cat <<EOF
+#!/bin/sh
+$HELPER_MARKER
+set -eu
 unit=dgx-fan-display.service
-session=/usr/local/libexec/$DISPLAY_SESSION_NAME
+session=$session_quoted
+cleanup=$cleanup_quoted
+systemctl=$systemctl_quoted
+systemd_run=$systemd_run_quoted
 case "\${1:-}" in
   start)
     [ "\$#" -eq 1 ] || exit 64
-    if /usr/bin/systemctl is-active --quiet "\$unit"; then
+    if "\$systemctl" is-active --quiet "\$unit"; then
       echo "dgx-fan display is already active" >&2; exit 1
     fi
-    /usr/bin/systemctl reset-failed "\$unit" >/dev/null 2>&1 || true
-    exec /usr/bin/systemd-run --quiet --collect --service-type=exec --unit=dgx-fan-display "\$session"
+    "\$systemctl" reset-failed "\$unit" >/dev/null 2>&1 || true
+    exec "\$systemd_run" --quiet --collect --service-type=exec --unit=dgx-fan-display --property=TimeoutStopSec=10s --property=ExecStopPost="\$cleanup" "\$session"
     ;;
   restart)
     [ "\$#" -eq 1 ] || exit 64
-    /usr/bin/systemctl stop "\$unit" >/dev/null 2>&1 || true
-    /usr/bin/systemctl reset-failed "\$unit" >/dev/null 2>&1 || true
-    exec /usr/bin/systemd-run --quiet --collect --service-type=exec --unit=dgx-fan-display "\$session"
+    "\$systemctl" stop "\$unit" >/dev/null 2>&1 || true
+    "\$systemctl" reset-failed "\$unit" >/dev/null 2>&1 || true
+    exec "\$systemd_run" --quiet --collect --service-type=exec --unit=dgx-fan-display --property=TimeoutStopSec=10s --property=ExecStopPost="\$cleanup" "\$session"
     ;;
   stop)
     [ "\$#" -eq 1 ] || exit 64
-    exec /usr/bin/systemctl stop "\$unit"
+    exec "\$systemctl" stop "\$unit"
     ;;
   status)
     [ "\$#" -eq 1 ] || exit 64
-    exec /usr/bin/systemctl status --no-pager "\$unit"
+    exec "\$systemctl" status --no-pager "\$unit"
     ;;
   *) echo "Usage: dgx-fan-display-manager {start|restart|stop|status}" >&2; exit 64 ;;
 esac
@@ -374,6 +408,9 @@ ensure_managed_destination() {
     fi
     if [[ -e "$destination" ]]; then
         [[ -f "$destination" ]] || fail "refusing non-regular destination: $destination"
+        if [[ -z "$TEST_ROOT" ]]; then
+            [[ $(run_root stat -c '%h' -- "$destination") == 1 ]] || fail "refusing hardlinked destination: $destination"
+        fi
         if [[ -n "$TEST_ROOT" ]]; then
             grep -Fxq "$marker" "$destination" || fail "refusing unmanaged destination: $destination"
         else
@@ -399,20 +436,26 @@ install_managed_file() {
 }
 
 preflight_managed_destinations() {
-    local helper manager session sudoers hook
+    local helper manager session acquired cleanup sudoers hook
     helper=$(target_path "/usr/local/libexec/$HELPER_NAME")
     manager=$(target_path "/usr/local/libexec/$DISPLAY_MANAGER_NAME")
     session=$(target_path "/usr/local/libexec/$DISPLAY_SESSION_NAME")
+    acquired=$(target_path "/usr/local/libexec/$DISPLAY_TTY_ACQUIRED_NAME")
+    cleanup=$(target_path "/usr/local/libexec/$DISPLAY_CLEANUP_NAME")
     sudoers=$(target_path "/etc/sudoers.d/$SUDOERS_NAME")
     hook=$(target_path "/etc/profile.d/$PROFILE_NAME")
     ensure_destination_parent "$helper"
     ensure_destination_parent "$manager"
     ensure_destination_parent "$session"
+    ensure_destination_parent "$acquired"
+    ensure_destination_parent "$cleanup"
     ensure_destination_parent "$sudoers"
     ensure_destination_parent "$hook"
     ensure_managed_destination "$helper" "$HELPER_MARKER"
     ensure_managed_destination "$manager" "$HELPER_MARKER"
     ensure_managed_destination "$session" "$HELPER_MARKER"
+    ensure_managed_destination "$acquired" "$HELPER_MARKER"
+    ensure_managed_destination "$cleanup" "$HELPER_MARKER"
     ensure_managed_destination "$sudoers" "$SUDOERS_MARKER"
     ensure_managed_destination "$hook" "$PROFILE_MARKER"
 }
@@ -422,6 +465,12 @@ ensure_destination_parent() {
     parent=$(dirname -- "$destination")
     if [[ -e "$parent" || -L "$parent" ]]; then
         [[ -d "$parent" && ! -L "$parent" ]] || fail "refusing unsafe parent directory: $parent"
+        if [[ -z "$TEST_ROOT" ]]; then
+            local owner mode
+            owner=$(run_root stat -c '%u' -- "$parent")
+            mode=$(run_root stat -c '%a' -- "$parent")
+            [[ "$owner" == 0 && $((8#$mode & 0022)) -eq 0 ]] || fail "refusing writable or non-root parent directory: $parent"
+        fi
     fi
 }
 

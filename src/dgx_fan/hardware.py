@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import threading
 import time
-from errno import EBUSY
+from errno import EADDRINUSE, EBUSY
 from pathlib import Path
+from socket import AF_UNIX, SOCK_STREAM, socket
 from typing import Any, ClassVar, Protocol
 
 from .config import HardwareConfig
@@ -50,6 +51,7 @@ class RaspberryPiHardware:
     _TACH_READY_SECONDS: ClassVar[float] = 2.0
     _TACH_JOIN_SECONDS: ClassVar[float] = 2.0
     _PWM_READY_SECONDS: ClassVar[float] = 1.0
+    _INSTANCE_LOCK_NAME: ClassVar[str] = "\0dgx-fan-pwm-owner-v1"
 
     def __init__(self, config: HardwareConfig) -> None:
         self.config = config
@@ -65,7 +67,9 @@ class RaspberryPiHardware:
         self._tach_thread: threading.Thread | None = None
         self._release_complete = False
         self._pwm_paths: list[Path] = []
+        self._instance_lock: socket | None = None
         try:
+            self._acquire_instance_lock()
             self._prepare_pwm_channels()
             self.set_duties((100, 100))
             self._start_tach_worker()
@@ -75,6 +79,28 @@ class RaspberryPiHardware:
             except RuntimeError as cleanup_error:
                 _ = cleanup_error
             raise
+
+    def _acquire_instance_lock(self) -> None:
+        """Acquire a kernel-owned global lock without a writable filesystem path."""
+        lock = socket(AF_UNIX, SOCK_STREAM)
+        try:
+            lock.bind(self._INSTANCE_LOCK_NAME)
+        except OSError as error:
+            lock.close()
+            if error.errno == EADDRINUSE:
+                raise RuntimeError(
+                    "another dgx-fan process already owns Raspberry Pi PWM control; "
+                    "stop it before starting a second instance"
+                ) from error
+            raise RuntimeError("cannot acquire Raspberry Pi PWM ownership lock") from error
+        self._instance_lock = lock
+
+    def _release_instance_lock(self) -> None:
+        lock = getattr(self, "_instance_lock", None)
+        if lock is None:
+            return
+        lock.close()
+        self._instance_lock = None
 
     @classmethod
     def _channel_for_gpio(cls, gpio: int) -> int:
@@ -263,6 +289,7 @@ class RaspberryPiHardware:
             failures.extend(self._safe_full_speed())
         if failures:
             raise RuntimeError("failed cleanup: PWM safe-full or tach release did not complete") from failures[0]
+        self._release_instance_lock()
         self._release_complete = True
 
 

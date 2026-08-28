@@ -100,11 +100,14 @@ def test_temp_root_install_is_idempotent_and_keeps_config_in_clone(tmp_path: Pat
     assert "accepts no arguments" in helper.read_text()
     assert "/usr/local/libexec/dgx-fan-prepare-hardware" in sudoers.read_text()
     assert "/usr/local/libexec/dgx-fan-display-manager *" in sudoers.read_text()
-    assert "openvt -c 8 -s -w" in session.read_text()
-    assert "runuser -u" in session.read_text()
-    assert "systemd-run --quiet --collect --service-type=exec --unit=dgx-fan-display" in manager.read_text()
-    assert "unsafe runtime directory" in helper.read_text()
-    assert "unsafe runtime lock" in helper.read_text()
+    assert '"$openvt" -c 8 -s -w' in session.read_text()
+    acquired = sandbox / "usr/local/libexec/dgx-fan-display-tty-acquired"
+    cleanup = sandbox / "usr/local/libexec/dgx-fan-display-cleanup"
+    assert acquired.exists() and cleanup.exists()
+    assert '"$runuser" -u' in acquired.read_text()
+    assert "--collect --service-type=exec --unit=dgx-fan-display" in manager.read_text()
+    assert "--property=ExecStopPost=\"$cleanup\"" in manager.read_text()
+    assert "/run/dgx-fan/instance.lock" not in helper.read_text()
     hook_text = hook.read_text()
     assert '"/dev/tty1"' in hook_text
     assert "SSH_CONNECTION" in hook_text
@@ -363,7 +366,7 @@ def test_start_dry_run_uses_fixed_helper_and_clone_local_configuration() -> None
 
     assert result.returncode == 0
     assert "sudo -n /usr/local/libexec/dgx-fan-prepare-hardware" in result.stdout
-    assert "flock -n /run/dgx-fan/instance.lock" in result.stdout
+    assert "flock" not in result.stdout
     assert f"{ROOT}/.venv/bin/dgx-fan --config {ROOT}/config.toml" in result.stdout
 
 
@@ -395,9 +398,49 @@ def test_display_bridge_uses_transient_no_force_tty8_and_no_restart_policy(tmp_p
 
     assert "--collect --service-type=exec --unit=dgx-fan-display" in manager
     assert "Restart=" not in manager
-    assert "openvt -c 8 -s -w" in session
-    assert "openvt -c 8 -s -w -f" not in session
-    assert "runuser -u" in session
+    assert '"$openvt" -c 8 -s -w' in session
+    assert "-c 8 -s -w -f" not in session
+    assert "dgx-fan-display-tty-acquired" in session
+
+
+def _fake_command(path: Path, body: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nset -eu\n" + body)
+    path.chmod(0o755)
+
+
+def test_fake_vt_lifecycle_runs_cleanup_only_after_tty_marker(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    log = sandbox / "lifecycle.log"
+    _fake_command(sandbox / "usr/sbin/runuser", 'printf "runuser %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/lifecycle.log"\n')
+    _fake_command(sandbox / "usr/bin/openvt", 'printf "openvt %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/lifecycle.log"\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n')
+    _fake_command(sandbox / "usr/bin/chvt", 'printf "chvt %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/lifecycle.log"\n')
+    _fake_command(sandbox / "usr/bin/deallocvt", 'printf "deallocvt %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/lifecycle.log"\n')
+    (sandbox / "run").mkdir()
+    session = sandbox / "usr/local/libexec/dgx-fan-display-session"
+    cleanup = sandbox / "usr/local/libexec/dgx-fan-display-cleanup"
+    environment = _environment(sandbox)
+
+    started = subprocess.run(["sh", str(session)], env=environment, text=True, capture_output=True, check=False)
+    assert started.returncode == 0, started.stderr
+    marker = sandbox / "run/dgx-fan-display-tty8"
+    assert marker.exists()
+    cleaned = subprocess.run(["sh", str(cleanup)], env=environment, text=True, capture_output=True, check=False)
+    assert cleaned.returncode == 0, cleaned.stderr
+    assert not marker.exists()
+    assert log.read_text().splitlines() == [
+        "openvt -c 8 -s -w -- " + str(sandbox / "usr/local/libexec/dgx-fan-display-tty-acquired") + " operator " + str(clone / "start.sh"),
+        "runuser -u operator -- " + str(clone / "start.sh"),
+        "chvt 1",
+        "deallocvt 8",
+    ]
+
+    log.unlink()
+    no_marker_cleanup = subprocess.run(["sh", str(cleanup)], env=environment, text=True, capture_output=True, check=False)
+    assert no_marker_cleanup.returncode == 0
+    assert not log.exists()
 
 
 def test_generated_helper_rejects_arguments_before_touching_real_pwm(tmp_path: Path) -> None:
@@ -414,21 +457,13 @@ def test_generated_helper_rejects_arguments_before_touching_real_pwm(tmp_path: P
     assert "accepts no arguments" in result.stderr
 
 
-def test_generated_hardware_helper_rejects_unsafe_runtime_objects_before_chown(tmp_path: Path) -> None:
+def test_generated_hardware_helper_has_no_writable_filesystem_lock(tmp_path: Path) -> None:
     clone = _clone(tmp_path)
     sandbox = _sandbox(tmp_path)
     assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
     helper = (sandbox / "usr/local/libexec/dgx-fan-prepare-hardware").read_text()
 
-    directory_check = helper.index('if [ -L "$runtime" ]')
-    directory_reclaim = helper.index('chown root:root "$runtime"')
-    lock_check = helper.index('if [ -L "$lock" ]')
-    lock_chown = helper.index('chown root:gpio "$lock"')
-    assert directory_check < directory_reclaim
-    assert lock_check < lock_chown
-    assert 'install -d -o root -g root -m 0755 "$runtime"' in helper
-    assert 'chmod 0755 "$runtime"' in helper
-    assert 'stat -c %h "$lock"' in helper
+    assert "/run/dgx-fan" not in helper
 
 
 def test_reboot_is_not_attempted_when_configuration_validation_fails(tmp_path: Path) -> None:

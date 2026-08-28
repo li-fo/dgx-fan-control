@@ -52,6 +52,8 @@ if [[ -z "$TEST_ROOT" ]]; then
     display_session=/usr/local/libexec/dgx-fan-display-session
     if [[ -f "$display_manager" && ! -L "$display_manager" \
         && -f "$display_session" && ! -L "$display_session" ]] \
+        && [[ $(run_root stat -c '%h' -- "$display_manager") == 1 ]] \
+        && [[ $(run_root stat -c '%h' -- "$display_session") == 1 ]] \
         && run_root grep -Fxq "$MARKER" "$display_manager" \
         && run_root grep -Fxq "$MARKER" "$display_session"; then
         display_helpers_managed=true
@@ -68,11 +70,18 @@ for path in \
     "$(target_path /etc/sudoers.d/dgx-fan)" \
     "$(target_path /usr/local/libexec/dgx-fan-prepare-hardware)" \
     "$(target_path /usr/local/libexec/dgx-fan-display-manager)" \
-    "$(target_path /usr/local/libexec/dgx-fan-display-session)"; do
+    "$(target_path /usr/local/libexec/dgx-fan-display-session)" \
+    "$(target_path /usr/local/libexec/dgx-fan-display-tty-acquired)" \
+    "$(target_path /usr/local/libexec/dgx-fan-display-cleanup)"; do
     if [[ -L "$path" || ( -e "$path" && ! -f "$path" ) ]]; then
         printf 'dgx-fan uninstall: preserving unsafe destination: %s\n' "$path" >&2
         status=1
     elif [[ -f "$path" ]]; then
+        if [[ -z "$TEST_ROOT" && $(run_root stat -c '%h' -- "$path") != 1 ]]; then
+            printf 'dgx-fan uninstall: preserving hardlinked destination: %s\n' "$path" >&2
+            status=1
+            continue
+        fi
         if [[ -n "$TEST_ROOT" ]]; then
             can_read=( test -r "$path" )
             marker_check=( grep -Fxq "$MARKER" "$path" )

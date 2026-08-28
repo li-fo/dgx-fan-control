@@ -1,6 +1,6 @@
 import sys
 import threading
-from errno import EBUSY
+from errno import EADDRINUSE, EBUSY
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +10,31 @@ from dgx_fan import hardware as hardware_module
 from dgx_fan.config import HardwareConfig
 from dgx_fan.hardware import FakeHardware, RaspberryPiHardware
 from dgx_fan.models import FanReading
+
+
+class _InstanceLockSocket:
+    bound = False
+
+    def __init__(self) -> None:
+        self.owns = False
+
+    def bind(self, name: str) -> None:
+        assert name == RaspberryPiHardware._INSTANCE_LOCK_NAME
+        if self.bound:
+            raise OSError(EADDRINUSE, "already owned")
+        type(self).bound = True
+        self.owns = True
+
+    def close(self) -> None:
+        if self.owns:
+            type(self).bound = False
+            self.owns = False
+
+
+@pytest.fixture(autouse=True)
+def _safe_instance_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    _InstanceLockSocket.bound = False
+    monkeypatch.setattr(hardware_module, "socket", lambda *_args: _InstanceLockSocket())
 
 
 def _config(chip: Path = Path("/sys/class/pwm/pwmchip0"), gpio: str = "/dev/gpiochip0") -> HardwareConfig:
@@ -69,6 +94,19 @@ def test_fake_hardware_safe_release() -> None:
     hardware.release()
     hardware.release()
     assert hardware.released and hardware.duties == (100, 100)
+
+
+def test_instance_lock_rejects_second_live_owner_and_releases_after_cleanup() -> None:
+    first = object.__new__(RaspberryPiHardware)
+    first._instance_lock = None
+    first._acquire_instance_lock()
+    second = object.__new__(RaspberryPiHardware)
+    second._instance_lock = None
+    with pytest.raises(RuntimeError, match="already owns Raspberry Pi PWM"):
+        second._acquire_instance_lock()
+    first._release_instance_lock()
+    second._acquire_instance_lock()
+    second._release_instance_lock()
 
 
 def test_fake_hardware_stops_only_for_opted_in_normal_shutdown() -> None:

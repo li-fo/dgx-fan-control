@@ -57,8 +57,9 @@ cp config.example.toml config.toml
 영구 systemd unit이나 cron `@reboot`는 설치하지 않습니다. root 소유 tty1 profile hook은 지정된
 로컬 로그인 사용자에서 한 번만 SSH를 제외하고 같은 transient 물리 디스플레이 경로를 시작합니다.
 앱이 실행되는 동안에만 `dgx-fan-display.service`가 만들어지고 tty8에서 동작하며, 충돌 후 자동 재시작은 하지 않습니다.
-`start.sh`는 PWM0, PWM1, `/dev/gpiochip0`, 공유 runtime lock 접근만 준비하는 root 소유·고정 helper에만 passwordless sudo를
+`start.sh`는 PWM0, PWM1, `/dev/gpiochip0` 접근만 준비하는 root 소유·고정 helper에만 passwordless sudo를
 사용하고, 이후 `.venv/bin/dgx-fan --config <clone>/config.toml`을 일반 사용자 권한으로 실행합니다.
+Raspberry Pi PWM 소유권은 파일 lock이 아니라 hardware 객체 수명 동안 유지되는 kernel-managed abstract UNIX socket으로 보장됩니다.
 Python 프로젝트 전체를 root로 실행하지 않습니다.
 
 설치 후 수동 실행은 다음과 같습니다.
@@ -79,10 +80,10 @@ sudo journalctl -u dgx-fan-display.service --no-pager
 ```
 
 transient 프로세스는 `openvt -c 8 -s -w`로 tty8을 열므로 SSH 연결을 종료해도 1024x600 HDMI 콘솔의
-모니터링은 유지됩니다. Pi에 연결한 키보드에서는 **Ctrl+Q**로 정상 종료하며 이전 VT로 돌아갑니다.
-`./display.sh stop` 또는 system manager의 stop은 비정상 종료이므로, 선택적인 clean `shutdown_mode = "off"`
+모니터링은 유지됩니다. Pi에 연결한 키보드에서는 **Ctrl+Q**로 정상 종료하며 service의 고정 `ExecStopPost` cleanup이 tty1로 돌아가 tty8을 해제합니다.
+`./display.sh stop` 또는 system manager의 stop은 비정상 종료이므로, bounded SIGTERM handler가 선택적인 clean `shutdown_mode = "off"`
 경로 대신 기존 fan fail-safe release(기본 full duty)가 적용됩니다. display가 동작하는 동안 두 번째
-`./start.sh`를 실행하지 마세요. 공유 non-blocking lock이 두 번째 소유자를 거부하며, 첫 프로세스를 종료하지 않습니다.
+`./start.sh`를 실행하지 마세요. hardware-bound socket lock이 두 번째 소유자를 거부하며, 첫 프로세스를 종료하지 않습니다.
 `uv run dgx-fan --config config.toml`과 `uvx`는 기존처럼 현재 터미널의 foreground 명령입니다.
 
 클론과 설정을 유지하면서 이 프로젝트가 만든 profile hook, sudoers 정책, 고정 display helper와 hardware helper만
@@ -92,7 +93,7 @@ transient 프로세스는 `openvt -c 8 -s -w`로 tty8을 열므로 SSH 연결을
 ./uninstall.sh --yes
 ```
 
-제거 스크립트는 존재하면 이 프로젝트의 transient unit을 중지한 뒤 PWM overlay와 콘솔 자동 로그인을 의도적으로 유지합니다. 필요하면
+제거 스크립트는 존재하면 이 프로젝트의 transient unit을 동기적으로 중지하여 cleanup이 끝난 뒤 PWM overlay와 콘솔 자동 로그인을 의도적으로 유지합니다. 필요하면
 `sudo raspi-config`로 콘솔 자동 로그인을 끄고, boot 설정에서 정확한
 `dtoverlay=pwm-2chan,pin=18,pin2=19,func=2,func2=2` 줄만 지우거나 boot 설정 옆에 만든
 backup을 복원하세요. 로컬 자동 로그인은 물리 콘솔에서 해당 계정에 접근할 수 있게 하며,
