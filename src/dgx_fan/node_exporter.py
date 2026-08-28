@@ -2,17 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import math
-import time
 from collections import defaultdict
-from collections.abc import Callable
 
 import httpx
 from prometheus_client.parser import text_string_to_metric_families
 
+from ._collector import Clock, CollectorState
 from .config import EndpointConfig
 from .models import MemoryStat, NodeMemorySnapshot
 
-Clock = Callable[[], float]
 _REQUIRED = {"node_memory_MemTotal_bytes", "node_memory_MemAvailable_bytes"}
 _SIGNED_64_MAX = 9223372036854775807
 
@@ -61,11 +59,13 @@ class NodeExporterCollector:
     ) -> None:
         self.endpoints, self.timeout, self.stale_after = endpoints, timeout_seconds, stale_after_seconds
         self.retry_count, self.retry_delay_seconds = retry_count, retry_delay_seconds
-        self._last_good: dict[str, tuple[float, MemoryStat]] = {}
-        self._errors: dict[str, str | None] = {}
-        self._retrying: dict[str, int] = {}
-        self._failed_attempts: dict[str, int] = {}
-        self._revisions: dict[str, int] = defaultdict(int)
+        state = CollectorState[MemoryStat](stale_after_seconds, retry_count)
+        self._last_good = state.last_good
+        self._errors = state.errors
+        self._retrying = state.retrying
+        self._failed_attempts = state.failed_attempts
+        self._revisions = state.revisions
+        self._state = state
 
     async def collect_endpoint(
         self, endpoint: EndpointConfig, now: float | Clock | None = None
@@ -83,72 +83,52 @@ class NodeExporterCollector:
                 raise
             except (httpx.TransportError, _RetryableHTTPStatus) as error:
                 if attempt < self.retry_count:
-                    self._retrying[endpoint.id] = attempt + 1
+                    self._state.record_retry_wait(endpoint.id, attempt)
                     await asyncio.sleep(self.retry_delay_seconds)
                     continue
-                self._retrying.pop(endpoint.id, None)
-                self._errors[endpoint.id] = str(error)
-                self._failed_attempts[endpoint.id] = attempt + 1
+                self._state.record_failure(endpoint.id, str(error), attempt + 1)
                 break
             except (httpx.HTTPError, ValueError) as error:
-                self._retrying.pop(endpoint.id, None)
-                self._errors[endpoint.id] = str(error)
-                self._failed_attempts[endpoint.id] = attempt + 1
+                self._state.record_failure(endpoint.id, str(error), attempt + 1)
                 break
             except Exception as error:  # noqa: BLE001 - endpoint isolation.
-                self._retrying.pop(endpoint.id, None)
-                self._errors[endpoint.id] = f"collector failure: {str(error) or type(error).__name__}"
-                self._failed_attempts[endpoint.id] = attempt + 1
+                self._state.record_failure(
+                    endpoint.id,
+                    f"collector failure: {str(error) or type(error).__name__}",
+                    attempt + 1,
+                )
                 break
             else:
-                self._last_good[endpoint.id] = (self._completed_at(now), memory)
-                self._errors[endpoint.id] = None
-                self._retrying.pop(endpoint.id, None)
-                self._failed_attempts.pop(endpoint.id, None)
-                self._revisions[endpoint.id] += 1
+                self._state.record_success(endpoint.id, memory, now)
                 break
         return self.snapshot(endpoint, now)
 
-    @staticmethod
-    def _completed_at(now: float | Clock | None) -> float:
-        return now() if callable(now) else time.monotonic() if now is None else now
-
-    @staticmethod
-    def _current_at(now: float | Clock | None) -> float:
-        return time.monotonic() if now is None else now() if callable(now) else now
-
     def snapshot(self, endpoint: EndpointConfig, now: float | Clock | None = None) -> NodeMemorySnapshot:
-        current = self._current_at(now)
-        prior = self._last_good.get(endpoint.id)
-        age = None if prior is None else max(0.0, current - prior[0])
-        stale = age is None or age > self.stale_after
-        error = self._errors.get(endpoint.id)
-        retry_attempt = self._retrying.get(endpoint.id, 0)
-        retrying = retry_attempt > 0
-        if prior is None and error is None and not retrying:
-            error = "awaiting first sample"
+        state = self._state.snapshot(endpoint.id, now)
         return NodeMemorySnapshot(
             endpoint.id,
-            prior is not None and not stale and error is None,
-            age,
-            stale,
-            error,
-            None if prior is None or stale else prior[1],
-            self._revisions[endpoint.id],
-            retrying,
-            retry_attempt,
-            self.retry_count,
-            self._failed_attempts.get(endpoint.id, 0),
+            state.prior is not None and not state.stale and state.error is None,
+            state.age_seconds,
+            state.stale,
+            state.error,
+            None if state.prior is None or state.stale else state.prior[1],
+            state.sample_revision,
+            state.retrying,
+            state.retry_attempt,
+            state.retry_count,
+            state.failed_attempts,
         )
 
     def snapshots(self, now: float | Clock | None = None) -> tuple[NodeMemorySnapshot, ...]:
-        current = self._current_at(now)
+        current = self._state.current_at(now)
         return tuple(self.snapshot(endpoint, current) for endpoint in self.endpoints)
 
     def mark_endpoint_unhealthy(self, endpoint: EndpointConfig, error: Exception | str) -> None:
-        self._retrying.pop(endpoint.id, None)
-        self._errors[endpoint.id] = f"collector failure: {str(error) or type(error).__name__}"
-        self._failed_attempts[endpoint.id] = 0
+        self._state.record_failure(
+            endpoint.id,
+            f"collector failure: {str(error) or type(error).__name__}",
+            0,
+        )
 
 
 class _RetryableHTTPStatus(Exception):
