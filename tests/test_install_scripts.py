@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def _clone(tmp_path: Path, *, config: bool = True, name: str = "clone with spaces") -> Path:
     clone = tmp_path / name
     clone.mkdir()
-    for file_name in ("install.sh", "start.sh", "uninstall.sh", "config.example.toml"):
+    for file_name in ("install.sh", "start.sh", "display.sh", "uninstall.sh", "config.example.toml"):
         source = ROOT / file_name
         target = clone / file_name
         shutil.copy2(source, target)
@@ -92,16 +92,24 @@ def test_temp_root_install_is_idempotent_and_keeps_config_in_clone(tmp_path: Pat
     assert (clone / "config.toml").exists()
     assert not (sandbox / "etc/config.toml").exists()
     helper = sandbox / "usr/local/libexec/dgx-fan-prepare-hardware"
+    manager = sandbox / "usr/local/libexec/dgx-fan-display-manager"
+    session = sandbox / "usr/local/libexec/dgx-fan-display-session"
     sudoers = sandbox / "etc/sudoers.d/dgx-fan"
     hook = sandbox / "etc/profile.d/dgx-fan-autostart.sh"
-    assert helper.exists() and sudoers.exists() and hook.exists()
+    assert helper.exists() and manager.exists() and session.exists() and sudoers.exists() and hook.exists()
     assert "accepts no arguments" in helper.read_text()
-    assert "operator ALL=(root) NOPASSWD: /usr/local/libexec/dgx-fan-prepare-hardware" in sudoers.read_text()
+    assert "/usr/local/libexec/dgx-fan-prepare-hardware" in sudoers.read_text()
+    assert "/usr/local/libexec/dgx-fan-display-manager *" in sudoers.read_text()
+    assert "openvt -c 8 -s -w" in session.read_text()
+    assert "runuser -u" in session.read_text()
+    assert "systemd-run --quiet --collect --service-type=exec --unit=dgx-fan-display" in manager.read_text()
+    assert "unsafe runtime directory" in helper.read_text()
+    assert "unsafe runtime lock" in helper.read_text()
     hook_text = hook.read_text()
     assert '"/dev/tty1"' in hook_text
     assert "SSH_CONNECTION" in hook_text
     assert "DGX_FAN_AUTOSTART_ATTEMPTED" in hook_text
-    assert "exec " not in hook_text
+    assert '"$DGX_FAN_PROJECT_ROOT/display.sh" start' in hook_text
     assert "raspi-config nonint do_boot_behaviour B2" in (sandbox / "command.log").read_text()
     assert f"uv cwd={clone}" in (sandbox / "command.log").read_text()
     assert f"--project {clone} --locked --extra raspberry-pi --no-dev" in (
@@ -145,6 +153,8 @@ def test_conditional_overlay_is_rejected_without_boot_or_privilege_changes(tmp_p
     assert "conditional under [pi5]" in result.stderr
     assert not (sandbox / "etc/sudoers.d/dgx-fan").exists()
     assert not (sandbox / "usr/local/libexec/dgx-fan-prepare-hardware").exists()
+    assert not (sandbox / "usr/local/libexec/dgx-fan-display-manager").exists()
+    assert not (sandbox / "usr/local/libexec/dgx-fan-display-session").exists()
 
 
 def test_overlay_is_appended_under_all_after_conditional_section(tmp_path: Path) -> None:
@@ -337,6 +347,9 @@ def test_uninstall_uses_root_marker_inspection_for_production_sudoers() -> None:
 
     assert 'marker_check=( run_root grep -Fxq "$MARKER" "$path" )' in source
     assert 'can_read=( run_root test -r "$path" )' in source
+    assert 'display_helpers_managed=true' in source
+    assert 'run_root grep -Fxq "$MARKER" "$display_manager"' in source
+    assert 'sudo systemctl stop dgx-fan-display.service' in source
 
 
 def test_start_dry_run_uses_fixed_helper_and_clone_local_configuration() -> None:
@@ -350,7 +363,41 @@ def test_start_dry_run_uses_fixed_helper_and_clone_local_configuration() -> None
 
     assert result.returncode == 0
     assert "sudo -n /usr/local/libexec/dgx-fan-prepare-hardware" in result.stdout
+    assert "flock -n /run/dgx-fan/instance.lock" in result.stdout
     assert f"{ROOT}/.venv/bin/dgx-fan --config {ROOT}/config.toml" in result.stdout
+
+
+def test_display_launcher_has_closed_actions_and_fixed_bridge() -> None:
+    source = (ROOT / "display.sh").read_text()
+    assert "start|restart|stop|status" in source
+    assert "sudo -n \"$MANAGER\" \"$1\"" in source
+    assert "systemd-run" not in source
+    result = subprocess.run(["bash", str(ROOT / "display.sh"), "unknown"], text=True, capture_output=True, check=False)
+    assert result.returncode == 64
+
+
+def test_generated_display_manager_rejects_untrusted_actions(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    manager = sandbox / "usr/local/libexec/dgx-fan-display-manager"
+    result = subprocess.run(["sh", str(manager), "unsafe"], text=True, capture_output=True, check=False)
+    assert result.returncode == 64
+    assert "Usage: dgx-fan-display-manager" in result.stderr
+
+
+def test_display_bridge_uses_transient_no_force_tty8_and_no_restart_policy(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    manager = (sandbox / "usr/local/libexec/dgx-fan-display-manager").read_text()
+    session = (sandbox / "usr/local/libexec/dgx-fan-display-session").read_text()
+
+    assert "--collect --service-type=exec --unit=dgx-fan-display" in manager
+    assert "Restart=" not in manager
+    assert "openvt -c 8 -s -w" in session
+    assert "openvt -c 8 -s -w -f" not in session
+    assert "runuser -u" in session
 
 
 def test_generated_helper_rejects_arguments_before_touching_real_pwm(tmp_path: Path) -> None:
@@ -365,6 +412,23 @@ def test_generated_helper_rejects_arguments_before_touching_real_pwm(tmp_path: P
 
     assert result.returncode == 64
     assert "accepts no arguments" in result.stderr
+
+
+def test_generated_hardware_helper_rejects_unsafe_runtime_objects_before_chown(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    helper = (sandbox / "usr/local/libexec/dgx-fan-prepare-hardware").read_text()
+
+    directory_check = helper.index('if [ -L "$runtime" ]')
+    directory_reclaim = helper.index('chown root:root "$runtime"')
+    lock_check = helper.index('if [ -L "$lock" ]')
+    lock_chown = helper.index('chown root:gpio "$lock"')
+    assert directory_check < directory_reclaim
+    assert lock_check < lock_chown
+    assert 'install -d -o root -g root -m 0755 "$runtime"' in helper
+    assert 'chmod 0755 "$runtime"' in helper
+    assert 'stat -c %h "$lock"' in helper
 
 
 def test_reboot_is_not_attempted_when_configuration_validation_fails(tmp_path: Path) -> None:

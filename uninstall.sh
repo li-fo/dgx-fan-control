@@ -10,7 +10,7 @@ usage() {
     cat <<'EOF'
 Usage: ./uninstall.sh --yes
 
-Removes dgx-fan's profile hook, sudoers entry, and fixed hardware helper.
+Removes dgx-fan's profile hook, sudoers entry, and fixed hardware/display helpers.
 It intentionally keeps config.toml, the PWM overlay, and the console auto-login setting.
 EOF
 }
@@ -44,10 +44,31 @@ run_root() {
 }
 
 status=0
+display_helpers_managed=false
+if [[ -z "$TEST_ROOT" ]]; then
+    # Do not act on an unrelated unit that merely shares this fixed name.  The
+    # two root-owned helpers are the ownership evidence for our transient unit.
+    display_manager=/usr/local/libexec/dgx-fan-display-manager
+    display_session=/usr/local/libexec/dgx-fan-display-session
+    if [[ -f "$display_manager" && ! -L "$display_manager" \
+        && -f "$display_session" && ! -L "$display_session" ]] \
+        && run_root grep -Fxq "$MARKER" "$display_manager" \
+        && run_root grep -Fxq "$MARKER" "$display_session"; then
+        display_helpers_managed=true
+    fi
+fi
+if [[ "$display_helpers_managed" == true ]]; then
+    # A transient unit has no unit file to remove. Stop only the verified,
+    # fixed-name unit before removing the helpers it uses.
+    sudo systemctl stop dgx-fan-display.service >/dev/null 2>&1 || true
+    sudo systemctl reset-failed dgx-fan-display.service >/dev/null 2>&1 || true
+fi
 for path in \
     "$(target_path /etc/profile.d/dgx-fan-autostart.sh)" \
     "$(target_path /etc/sudoers.d/dgx-fan)" \
-    "$(target_path /usr/local/libexec/dgx-fan-prepare-hardware)"; do
+    "$(target_path /usr/local/libexec/dgx-fan-prepare-hardware)" \
+    "$(target_path /usr/local/libexec/dgx-fan-display-manager)" \
+    "$(target_path /usr/local/libexec/dgx-fan-display-session)"; do
     if [[ -L "$path" || ( -e "$path" && ! -f "$path" ) ]]; then
         printf 'dgx-fan uninstall: preserving unsafe destination: %s\n' "$path" >&2
         status=1

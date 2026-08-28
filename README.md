@@ -55,11 +55,12 @@ stops; edit it and run the installer again. It requires `uv`; install uv with th
 is not already available. Use `./install.sh` without `--reboot` to install first and reboot
 manually, or `./install.sh --dry-run` to inspect the intended action without changing the Pi.
 
-No systemd unit or cron `@reboot` entry is installed. A root-owned tty1 profile hook calls
-the clone's `start.sh` once for the configured local login user, never for SSH, and does not
-`exec` the application: a normal TUI Quit returns to the console shell. `start.sh` uses
-passwordless sudo only for a fixed, root-owned no-argument helper that grants the `gpio` group
-access to PWM0, PWM1, and `/dev/gpiochip0`; it then launches
+No persistent systemd unit or cron `@reboot` entry is installed. A root-owned tty1 profile hook
+starts the same transient physical-display path once for the configured local login user, never
+for SSH. It creates `dgx-fan-display.service` only while the application runs, places it on tty8,
+and does not restart a crashed app. `start.sh` uses passwordless sudo only for fixed root-owned
+helpers that grant the `gpio` group access to PWM0, PWM1, `/dev/gpiochip0`, and the shared runtime
+lock; it then launches
 `.venv/bin/dgx-fan --config <clone>/config.toml` as the regular user. The Python project is
 never run as root.
 
@@ -69,14 +70,33 @@ For a manual launch after installation, use:
 ./start.sh
 ```
 
-To remove only this project's hook, sudoers policy, and hardware helper, while keeping the
+### HDMI physical display from SSH
+
+After installation, use the clone-local launcher from an SSH terminal:
+
+```bash
+./display.sh restart
+./display.sh status
+# diagnostics after a failed start:
+sudo journalctl -u dgx-fan-display.service --no-pager
+```
+
+The transient process opens tty8 with `openvt -c 8 -s -w`, so the 1024x600 HDMI console continues
+after the SSH session ends. A keyboard connected to the Pi can exit the TUI cleanly with **Ctrl+Q**;
+the console returns to the previous VT. `./display.sh stop` or a system-manager stop is an abnormal
+termination: the existing fan fail-safe release behavior applies (normally full duty), rather than
+the optional clean `shutdown_mode = "off"` path. Do not launch a second foreground `./start.sh` while
+the display is active: the shared non-blocking lock refuses the second owner and never kills the
+first. `uv run dgx-fan --config config.toml` and `uvx` remain foreground terminal commands.
+
+To remove only this project's hook, sudoers policy, fixed display helpers, and hardware helper, while keeping the
 clone and its configuration:
 
 ```bash
 ./uninstall.sh --yes
 ```
 
-Uninstall intentionally leaves the PWM overlay and console auto-login in place. Disable
+Uninstall stops the owned transient unit if present, then intentionally leaves the PWM overlay and console auto-login in place. Disable
 console auto-login with `sudo raspi-config`, and remove only the exact
 `dtoverlay=pwm-2chan,pin=18,pin2=19,func=2,func2=2` line (or restore the backup created beside
 the boot configuration) if rollback requires it. The local auto-login grants physical-console

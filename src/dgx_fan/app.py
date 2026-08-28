@@ -4,15 +4,18 @@ import argparse
 import copy
 import os
 import re
+import signal
 import sys
+import threading
 import time
 from asyncio import CancelledError, Task, create_task, sleep
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 from rich.terminal_theme import DEFAULT_TERMINAL_THEME
 from textual import constants
 from textual.app import App, ComposeResult
+from textual.binding import Binding, BindingType
 from textual.driver import Driver
 from textual.reactive import Reactive
 
@@ -120,6 +123,10 @@ def _restore_terminal_state(state: _TerminalState | None) -> None:
 
 class DGXFanApp(App[None]):
     TITLE = "DGX Fan Controller"
+    # Keep the physical tty keyboard exit explicit even if Textual defaults change.
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("ctrl+q", "quit", "Quit", show=False, priority=True)
+    ]
     CONTROL_TICK_SECONDS = 0.25
     # Textual normally maps Rich ANSI names through its Monokai/Alabaster
     # palettes.  On an 8-color Linux console that remapping changes the
@@ -225,6 +232,23 @@ def main(argv: list[str] | None = None) -> None:
     app = DGXFanApp(config)
     terminal_state = _capture_terminal_state()
     run_completed = False
+
+    def restore_sigterm_handler() -> None:
+        return None
+
+    if threading.current_thread() is threading.main_thread():
+        previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+
+        def _terminate_non_cleanly(signum: int, _frame: object) -> None:
+            # systemd stop sends SIGTERM to the service cgroup.  Exit through
+            # the finally block so PWM is released with the existing fail-safe
+            # path, rather than relying on process death alone.
+            raise SystemExit(128 + signum)
+
+        signal.signal(signal.SIGTERM, _terminate_non_cleanly)
+
+        def restore_sigterm_handler() -> None:
+            signal.signal(signal.SIGTERM, previous_sigterm_handler)
     try:
         app.run()
         # Textual catches some internal fatal exceptions and returns with a
@@ -234,5 +258,8 @@ def main(argv: list[str] | None = None) -> None:
         try:
             _restore_terminal_state(terminal_state)
         finally:
-            if app.hardware is not None:
-                app.hardware.release(normal_shutdown=run_completed)
+            try:
+                if app.hardware is not None:
+                    app.hardware.release(normal_shutdown=run_completed)
+            finally:
+                restore_sigterm_handler()

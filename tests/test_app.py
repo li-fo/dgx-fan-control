@@ -1,3 +1,4 @@
+import signal
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +8,7 @@ from rich.color import ColorSystem
 from rich.segment import Segment
 from rich.style import Style
 from rich.terminal_theme import DEFAULT_TERMINAL_THEME
+from textual.binding import Binding
 from textual.color import Color
 from textual.filter import ANSIToTruecolor
 from textual.strip import Strip
@@ -28,6 +30,16 @@ def test_help(capsys: pytest.CaptureFixture[str]) -> None:
         main(["--help"])
     assert error.value.code == 0
     assert "--config" in capsys.readouterr().out
+
+
+def test_ctrl_q_is_explicit_clean_quit_binding() -> None:
+    binding = next(
+        binding
+        for binding in DGXFanApp.BINDINGS
+        if isinstance(binding, Binding) and binding.key == "ctrl+q"
+    )
+    assert binding.action == "quit"
+    assert binding.priority is True
 
 
 def test_invalid_config_fails_before_hardware() -> None:
@@ -164,6 +176,37 @@ def test_app_exception_restores_terminal_and_releases_hardware(
     with pytest.raises(RuntimeError, match="app failure"):
         main(["--config", "unused.toml"])
     assert events == ["restore", "release:False"]
+
+
+def test_sigterm_releases_hardware_non_cleanly_and_restores_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    releases: list[bool] = []
+    previous_handler = signal.getsignal(signal.SIGTERM)
+
+    class Hardware:
+        def release(self, *, normal_shutdown: bool = False) -> None:
+            releases.append(normal_shutdown)
+
+    class TerminatedApp:
+        def __init__(self, config: object) -> None:
+            self.hardware = Hardware()
+
+        def run(self) -> None:
+            handler = signal.getsignal(signal.SIGTERM)
+            assert callable(handler)
+            handler(signal.SIGTERM, None)
+
+    monkeypatch.setattr(app_module, "load_config", lambda path: object())
+    monkeypatch.setattr(app_module, "DGXFanApp", TerminatedApp)
+    monkeypatch.setattr(app_module, "_capture_terminal_state", lambda: None)
+
+    with pytest.raises(SystemExit) as exit_error:
+        main(["--config", "unused.toml"])
+
+    assert exit_error.value.code == 128 + signal.SIGTERM
+    assert releases == [False]
+    assert signal.getsignal(signal.SIGTERM) is previous_handler
 
 
 def test_closed_stdin_does_not_prevent_app_run(monkeypatch: pytest.MonkeyPatch) -> None:

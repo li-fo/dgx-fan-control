@@ -4,6 +4,8 @@ set -euo pipefail
 
 readonly OVERLAY='dtoverlay=pwm-2chan,pin=18,pin2=19,func=2,func2=2'
 readonly HELPER_NAME='dgx-fan-prepare-hardware'
+readonly DISPLAY_MANAGER_NAME='dgx-fan-display-manager'
+readonly DISPLAY_SESSION_NAME='dgx-fan-display-session'
 readonly PROFILE_NAME='dgx-fan-autostart.sh'
 readonly SUDOERS_NAME='dgx-fan'
 
@@ -141,6 +143,9 @@ check_platform() {
     [[ "$model" == *'Raspberry Pi 4'* ]] || fail "unsupported platform (Raspberry Pi 4 required): $model"
     command -v raspi-config >/dev/null 2>&1 || fail 'raspi-config is required for tty1 console auto-login'
     command -v visudo >/dev/null 2>&1 || fail 'visudo is required to validate the sudoers policy'
+    for required_tool in systemctl systemd-run openvt runuser flock deallocvt; do
+        command -v "$required_tool" >/dev/null 2>&1 || fail "$required_tool is required for physical-display integration"
+    done
 }
 
 select_boot_config() {
@@ -221,9 +226,97 @@ for channel in 0 1; do
 done
 chgrp gpio /dev/gpiochip0
 chmod g+rw /dev/gpiochip0
+runtime=/run/dgx-fan
+lock="$runtime/instance.lock"
+if [ -L "$runtime" ] || { [ -e "$runtime" ] && [ ! -d "$runtime" ]; }; then
+    echo "unsafe runtime directory: $runtime" >&2; exit 1
+fi
+if [ ! -d "$runtime" ]; then
+    install -d -o root -g root -m 0755 "$runtime"
+fi
+# Reclaim the old group-writable directory from earlier releases before
+# examining or creating the lock within it.
+chown root:root "$runtime"
+chmod 0755 "$runtime"
+if [ -L "$lock" ] || { [ -e "$lock" ] && [ ! -f "$lock" ]; }; then
+    echo "unsafe runtime lock: $lock" >&2; exit 1
+fi
+if [ ! -e "$lock" ]; then
+    : >"$lock"
+fi
+[ "$(stat -c %h "$lock")" -eq 1 ] || { echo "unsafe runtime lock link count" >&2; exit 1; }
+chown root:gpio "$lock"
+chmod 0660 "$lock"
 EOF
     } >"$rendered"
     install_managed_file "$rendered" "$helper" "$HELPER_MARKER" 0755
+    trap - RETURN
+    rm -f -- "$rendered"
+}
+
+write_display_helpers() {
+    local manager session rendered project_quoted user_quoted
+    manager=$(target_path "/usr/local/libexec/$DISPLAY_MANAGER_NAME")
+    session=$(target_path "/usr/local/libexec/$DISPLAY_SESSION_NAME")
+    project_quoted=$(posix_quote "$PROJECT_ROOT")
+    user_quoted=$(posix_quote "$INSTALL_USER")
+    rendered=$(mktemp)
+    trap 'rm -f -- "$rendered"' RETURN
+    {
+        cat <<EOF
+#!/bin/sh
+$HELPER_MARKER
+set -eu
+project_root=$project_quoted
+install_user=$user_quoted
+set +e
+/usr/bin/openvt -c 8 -s -w -- /usr/sbin/runuser -u "\$install_user" -- "\$project_root/start.sh"
+status=\$?
+set -e
+# openvt -s -w returns to the previous VT; release tty8 only after its child exits.
+/usr/bin/deallocvt 8 >/dev/null 2>&1 || true
+exit "\$status"
+EOF
+    } >"$rendered"
+    install_managed_file "$rendered" "$session" "$HELPER_MARKER" 0755
+    rm -f -- "$rendered"
+    rendered=$(mktemp)
+    trap 'rm -f -- "$rendered"' RETURN
+    {
+        cat <<EOF
+#!/bin/sh
+$HELPER_MARKER
+set -eu
+unit=dgx-fan-display.service
+session=/usr/local/libexec/$DISPLAY_SESSION_NAME
+case "\${1:-}" in
+  start)
+    [ "\$#" -eq 1 ] || exit 64
+    if /usr/bin/systemctl is-active --quiet "\$unit"; then
+      echo "dgx-fan display is already active" >&2; exit 1
+    fi
+    /usr/bin/systemctl reset-failed "\$unit" >/dev/null 2>&1 || true
+    exec /usr/bin/systemd-run --quiet --collect --service-type=exec --unit=dgx-fan-display "\$session"
+    ;;
+  restart)
+    [ "\$#" -eq 1 ] || exit 64
+    /usr/bin/systemctl stop "\$unit" >/dev/null 2>&1 || true
+    /usr/bin/systemctl reset-failed "\$unit" >/dev/null 2>&1 || true
+    exec /usr/bin/systemd-run --quiet --collect --service-type=exec --unit=dgx-fan-display "\$session"
+    ;;
+  stop)
+    [ "\$#" -eq 1 ] || exit 64
+    exec /usr/bin/systemctl stop "\$unit"
+    ;;
+  status)
+    [ "\$#" -eq 1 ] || exit 64
+    exec /usr/bin/systemctl status --no-pager "\$unit"
+    ;;
+  *) echo "Usage: dgx-fan-display-manager {start|restart|stop|status}" >&2; exit 64 ;;
+esac
+EOF
+    } >"$rendered"
+    install_managed_file "$rendered" "$manager" "$HELPER_MARKER" 0755
     trap - RETURN
     rm -f -- "$rendered"
 }
@@ -235,10 +328,10 @@ write_sudoers() {
     trap 'rm -f -- "$temporary"' RETURN
     {
         printf '%s\n' "$SUDOERS_MARKER"
-        printf '%s ALL=(root) NOPASSWD: /usr/local/libexec/%s\n' "$INSTALL_USER" "$HELPER_NAME"
+        printf '%s ALL=(root) NOPASSWD: /usr/local/libexec/%s, /usr/local/libexec/%s *\n' "$INSTALL_USER" "$HELPER_NAME" "$DISPLAY_MANAGER_NAME"
     } >"$temporary"
     if [[ -n "$TEST_ROOT" ]]; then
-        grep -Fxq "$INSTALL_USER ALL=(root) NOPASSWD: /usr/local/libexec/$HELPER_NAME" "$temporary" || fail 'test sudoers validation failed'
+        grep -Fq "/usr/local/libexec/$HELPER_NAME" "$temporary" || fail 'test sudoers validation failed'
     else
         run_root visudo -cf "$temporary"
     fi
@@ -264,7 +357,7 @@ if [ "${USER:-}" = "$DGX_FAN_INSTALL_USER" ] && [ -z "${SSH_CONNECTION:-}" ] \
     && [ "$(tty 2>/dev/null || true)" = "/dev/tty1" ]; then
     DGX_FAN_AUTOSTART_ATTEMPTED=1
     export DGX_FAN_AUTOSTART_ATTEMPTED
-    "$DGX_FAN_PROJECT_ROOT/start.sh" || printf '%s\n' 'dgx-fan did not start; see the message above.' >&2
+    "$DGX_FAN_PROJECT_ROOT/display.sh" start || printf '%s\n' 'dgx-fan physical display did not start; see the message above.' >&2
 fi
 unset DGX_FAN_PROJECT_ROOT DGX_FAN_INSTALL_USER
 EOF
@@ -306,14 +399,20 @@ install_managed_file() {
 }
 
 preflight_managed_destinations() {
-    local helper sudoers hook
+    local helper manager session sudoers hook
     helper=$(target_path "/usr/local/libexec/$HELPER_NAME")
+    manager=$(target_path "/usr/local/libexec/$DISPLAY_MANAGER_NAME")
+    session=$(target_path "/usr/local/libexec/$DISPLAY_SESSION_NAME")
     sudoers=$(target_path "/etc/sudoers.d/$SUDOERS_NAME")
     hook=$(target_path "/etc/profile.d/$PROFILE_NAME")
     ensure_destination_parent "$helper"
+    ensure_destination_parent "$manager"
+    ensure_destination_parent "$session"
     ensure_destination_parent "$sudoers"
     ensure_destination_parent "$hook"
     ensure_managed_destination "$helper" "$HELPER_MARKER"
+    ensure_managed_destination "$manager" "$HELPER_MARKER"
+    ensure_managed_destination "$session" "$HELPER_MARKER"
     ensure_managed_destination "$sudoers" "$SUDOERS_MARKER"
     ensure_managed_destination "$hook" "$PROFILE_MARKER"
 }
@@ -337,6 +436,7 @@ configure_console_autologin() {
 main() {
     [[ -f "$PROJECT_ROOT/config.example.toml" ]] || fail 'run this script from a dgx-fan clone'
     [[ -x "$PROJECT_ROOT/start.sh" ]] || fail 'start.sh must be executable in this clone'
+    [[ -x "$PROJECT_ROOT/display.sh" ]] || fail 'display.sh must be executable in this clone'
     INSTALL_USER=$(id -un)
     if [[ -n "$TEST_ROOT" && -n "${DGX_FAN_TEST_INSTALL_USER:-}" ]]; then
         INSTALL_USER=$DGX_FAN_TEST_INSTALL_USER
@@ -346,7 +446,7 @@ main() {
     check_platform
     ensure_uv
     if [[ "$DRY_RUN" == true ]]; then
-        note "dry run: would sync $PROJECT_ROOT/.venv, validate $CONFIG_PATH, install tty1 integration, and reboot=$REBOOT"
+        note "dry run: would sync $PROJECT_ROOT/.venv, validate $CONFIG_PATH, install tty1/tty8 integration, and reboot=$REBOOT"
         return
     fi
     "$UV_BIN" sync --project "$PROJECT_ROOT" --locked --extra raspberry-pi --no-dev
@@ -356,6 +456,7 @@ main() {
     install_overlay
     run_root usermod -a -G gpio "$INSTALL_USER"
     write_helper
+    write_display_helpers
     write_sudoers
     write_profile_hook
     configure_console_autologin
