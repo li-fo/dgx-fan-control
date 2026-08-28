@@ -2,7 +2,7 @@
 
 [English README](README.md)
 
-`dgx-fan`은 Raspberry Pi 4에서 최대 두 DCGM exporter의 GPU 정보를 읽고, 두 개의 4선 PWM 팬을 각각 독립적으로 제어하는 직접 실행형 Python Textual 앱입니다. GPU 메모리, 사용률, 온도와 팬별 매핑 DGX, duty, RPM/상태를 보여 주며 실행 중 On/Off 제어는 전역으로 유지됩니다.
+`dgx-fan`은 Raspberry Pi 4에서 최대 두 DCGM exporter의 GPU 정보를 읽고, 두 개의 4선 PWM 팬을 각각 독립적으로 제어하는 직접 실행형 Python Textual 앱입니다. GPU 메모리, 사용률, 온도와 팬별 매핑 DGX, duty, RPM/상태를 보여 주며 실행 중 On/Off 제어는 전역으로 유지됩니다. DGX Spark endpoint는 node_exporter에서 host unified memory 점유율을 추가로 읽을 수 있습니다.
 
 ## 실행
 
@@ -122,6 +122,48 @@ retry_delay_seconds = 10.0
 기존 v2 파일에서 두 키를 생략하면 호환성을 유지하며 `retry_count = 0`, `retry_delay_seconds = 10.0`이 적용됩니다. 한 주기는 최초 요청 1회와 `retry_count`만큼의 추가 시도로 구성되고, 시도 사이에는 고정 대기 시간이 있으며 각 요청에는 `timeout_seconds`가 각각 적용됩니다. DNS/연결/timeout 등을 포함한 전송 오류와 HTTP 408, 429, 5xx만 재시도합니다. 그 밖의 4xx, 잘못된 metrics, 사용 가능한 GPU 데이터가 없는 응답은 즉시 실패합니다.
 
 각 DGX는 독립적으로 수집하므로 한 endpoint의 재시도가 정상 endpoint 수집을 지연시키지 않습니다. 재시도 중에는 캐시 샘플도 `stale_after_seconds` 안에서만 사용할 수 있습니다. 샘플이 stale해지거나 모든 시도가 끝나면 그 endpoint는 즉시 비정상이 되고, 두 팬은 `control.fallback_speed_percent`(기본 100%)로 동작합니다. 다음 수집 주기에서 네트워크가 복구되면 정상 복구할 수 있습니다. Dashboard 배너는 `WAITING`, `RETRYING n/N`, `RETRYING · STALE`, `FAILED after N attempts`, 정상 상태를 구분하며, 재시도만으로 그래프 샘플이 중복 추가되지는 않습니다.
+
+### node_exporter로 DGX Spark unified memory 표시
+
+GPU 온도·사용률에는 계속 DCGM이 필요하며, fan safety에도 DCGM telemetry만 사용합니다. DGX Spark는 CPU/GPU가 memory를 공유하므로 framebuffer metric이 없을 수 있습니다. 이 endpoint에만 일반적으로 port 9100의 node_exporter를 추가하고 다음처럼 opt-in 하세요.
+
+```toml
+[[dgx]]
+id = "spark"
+name = "DGX Spark"
+url = "http://192.168.1.10:9400/metrics" # DCGM
+memory_source = "node-exporter"
+node_exporter_url = "http://192.168.1.10:9100/metrics"
+```
+
+node_exporter는 `collector.meminfo`만 필요합니다. 앱은 label 없는 `node_memory_MemTotal_bytes`, `node_memory_MemAvailable_bytes`를 각각 정확히 하나씩 요구하며, `UMA MEM = MemTotal - MemAvailable`, 사용률은 `(MemTotal - MemAvailable) / MemTotal`로 계산합니다. swap은 포함하지 않습니다. `UMA MEM`은 GPU별 allocation이 아니라 endpoint 전체의 물리 shared memory입니다. DCGM에 여러 GPU가 있어도 node-exporter source의 `UMA MEM` graph는 DGX마다 하나만 표시됩니다. opt-in하지 않은 DCGM endpoint는 기존 GPU별 `MEM` graph를 유지하므로 두 DGX를 혼합해 사용할 수 있습니다.
+
+Pi 설정 전 필요한 exporter 값만 read-only로 확인하세요.
+
+```bash
+curl -fsS http://<DGX-IP>:9100/metrics | grep -E '^node_memory_(MemTotal|MemAvailable)_bytes'
+```
+
+node_exporter는 DCGM과 같은 timeout/retry/stale 설정을 쓰지만 독립적으로 수집합니다. node 실패, 잘못된 memory 값, stale sample은 `UMA MEM N/A`와 source별 dashboard warning만 표시하며, 정상 DCGM endpoint를 unsafe로 바꾸거나 fan fallback을 작동시키지 않습니다. 반대로 UMA memory가 정상이어도 DCGM 온도 실패는 기존처럼 fan fallback을 작동시킵니다. 이 프로젝트는 node_exporter를 원격 설치하거나 관리하지 않습니다.
+
+최대 두 DGX endpoint에서는 일반 DCGM endpoint와 Spark를 다음처럼 명시적으로 혼합할 수 있습니다.
+
+```toml
+[[dgx]]
+id = "dgx-1"
+name = "Discrete DGX"
+url = "http://192.168.1.10:9400/metrics"
+
+[[dgx]]
+id = "spark"
+name = "DGX Spark"
+url = "http://192.168.1.11:9400/metrics"
+memory_source = "node-exporter"
+node_exporter_url = "http://192.168.1.11:9100/metrics"
+
+[control]
+fan_endpoint_ids = ["dgx-1", "spark"]
+```
 
 `hardware.shutdown_mode`은 선택 항목이며 기본값은 `"full"`입니다. SIGTERM, 시작/초기화 실패, 앱 오류를 포함해 소프트웨어가 처리할 수 있는 비정상 release에서는 두 팬에 full duty를 명령합니다. 직결 Noctua NF-A6x25 5V PWM처럼 제조사 사양상 0% PWM에서 0 RPM임을 확인한 팬에서만 `shutdown_mode = "off"`를 설정하세요. Textual이 exit code 0으로 정상 반환한 경우에만 두 팬을 0% duty로 멈추고 PWM channel은 enabled 상태로 유지합니다. Textual 내부/비정상 종료, 예외, 0% 쓰기 실패, tach join timeout, GPIO release 실패는 두 channel을 full duty로 되돌립니다. SIGKILL과 전원 손실은 소프트웨어 cleanup을 실행할 수 없으므로, hardware 또는 전원 상태가 바뀔 때까지 마지막 PWM duty가 유지될 수 있습니다.
 

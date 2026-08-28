@@ -68,6 +68,40 @@ def test_load_valid_config(tmp_path: Path) -> None:
     assert config.dashboard_colors == DashboardColors()
     assert config.collection.retry_count == 0
     assert config.collection.retry_delay_seconds == 10.0
+    assert config.endpoints[0].memory_source == "dcgm"
+    assert config.endpoints[0].node_exporter_url is None
+
+
+def test_loads_node_exporter_memory_source(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        _config().replace(
+            'url = "http://one:9400/metrics"',
+            'url = "http://one:9400/metrics"\nmemory_source = "node-exporter"\nnode_exporter_url = "https://one:9100/metrics"',
+        )
+    )
+    endpoint = load_config(path).endpoints[0]
+    assert endpoint.memory_source == "node-exporter"
+    assert endpoint.node_exporter_url == "https://one:9100/metrics"
+
+
+@pytest.mark.parametrize(
+    ("extra", "match"),
+    [
+        ('memory_source = "other"', r"memory_source"),
+        ('memory_source = ["dcgm"]', r"memory_source"),
+        ('memory_source = "node-exporter"', r"node_exporter_url is required"),
+        ('node_exporter_url = "http://one:9100/metrics"', r"node_exporter_url requires"),
+        ('memory_source = "node-exporter"\nnode_exporter_url = "ftp://one/metrics"', r"node_exporter_url"),
+    ],
+)
+def test_rejects_invalid_node_exporter_combinations(
+    tmp_path: Path, extra: str, match: str
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config().replace('[collection]', f'{extra}\n[collection]'))
+    with pytest.raises(ConfigError, match=match):
+        load_config(path)
 
 
 def test_loads_optional_collection_retry_settings(tmp_path: Path) -> None:

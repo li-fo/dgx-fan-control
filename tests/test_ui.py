@@ -11,7 +11,14 @@ from textual.widgets import Button, Static, TabbedContent
 
 from dgx_fan.app import DGXFanApp
 from dgx_fan.config import DashboardColors, EndpointConfig, load_config
-from dgx_fan.models import ControlSnapshot, EndpointSnapshot, FanReading, GPUStat
+from dgx_fan.models import (
+    ControlSnapshot,
+    EndpointSnapshot,
+    FanReading,
+    GPUStat,
+    MemoryStat,
+    NodeMemorySnapshot,
+)
 from dgx_fan.ui import DashboardHistory, FanAppUI, FanGauge, HistoryPoint
 
 
@@ -345,6 +352,73 @@ def test_endpoint_poll_loops_do_not_wait_for_each_other(monkeypatch) -> None:
         first.cancel()
         second.cancel()
         for task in (first, second):
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(exercise())
+
+
+def test_node_memory_poll_loop_does_not_wait_for_dcgm_poll_loop(monkeypatch) -> None:
+    original = load_config(Path("config.example.toml"))
+    endpoint = EndpointConfig(
+        "dgx-1", "DGX-1", "http://dcgm/metrics", "node-exporter", "http://node/metrics"
+    )
+    app = DGXFanApp(replace(original, endpoints=(endpoint,)))
+    dcgm_entered = asyncio.Event()
+    release_dcgm = asyncio.Event()
+    node_completed = asyncio.Event()
+
+    async def blocked_dcgm(endpoint, now=None) -> None:
+        dcgm_entered.set()
+        await release_dcgm.wait()
+
+    async def completed_node(endpoint, now=None) -> None:
+        node_completed.set()
+
+    monkeypatch.setattr(app, "_poll_once", blocked_dcgm)
+    monkeypatch.setattr(app, "_node_poll_once", completed_node)
+
+    async def exercise() -> None:
+        dcgm_task = asyncio.create_task(app._poll_loop(endpoint))
+        node_task = asyncio.create_task(app._node_poll_loop(endpoint))
+        await dcgm_entered.wait()
+        await asyncio.wait_for(node_completed.wait(), timeout=0.2)
+        dcgm_task.cancel()
+        node_task.cancel()
+        for task in (dcgm_task, node_task):
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(exercise())
+
+
+def test_dcgm_poll_completes_while_node_retry_is_blocked(monkeypatch) -> None:
+    original = load_config(Path("config.example.toml"))
+    endpoint = EndpointConfig(
+        "dgx-1", "DGX-1", "http://dcgm/metrics", "node-exporter", "http://node/metrics"
+    )
+    app = DGXFanApp(replace(original, endpoints=(endpoint,)))
+    node_retrying = asyncio.Event()
+    dcgm_completed = asyncio.Event()
+
+    async def completed_dcgm(endpoint, now=None) -> None:
+        dcgm_completed.set()
+
+    async def blocked_node_retry(endpoint, now=None) -> None:
+        node_retrying.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(app, "_poll_once", completed_dcgm)
+    monkeypatch.setattr(app, "_node_poll_once", blocked_node_retry)
+
+    async def exercise() -> None:
+        node_task = asyncio.create_task(app._node_poll_loop(endpoint))
+        await node_retrying.wait()
+        dcgm_task = asyncio.create_task(app._poll_loop(endpoint))
+        await asyncio.wait_for(dcgm_completed.wait(), timeout=0.2)
+        for task in (dcgm_task, node_task):
+            task.cancel()
+        for task in (dcgm_task, node_task):
             with pytest.raises(asyncio.CancelledError):
                 await task
 
@@ -904,6 +978,154 @@ def test_compact_gpu_groups_pair_memory_and_temperature_without_identity_lines()
                 index = lines.index(pair)
                 assert lines[index + 4].startswith("┌ UTIL ")
             assert "" not in lines
+
+    asyncio.run(exercise())
+
+
+def test_node_uma_memory_is_endpoint_scoped_and_not_duplicated_for_multiple_gpus() -> None:
+    app = _DashboardApp()
+    gpus = (
+        GPUStat("GPU-a", "Spark", utilization_percent=20, temperature_celsius=40),
+        GPUStat("GPU-b", "Spark", utilization_percent=30, temperature_celsius=45),
+    )
+    endpoint = EndpointSnapshot(
+        "spark",
+        "Spark",
+        True,
+        0,
+        gpus=gpus,
+        sample_revision=1,
+        memory_source="node-exporter",
+        uma_memory=MemoryStat(50, 100),
+        memory_sample_revision=1,
+    )
+    snapshot = _fan_snapshot(
+        20,
+        "curve",
+        "AUTO ON",
+        45,
+        0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (endpoint,),
+    )
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 30)) as pilot:
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 1)
+            await pilot.pause()
+            rendered = str(next(iter(ui.query(".dgx-panel"))).render())
+            assert rendered.count("┌ UMA MEM ") == 1
+            assert "┌ UMA MEM 50/100 MiB (50%)" in rendered
+            assert rendered.count("┌ TEMP ") == 2 and rendered.count("┌ UTIL ") == 2
+            assert ui.history.points[("spark", "__uma__", "mem")][-1].value == 50
+
+    asyncio.run(exercise())
+
+
+def test_node_memory_failure_warns_without_marking_dcgm_endpoint_unhealthy() -> None:
+    app = _DashboardApp()
+    endpoint = EndpointSnapshot(
+        "spark",
+        "Spark",
+        True,
+        0,
+        gpus=(GPUStat("GPU-a", "Spark", utilization_percent=20, temperature_celsius=40),),
+        sample_revision=1,
+        memory_source="node-exporter",
+        memory_healthy=False,
+        memory_error="missing node memory metrics",
+        memory_retry_count=1,
+        memory_failed_attempts=1,
+    )
+    snapshot = _fan_snapshot(
+        20, "curve", "AUTO ON", 40, 0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")), (endpoint,),
+    )
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 24)):
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 1)
+            assert "UMA MEM FAILED" in ui.query_one("#error-banner", Static).render().plain
+            assert "┌ UMA MEM N/A" in str(next(iter(ui.query(".dgx-panel"))).render())
+            assert endpoint.healthy
+
+    asyncio.run(exercise())
+
+
+def test_node_memory_failure_does_not_change_dcgm_temperature_fan_stage() -> None:
+    config = load_config(Path("config.example.toml"))
+    app = DGXFanApp(config)
+    dcgm = EndpointSnapshot(
+        "dgx-1",
+        "DGX-1",
+        True,
+        0,
+        gpus=(GPUStat("GPU-a", "Spark", temperature_celsius=40),),
+        memory_source="node-exporter",
+    )
+    node_failure = NodeMemorySnapshot(
+        "dgx-1", False, None, True, "missing node memory metrics", None, 0
+    )
+    merged = app._merge_memory_snapshot(dcgm, node_failure)
+    result = app.controller.update(
+        (merged,),
+        (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING")),
+        0,
+    )
+    assert merged.healthy and not merged.memory_healthy
+    assert result.state == "AUTO ON" and result.active_stages == (0, 0)
+
+
+def test_dcgm_failure_remains_fan_unsafe_when_node_memory_is_healthy() -> None:
+    config = load_config(Path("config.example.toml"))
+    app = DGXFanApp(config)
+    dcgm_failure = EndpointSnapshot(
+        "dgx-1", "DGX-1", False, 0, error="DCGM unavailable", memory_source="node-exporter"
+    )
+    node_success = NodeMemorySnapshot("dgx-1", True, 0, memory=MemoryStat(50, 100), sample_revision=1)
+    merged = app._merge_memory_snapshot(dcgm_failure, node_success)
+    result = app.controller.update(
+        (merged,),
+        (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING")),
+        0,
+    )
+    assert not merged.healthy and merged.memory_healthy
+    assert result.state == "SAFETY OVERRIDE" and result.duty_percents == (100, 100)
+
+
+def test_node_memory_banner_distinguishes_retry_fresh_stale_and_waiting() -> None:
+    app = _DashboardApp()
+    gpu = GPUStat("GPU-a", "Spark", utilization_percent=20, temperature_celsius=40)
+
+    def snapshot(**memory: object) -> ControlSnapshot:
+        endpoint = EndpointSnapshot(
+            "spark", "Spark", True, 0, gpus=(gpu,), sample_revision=1,
+            memory_source="node-exporter", **memory,
+        )
+        return _fan_snapshot(
+            20, "curve", "AUTO ON", 40, 0,
+            (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")), (endpoint,),
+        )
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 24)):
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(
+                snapshot(
+                    uma_memory=MemoryStat(50, 100), memory_healthy=True,
+                    memory_retrying=True, memory_retry_attempt=1, memory_retry_count=3,
+                    memory_sample_revision=1,
+                ),
+                1,
+            )
+            assert "UMA MEM RETRYING 1/3" in ui.query_one("#error-banner", Static).render().plain
+            assert "┌ UMA MEM 50/100 MiB (50%)" in str(next(iter(ui.query(".dgx-panel"))).render())
+            ui.update_snapshot(snapshot(memory_stale=True, memory_healthy=False), 2)
+            assert "UMA MEM STALE" in ui.query_one("#error-banner", Static).render().plain
+            ui.update_snapshot(snapshot(memory_stale=True, memory_healthy=False, memory_error="awaiting first sample"), 3)
+            assert "UMA MEM WAITING" in ui.query_one("#error-banner", Static).render().plain
 
     asyncio.run(exercise())
 

@@ -4,6 +4,19 @@ version = 2
 id = "dgx-1"
 name = "DGX-1"
 url = "http://192.168.1.10:9400/metrics"
+# DCGM remains the source for GPU temperature/utilisation and ordinary
+# framebuffer MEM. DGX Spark can opt into host UMA memory from node_exporter:
+# memory_source = "node-exporter"
+# node_exporter_url = "http://192.168.1.10:9100/metrics"
+# Mixed two-DGX example: keep this first table as an ordinary DCGM endpoint,
+# then add the following Spark table and set fan_endpoint_ids = ["dgx-1", "spark"]:
+#
+# [[dgx]]
+# id = "spark"
+# name = "DGX-Spark"
+# url = "http://192.168.1.11:9400/metrics"
+# memory_source = "node-exporter"
+# node_exporter_url = "http://192.168.1.11:9100/metrics"
 
 [dashboard.colors]
 # Optional foreground colors for MEM, UTIL, and TEMP charts. Use a Rich color

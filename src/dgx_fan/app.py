@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 from asyncio import CancelledError, Task, create_task, sleep
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar
 
 from rich.terminal_theme import DEFAULT_TERMINAL_THEME
@@ -52,7 +52,8 @@ from .config import AppConfig, ConfigError, EndpointConfig, load_config, resolve
 from .controller import FanController
 from .dcgm import DCGMCollector
 from .hardware import FanHardware, create_hardware
-from .models import ControlSnapshot, EndpointSnapshot
+from .models import ControlSnapshot, EndpointSnapshot, NodeMemorySnapshot
+from .node_exporter import NodeExporterCollector
 from .ui import FanAppUI
 
 
@@ -154,9 +155,20 @@ class DGXFanApp(App[None]):
             config.collection.retry_count,
             config.collection.retry_delay_seconds,
         )
+        self.node_endpoints = tuple(
+            endpoint for endpoint in config.endpoints if endpoint.memory_source == "node-exporter"
+        )
+        self.node_collector = NodeExporterCollector(
+            self.node_endpoints,
+            config.collection.timeout_seconds,
+            config.collection.stale_after_seconds,
+            config.collection.retry_count,
+            config.collection.retry_delay_seconds,
+        )
         self.endpoints: tuple[EndpointSnapshot, ...] = ()
         self.latest: ControlSnapshot | None = None
         self._poll_tasks: tuple[Task[None], ...] = ()
+        self._node_poll_tasks: tuple[Task[None], ...] = ()
 
     def compose(self) -> ComposeResult:
         yield FanAppUI(
@@ -176,6 +188,9 @@ class DGXFanApp(App[None]):
         self._poll_tasks = tuple(
             create_task(self._poll_loop(endpoint)) for endpoint in self.config.endpoints
         )
+        self._node_poll_tasks = tuple(
+            create_task(self._node_poll_loop(endpoint)) for endpoint in self.node_endpoints
+        )
         self.control_tick()
 
     async def _poll_loop(self, endpoint: EndpointConfig) -> None:
@@ -191,28 +206,72 @@ class DGXFanApp(App[None]):
         except Exception as error:  # noqa: BLE001 - a supervisor must convert unexpected poll failures to fail-safe state.
             self.collector.mark_endpoint_unhealthy(endpoint, error)
 
+    async def _node_poll_loop(self, endpoint: EndpointConfig) -> None:
+        while True:
+            await self._node_poll_once(endpoint)
+            await sleep(self.config.collection.interval_seconds)
+
+    async def _node_poll_once(self, endpoint: EndpointConfig, now: float | None = None) -> None:
+        try:
+            await self.node_collector.collect_endpoint(endpoint, now)
+        except CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - node memory is display-only.
+            self.node_collector.mark_endpoint_unhealthy(endpoint, error)
+
     def control_tick(self, now: float | None = None) -> None:
         current = time.monotonic() if now is None else now
         if self.hardware is None:
             return
-        self.endpoints = self.collector.snapshots(current)
+        memory_by_endpoint = {
+            snapshot.endpoint_id: snapshot for snapshot in self.node_collector.snapshots(current)
+        }
+        self.endpoints = tuple(
+            self._merge_memory_snapshot(snapshot, memory_by_endpoint.get(snapshot.endpoint_id))
+            for snapshot in self.collector.snapshots(current)
+        )
         fans = self.hardware.readings(current)
         self.latest = self.controller.update(self.endpoints, fans, current)
         self.hardware.set_duties(self.latest.duty_percents)
         self.query_one(FanAppUI).update_snapshot(self.latest, current)
 
+    @staticmethod
+    def _merge_memory_snapshot(
+        endpoint: EndpointSnapshot, memory: NodeMemorySnapshot | None
+    ) -> EndpointSnapshot:
+        if endpoint.memory_source != "node-exporter":
+            return endpoint
+        if memory is None:
+            return replace(endpoint, memory_healthy=False, memory_error="awaiting first sample")
+        # Deliberately do not alter DCGM health: the controller must remain
+        # dependent only on temperature telemetry.
+        return replace(
+            endpoint,
+            uma_memory=memory.memory,
+            memory_healthy=memory.healthy,
+            memory_age_seconds=memory.age_seconds,
+            memory_stale=memory.stale,
+            memory_error=memory.error,
+            memory_sample_revision=memory.sample_revision,
+            memory_retrying=memory.retrying,
+            memory_retry_attempt=memory.retry_attempt,
+            memory_retry_count=memory.retry_count,
+            memory_failed_attempts=memory.failed_attempts,
+        )
+
     def toggle_power(self) -> None:
         self.controller.set_power(not self.controller.power)
 
     async def on_unmount(self) -> None:
-        for task in self._poll_tasks:
+        for task in (*self._poll_tasks, *self._node_poll_tasks):
             task.cancel()
-        for task in self._poll_tasks:
+        for task in (*self._poll_tasks, *self._node_poll_tasks):
             try:
                 await task
             except CancelledError:
                 pass
         self._poll_tasks = ()
+        self._node_poll_tasks = ()
 
 
 def build_parser() -> argparse.ArgumentParser:

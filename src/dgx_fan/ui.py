@@ -12,7 +12,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Footer, Header, Static, TabbedContent, TabPane
 
 from .config import DashboardColors
-from .models import ControlSnapshot, GPUStat
+from .models import ControlSnapshot, GPUStat, MemoryStat
 
 HISTORY_SECONDS = 120.0
 MIN_DASHBOARD_WIDTH = 79
@@ -55,31 +55,43 @@ class DashboardHistory:
         self.points: dict[tuple[str, str, str], list[HistoryPoint]] = defaultdict(list)
         self.last_seen: dict[tuple[str, str], float] = {}
         self.revisions: dict[str, int] = {}
+        self.memory_revisions: dict[str, int] = {}
 
     def append(
-        self, endpoint_id: str, revision: int, gpus: tuple[GPUStat, ...], now: float
+        self,
+        endpoint_id: str,
+        revision: int,
+        gpus: tuple[GPUStat, ...],
+        now: float,
+        memory_source: str = "dcgm",
+        uma_memory: MemoryStat | None = None,
+        memory_revision: int = 0,
     ) -> None:
-        if self.revisions.get(endpoint_id) == revision:
-            self.prune(now)
-            return
-        self.revisions[endpoint_id] = revision
-        for gpu in gpus:
-            identity = (endpoint_id, gpu.key)
-            self.last_seen[identity] = now
-            memory_percent = None
-            if (
-                gpu.memory_used_mib is not None
-                and gpu.memory_total_mib is not None
-                and gpu.memory_total_mib > 0
-            ):
-                memory_percent = gpu.memory_used_mib / gpu.memory_total_mib * 100
-            for metric, value in (
-                ("mem", memory_percent),
-                ("util", gpu.utilization_percent),
-                ("temp", gpu.temperature_celsius),
-            ):
-                if value is not None:
-                    self.points[(*identity, metric)].append(HistoryPoint(now, value))
+        if self.revisions.get(endpoint_id) != revision:
+            self.revisions[endpoint_id] = revision
+            for gpu in gpus:
+                identity = (endpoint_id, gpu.key)
+                self.last_seen[identity] = now
+                memory_percent = None
+                if (
+                    gpu.memory_used_mib is not None
+                    and gpu.memory_total_mib is not None
+                    and gpu.memory_total_mib > 0
+                ):
+                    memory_percent = gpu.memory_used_mib / gpu.memory_total_mib * 100
+                for metric, value in (
+                    ("mem", memory_percent),
+                    ("util", gpu.utilization_percent),
+                    ("temp", gpu.temperature_celsius),
+                ):
+                    if value is not None:
+                        self.points[(*identity, metric)].append(HistoryPoint(now, value))
+        if memory_source == "node-exporter" and self.memory_revisions.get(endpoint_id) != memory_revision:
+            self.memory_revisions[endpoint_id] = memory_revision
+            if uma_memory is not None and uma_memory.total_mib > 0:
+                self.points[(endpoint_id, "__uma__", "mem")].append(
+                    HistoryPoint(now, uma_memory.used_mib / uma_memory.total_mib * 100)
+                )
         self.prune(now)
 
     def prune(self, now: float) -> None:
@@ -256,7 +268,7 @@ class FanAppUI(Static):
         self.history = DashboardHistory(collection_interval_seconds)
         self.panels: dict[str, Static] = {}
         self.last_render_time: float | None = None
-        self.last_signature: tuple[tuple[str, int], ...] | None = None
+        self.last_signature: tuple[tuple[str, int, int, bool, bool, str | None], ...] | None = None
         self._resize_redraw_pending = False
         self._dashboard_layout_signature: tuple[int, int, int, int, int, int] | None = None
         self._layout_convergence_passes = 0
@@ -286,7 +298,15 @@ class FanAppUI(Static):
         self.snapshot = snapshot
         self.last_render_time = now
         for endpoint in snapshot.endpoint_snapshots:
-            self.history.append(endpoint.endpoint_id, endpoint.sample_revision, endpoint.gpus, now)
+            self.history.append(
+                endpoint.endpoint_id,
+                endpoint.sample_revision,
+                endpoint.gpus,
+                now,
+                endpoint.memory_source,
+                endpoint.uma_memory,
+                endpoint.memory_sample_revision,
+            )
         errors = []
         for endpoint in snapshot.endpoint_snapshots:
             age = "N/A" if endpoint.age_seconds is None else f"{endpoint.age_seconds:.1f}s"
@@ -304,11 +324,36 @@ class FanAppUI(Static):
                 )
             elif not endpoint.healthy:
                 errors.append(f"{name}: WAITING (sample age: {age})")
+            if endpoint.memory_source == "node-exporter" and (
+                endpoint.memory_retrying or not endpoint.memory_healthy
+            ):
+                memory_age = "N/A" if endpoint.memory_age_seconds is None else f"{endpoint.memory_age_seconds:.1f}s"
+                if endpoint.memory_retrying:
+                    memory_status = "RETRYING · STALE" if endpoint.memory_stale else (
+                        f"RETRYING {endpoint.memory_retry_attempt}/{endpoint.memory_retry_count}"
+                    )
+                elif endpoint.memory_error == "awaiting first sample":
+                    memory_status = "WAITING"
+                elif endpoint.memory_stale:
+                    memory_status = "STALE"
+                elif endpoint.memory_error and endpoint.memory_error != "awaiting first sample":
+                    attempts = endpoint.memory_failed_attempts or endpoint.memory_retry_count + 1
+                    memory_status = f"FAILED after {attempts} attempts: {_safe_display_text(endpoint.memory_error)}"
+                else:
+                    memory_status = "WAITING"
+                errors.append(f"{name}: UMA MEM {memory_status} (sample age: {memory_age})")
         self.query_one("#error-banner", Static).update(
             " | ".join(errors) if errors else "All configured DGX endpoints are healthy."
         )
         signature = tuple(
-            (endpoint.endpoint_id, endpoint.sample_revision)
+            (
+                endpoint.endpoint_id,
+                endpoint.sample_revision,
+                endpoint.memory_sample_revision,
+                endpoint.memory_healthy,
+                endpoint.memory_stale,
+                endpoint.memory_error,
+            )
             for endpoint in snapshot.endpoint_snapshots
         )
         if signature != self.last_signature:
@@ -380,7 +425,7 @@ class FanAppUI(Static):
             # again or need a costly panel redraw.
             rendered = Text(_safe_display_text(endpoint.name))
             keys = keys_by_endpoint[endpoint.endpoint_id]
-            for key in keys:
+            for gpu_index, key in enumerate(keys):
                 gpu = current.get((endpoint.endpoint_id, key))
                 mem = "N/A"
                 if (
@@ -402,9 +447,6 @@ class FanAppUI(Static):
                 )
                 left_width = max(7, (available - 1) // 2)
                 right_width = max(7, available - 1 - left_width)
-                memory_lines, memory_color = self._chart_box(
-                    endpoint.endpoint_id, key, "MEM", mem, now, left_width, 100, plot_height
-                )
                 temperature_lines, temperature_color = self._chart_box(
                     endpoint.endpoint_id,
                     key,
@@ -415,19 +457,43 @@ class FanAppUI(Static):
                     max(100, self.emergency_temperature),
                     plot_height,
                 )
+                rendered.append("\n")
+                if endpoint.memory_source == "node-exporter" and gpu_index > 0:
+                    temperature_lines, temperature_color = self._chart_box(
+                        endpoint.endpoint_id,
+                        key,
+                        "TEMP",
+                        temp,
+                        now,
+                        available,
+                        max(100, self.emergency_temperature),
+                        plot_height,
+                    )
+                    for index, temperature_line in enumerate(temperature_lines):
+                        self._append_colored(rendered, temperature_line, temperature_color)
+                        if index < len(temperature_lines) - 1:
+                            rendered.append("\n")
+                else:
+                    memory_key = "__uma__" if endpoint.memory_source == "node-exporter" else key
+                    memory_label = "UMA MEM" if endpoint.memory_source == "node-exporter" else "MEM"
+                    if endpoint.memory_source == "node-exporter" and endpoint.uma_memory is not None:
+                        usage = endpoint.uma_memory
+                        mem = f"{usage.used_mib:.0f}/{usage.total_mib:.0f} MiB ({usage.used_mib / usage.total_mib * 100:.0f}%)"
+                    memory_lines, memory_color = self._chart_box(
+                        endpoint.endpoint_id, memory_key, memory_label, mem, now, left_width, 100, plot_height
+                    )
+                    for index, (memory_line, temperature_line) in enumerate(
+                        zip(memory_lines, temperature_lines, strict=True)
+                    ):
+                        self._append_colored(rendered, memory_line, memory_color)
+                        rendered.append(" ")
+                        self._append_colored(rendered, temperature_line, temperature_color)
+                        if index < len(memory_lines) - 1:
+                            rendered.append("\n")
+                rendered.append("\n")
                 utilization_lines, utilization_color = self._chart_box(
                     endpoint.endpoint_id, key, "UTIL", util, now, available, 100, plot_height
                 )
-                rendered.append("\n")
-                for index, (memory_line, temperature_line) in enumerate(
-                    zip(memory_lines, temperature_lines, strict=True)
-                ):
-                    self._append_colored(rendered, memory_line, memory_color)
-                    rendered.append(" ")
-                    self._append_colored(rendered, temperature_line, temperature_color)
-                    if index < len(memory_lines) - 1:
-                        rendered.append("\n")
-                rendered.append("\n")
                 for index, utilization_line in enumerate(utilization_lines):
                     self._append_colored(rendered, utilization_line, utilization_color)
                     if index < len(utilization_lines) - 1:
@@ -471,7 +537,7 @@ class FanAppUI(Static):
         chart = self.history.area(
             endpoint_id,
             gpu_key,
-            metric.lower(),
+            "mem" if metric == "UMA MEM" else metric.lower(),
             now,
             max(1, total_width - 7),
             maximum,
@@ -487,6 +553,7 @@ class FanAppUI(Static):
         )
         color = {
             "MEM": self.dashboard_colors.memory,
+            "UMA MEM": self.dashboard_colors.memory,
             "UTIL": self.dashboard_colors.utilization,
             "TEMP": self.dashboard_colors.temperature,
         }[metric]

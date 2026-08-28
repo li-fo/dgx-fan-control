@@ -22,6 +22,8 @@ class EndpointConfig:
     id: str
     name: str
     url: str
+    memory_source: str = "dcgm"
+    node_exporter_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -179,7 +181,21 @@ def load_config(path: Path) -> AppConfig:
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ConfigError(f"dgx[{index}].url must be an http(s) URL")
-        endpoints.append(EndpointConfig(endpoint_id, name, url))
+        memory_source = item.get("memory_source", "dcgm")
+        node_exporter_url = item.get("node_exporter_url")
+        if not isinstance(memory_source, str) or memory_source not in {"dcgm", "node-exporter"}:
+            raise ConfigError(f"dgx[{index}].memory_source must be dcgm or node-exporter")
+        if node_exporter_url is not None:
+            if not isinstance(node_exporter_url, str) or not node_exporter_url.strip():
+                raise ConfigError(f"dgx[{index}].node_exporter_url must be a non-empty http(s) URL")
+            node_parsed = urlparse(node_exporter_url)
+            if node_parsed.scheme not in {"http", "https"} or not node_parsed.netloc:
+                raise ConfigError(f"dgx[{index}].node_exporter_url must be an http(s) URL")
+        if memory_source == "node-exporter" and node_exporter_url is None:
+            raise ConfigError(f"dgx[{index}].node_exporter_url is required when memory_source is node-exporter")
+        if memory_source == "dcgm" and node_exporter_url is not None:
+            raise ConfigError(f"dgx[{index}].node_exporter_url requires memory_source = node-exporter")
+        endpoints.append(EndpointConfig(endpoint_id, name, url, memory_source, node_exporter_url))
     if len({item.id for item in endpoints}) != len(endpoints) or len(
         {item.name for item in endpoints}
     ) != len(endpoints):

@@ -2,7 +2,7 @@
 
 [한국어 README](README.ko.md)
 
-`dgx-fan` is a direct-Python Textual application for a Raspberry Pi 4 that reads GPU data from up to two DCGM exporter endpoints and independently drives two 4-wire PWM fans. It shows GPU memory, utilisation, temperature, and each fan's mapped DGX, duty, RPM, and state; its runtime On/Off control remains global.
+`dgx-fan` is a direct-Python Textual application for a Raspberry Pi 4 that reads GPU data from up to two DCGM exporter endpoints and independently drives two 4-wire PWM fans. It shows GPU memory, utilisation, temperature, and each fan's mapped DGX, duty, RPM, and state; its runtime On/Off control remains global. DGX Spark endpoints can additionally read host unified-memory occupancy from node_exporter.
 
 ## Run
 
@@ -125,6 +125,48 @@ retry_delay_seconds = 10.0
 Absent keys retain compatibility with existing v2 files: `retry_count = 0` and `retry_delay_seconds = 10.0`. A retry cycle is one initial request plus `retry_count` extra attempts, with the fixed delay between attempts; the timeout applies to each request. Only transport failures (including DNS/connection/timeout) and HTTP 408, 429, or 5xx responses retry. Other 4xx responses, malformed metrics, and responses with no usable GPU data fail immediately.
 
 Each DGX is polled independently, so a retrying endpoint does not delay a healthy one. During a retry, a cached sample remains usable only until `stale_after_seconds`; once stale, or once all attempts are exhausted, that endpoint is unhealthy and both fans immediately use `control.fallback_speed_percent` (100% by default). The next scheduled cycle can recover normally. The dashboard banner reports `WAITING`, `RETRYING n/N`, `RETRYING · STALE`, `FAILED after N attempts`, or healthy status; retry attempts do not add duplicate graph samples.
+
+### DGX Spark unified memory with node_exporter
+
+DCGM remains mandatory for GPU temperature and utilisation, and is the only telemetry that affects fan safety. DGX Spark has unified CPU/GPU memory, so its framebuffer metrics can be unavailable. For that endpoint only, add node_exporter (normally port 9100) and opt in as follows:
+
+```toml
+[[dgx]]
+id = "spark"
+name = "DGX Spark"
+url = "http://192.168.1.10:9400/metrics" # DCGM
+memory_source = "node-exporter"
+node_exporter_url = "http://192.168.1.10:9100/metrics"
+```
+
+Only node_exporter's `collector.meminfo` is required. The app requires exactly one unlabelled `node_memory_MemTotal_bytes` and `node_memory_MemAvailable_bytes` sample, then displays `UMA MEM = MemTotal - MemAvailable`; percentage is `(MemTotal - MemAvailable) / MemTotal`. Swap is excluded. `UMA MEM` is endpoint-wide physical shared memory, not per-GPU allocation. A node-exporter source has one `UMA MEM` graph per DGX even if DCGM exposes multiple GPUs; DCGM endpoints without this opt-in retain per-GPU `MEM` graphs. A mixed two-DGX configuration is supported.
+
+Verify only the required exported values before configuring the Pi:
+
+```bash
+curl -fsS http://<DGX-IP>:9100/metrics | grep -E '^node_memory_(MemTotal|MemAvailable)_bytes'
+```
+
+node_exporter has the same timeout, retry, and staleness settings as DCGM but is collected independently. A node failure, malformed memory value, or stale node sample shows `UMA MEM N/A` and a source-specific dashboard warning only. It never marks a healthy DCGM endpoint unsafe and never triggers fan fallback. Conversely, DCGM temperature failure still triggers the existing fan fallback even if UMA memory is available. This project does not install or manage node_exporter remotely.
+
+For the maximum two configured DGX systems, an ordinary DCGM endpoint and a Spark can be mixed explicitly:
+
+```toml
+[[dgx]]
+id = "dgx-1"
+name = "Discrete DGX"
+url = "http://192.168.1.10:9400/metrics"
+
+[[dgx]]
+id = "spark"
+name = "DGX Spark"
+url = "http://192.168.1.11:9400/metrics"
+memory_source = "node-exporter"
+node_exporter_url = "http://192.168.1.11:9100/metrics"
+
+[control]
+fan_endpoint_ids = ["dgx-1", "spark"]
+```
 
 `hardware.shutdown_mode` is optional and defaults to `"full"`: every catchable abnormal release, including SIGTERM, startup/setup failure, and an application error, commands both fans to full duty. Set `shutdown_mode = "off"` only for a verified fan such as the direct-wired Noctua NF-A6x25 5V PWM, whose documented 0% PWM speed is 0 RPM. It stops both fans only after Textual returns with exit code 0; it keeps PWM channels enabled at 0% duty. A non-zero/internal Textual failure, raised exception, failed stop write, tach join timeout, or GPIO release failure instead returns both channels to full duty. SIGKILL and power loss cannot run software cleanup and may leave the last PWM duty in effect until hardware or power state changes.
 

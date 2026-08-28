@@ -185,6 +185,7 @@ class DCGMCollector:
             retry_attempt,
             self.retry_count,
             self._failed_attempts.get(endpoint.id, 0),
+            endpoint.memory_source,
         )
 
     def snapshots(self, now: float | Clock | None = None) -> tuple[EndpointSnapshot, ...]:
