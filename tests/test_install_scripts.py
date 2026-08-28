@@ -133,6 +133,32 @@ def test_existing_system_parent_directory_mode_is_preserved(tmp_path: Path) -> N
     assert sudoers_directory.stat().st_mode & 0o777 == 0o711
 
 
+def test_test_root_rejects_group_writable_parent_before_system_mutation(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    parent = sandbox / "etc/sudoers.d"
+    parent.mkdir(parents=True)
+    parent.chmod(0o775)
+
+    result = _run(clone / "install.sh", sandbox=sandbox)
+    assert result.returncode == 1
+    assert "writable or wrong-owner parent" in result.stderr
+    assert "dtoverlay=pwm-2chan" not in (sandbox / "boot/firmware/config.txt").read_text()
+
+
+def test_test_root_rejects_hardlinked_managed_destination(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    manager = sandbox / "usr/local/libexec/dgx-fan-display-manager"
+    alias = sandbox / "manager-alias"
+    os.link(manager, alias)
+
+    result = _run(clone / "install.sh", sandbox=sandbox)
+    assert result.returncode == 1
+    assert "hardlinked destination" in result.stderr
+
+
 def test_conflicting_overlay_fails_before_privileged_artifacts(tmp_path: Path) -> None:
     clone = _clone(tmp_path)
     sandbox = _sandbox(tmp_path)
@@ -155,7 +181,14 @@ def test_conditional_overlay_is_rejected_without_boot_or_privilege_changes(tmp_p
     assert result.returncode == 1
     assert "conditional under [pi5]" in result.stderr
     assert not (sandbox / "etc/sudoers.d/dgx-fan").exists()
-    assert not (sandbox / "usr/local/libexec/dgx-fan-prepare-hardware").exists()
+    for helper in (
+        "dgx-fan-prepare-hardware",
+        "dgx-fan-display-manager",
+        "dgx-fan-display-session",
+        "dgx-fan-display-tty-acquired",
+        "dgx-fan-display-cleanup",
+    ):
+        assert not (sandbox / "usr/local/libexec" / helper).exists()
     assert not (sandbox / "usr/local/libexec/dgx-fan-display-manager").exists()
     assert not (sandbox / "usr/local/libexec/dgx-fan-display-session").exists()
 
@@ -199,7 +232,7 @@ def test_unmanaged_or_symlink_destination_fails_closed_before_overlay(tmp_path: 
 
     unmanaged = _run(clone / "install.sh", sandbox=sandbox)
     assert unmanaged.returncode == 1
-    assert "unmanaged destination" in unmanaged.stderr
+    assert "parent directory" in unmanaged.stderr or "destination" in unmanaged.stderr
     assert "dtoverlay=pwm-2chan" not in (sandbox / "boot/firmware/config.txt").read_text()
 
     destination.unlink()
@@ -208,7 +241,7 @@ def test_unmanaged_or_symlink_destination_fails_closed_before_overlay(tmp_path: 
     destination.symlink_to(target)
     symlink = _run(clone / "install.sh", sandbox=sandbox)
     assert symlink.returncode == 1
-    assert "symlink destination" in symlink.stderr
+    assert "parent directory" in symlink.stderr or "symlink destination" in symlink.stderr
     assert target.read_text() == "unmanaged\n"
 
 
@@ -221,7 +254,7 @@ def test_non_regular_destination_fails_closed(tmp_path: Path) -> None:
     result = _run(clone / "install.sh", sandbox=sandbox)
 
     assert result.returncode == 1
-    assert "non-regular destination" in result.stderr
+    assert "destination" in result.stderr or "parent directory" in result.stderr
     assert "dtoverlay=pwm-2chan" not in (sandbox / "boot/firmware/config.txt").read_text()
 
 
@@ -419,6 +452,9 @@ def test_fake_vt_lifecycle_runs_cleanup_only_after_tty_marker(tmp_path: Path) ->
     _fake_command(sandbox / "usr/bin/chvt", 'printf "chvt %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/lifecycle.log"\n')
     _fake_command(sandbox / "usr/bin/deallocvt", 'printf "deallocvt %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/lifecycle.log"\n')
     (sandbox / "run").mkdir()
+    active_tty = sandbox / "sys/class/tty/tty0/active"
+    active_tty.parent.mkdir(parents=True)
+    active_tty.write_text("tty3\n")
     session = sandbox / "usr/local/libexec/dgx-fan-display-session"
     cleanup = sandbox / "usr/local/libexec/dgx-fan-display-cleanup"
     environment = _environment(sandbox)
@@ -431,9 +467,9 @@ def test_fake_vt_lifecycle_runs_cleanup_only_after_tty_marker(tmp_path: Path) ->
     assert cleaned.returncode == 0, cleaned.stderr
     assert not marker.exists()
     assert log.read_text().splitlines() == [
-        "openvt -c 8 -s -w -- " + str(sandbox / "usr/local/libexec/dgx-fan-display-tty-acquired") + " operator " + str(clone / "start.sh"),
+        "openvt -c 8 -s -w -- " + str(sandbox / "usr/local/libexec/dgx-fan-display-tty-acquired") + " operator " + str(clone / "start.sh") + " tty3",
         "runuser -u operator -- " + str(clone / "start.sh"),
-        "chvt 1",
+        "chvt 3",
         "deallocvt 8",
     ]
 
@@ -441,6 +477,66 @@ def test_fake_vt_lifecycle_runs_cleanup_only_after_tty_marker(tmp_path: Path) ->
     no_marker_cleanup = subprocess.run(["sh", str(cleanup)], env=environment, text=True, capture_output=True, check=False)
     assert no_marker_cleanup.returncode == 0
     assert not log.exists()
+    marker.write_text("tty4\n")
+    _fake_command(sandbox / "usr/bin/chvt", "exit 1\n")
+    failed_cleanup = subprocess.run(["sh", str(cleanup)], env=environment, text=True, capture_output=True, check=False)
+    assert failed_cleanup.returncode == 1
+    assert marker.read_text() == "tty4\n"
+    _fake_command(sandbox / "usr/bin/chvt", 'printf "chvt %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/lifecycle.log"\n')
+    retried_cleanup = subprocess.run(["sh", str(cleanup)], env=environment, text=True, capture_output=True, check=False)
+    assert retried_cleanup.returncode == 0
+    assert not marker.exists()
+
+
+def test_fake_manager_refuses_active_and_orders_restart(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    _fake_command(sandbox / "usr/bin/systemctl", 'printf "systemctl %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/manager.log"\ncase "$1" in is-active) printf "%s\\n" "${DGX_TEST_UNIT_STATE:-inactive}";; show) printf "not-found\\n";; esac\n')
+    _fake_command(sandbox / "usr/bin/systemd-run", 'printf "systemd-run %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/manager.log"\n')
+    manager = sandbox / "usr/local/libexec/dgx-fan-display-manager"
+    environment = _environment(sandbox)
+    environment["DGX_TEST_UNIT_STATE"] = "active"
+    active = subprocess.run(["sh", str(manager), "start"], env=environment, text=True, capture_output=True, check=False)
+    assert active.returncode == 1 and "already active" in active.stderr
+    (sandbox / "manager.log").unlink()
+    environment["DGX_TEST_UNIT_STATE"] = "inactive"
+    restarted = subprocess.run(["sh", str(manager), "restart"], env=environment, text=True, capture_output=True, check=False)
+    assert restarted.returncode == 0, restarted.stderr
+    entries = (sandbox / "manager.log").read_text().splitlines()
+    assert entries[:3] == [
+        "systemctl stop dgx-fan-display.service",
+        "systemctl show --property=LoadState --value dgx-fan-display.service",
+        "systemctl reset-failed dgx-fan-display.service",
+    ]
+    assert "--property=TimeoutStopSec=10s" in entries[-1]
+    assert "--property=ExecStopPost=" + str(sandbox / "usr/local/libexec/dgx-fan-display-cleanup") in entries[-1]
+
+
+def test_fake_manager_covers_stale_start_refusals_stop_and_status(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    _fake_command(sandbox / "usr/bin/systemctl", 'printf "systemctl %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/manager-coverage.log"\ncase "$1" in is-active) printf "%s\\n" "${DGX_TEST_UNIT_STATE:-inactive}";; show) printf "not-found\\n";; esac\n')
+    _fake_command(sandbox / "usr/bin/systemd-run", 'printf "systemd-run %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/manager-coverage.log"\n')
+    manager = sandbox / "usr/local/libexec/dgx-fan-display-manager"
+    environment = _environment(sandbox)
+    for state in ("inactive", "failed"):
+        environment["DGX_TEST_UNIT_STATE"] = state
+        result = subprocess.run(["sh", str(manager), "start"], env=environment, text=True, capture_output=True, check=False)
+        assert result.returncode == 0, result.stderr
+    for state in ("activating", "deactivating"):
+        environment["DGX_TEST_UNIT_STATE"] = state
+        result = subprocess.run(["sh", str(manager), "start"], env=environment, text=True, capture_output=True, check=False)
+        assert result.returncode == 1
+        assert f"already {state}" in result.stderr
+    for action in ("stop", "status"):
+        result = subprocess.run(["sh", str(manager), action], env=environment, text=True, capture_output=True, check=False)
+        assert result.returncode == 0, result.stderr
+    entries = (sandbox / "manager-coverage.log").read_text()
+    assert entries.count("systemd-run ") == 2
+    assert "systemctl stop dgx-fan-display.service" in entries
+    assert "systemctl status --no-pager dgx-fan-display.service" in entries
 
 
 def test_generated_helper_rejects_arguments_before_touching_real_pwm(tmp_path: Path) -> None:

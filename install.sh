@@ -236,7 +236,7 @@ EOF
 }
 
 write_display_helpers() {
-    local manager session acquired cleanup rendered project_quoted user_quoted marker_quoted openvt_quoted runuser_quoted chvt_quoted deallocvt_quoted systemctl_quoted systemd_run_quoted acquired_quoted cleanup_quoted session_quoted
+    local manager session acquired cleanup rendered project_quoted user_quoted marker_quoted tty_active_quoted openvt_quoted runuser_quoted chvt_quoted deallocvt_quoted systemctl_quoted systemd_run_quoted acquired_quoted cleanup_quoted session_quoted
     manager=$(target_path "/usr/local/libexec/$DISPLAY_MANAGER_NAME")
     session=$(target_path "/usr/local/libexec/$DISPLAY_SESSION_NAME")
     acquired=$(target_path "/usr/local/libexec/$DISPLAY_TTY_ACQUIRED_NAME")
@@ -244,6 +244,7 @@ write_display_helpers() {
     project_quoted=$(posix_quote "$PROJECT_ROOT")
     user_quoted=$(posix_quote "$INSTALL_USER")
     marker_quoted=$(posix_quote "$(target_path /run/dgx-fan-display-tty8)")
+    tty_active_quoted=$(posix_quote "$(target_path /sys/class/tty/tty0/active)")
     openvt_quoted=$(posix_quote "$(target_path /usr/bin/openvt)")
     runuser_quoted=$(posix_quote "$(target_path /usr/sbin/runuser)")
     chvt_quoted=$(posix_quote "$(target_path /usr/bin/chvt)")
@@ -264,7 +265,10 @@ project_root=$project_quoted
 install_user=$user_quoted
 openvt=$openvt_quoted
 acquired=$acquired_quoted
-exec "\$openvt" -c 8 -s -w -- "\$acquired" "\$install_user" "\$project_root/start.sh"
+tty_active=$tty_active_quoted
+previous_vt=\$(cat "\$tty_active" 2>/dev/null || true)
+case "\$previous_vt" in tty[1-9]|tty[1-9][0-9]*) ;; *) echo "cannot validate active virtual terminal" >&2; exit 1;; esac
+exec "\$openvt" -c 8 -s -w -- "\$acquired" "\$install_user" "\$project_root/start.sh" "\$previous_vt"
 EOF
     } >"$rendered"
     install_managed_file "$rendered" "$session" "$HELPER_MARKER" 0755
@@ -278,12 +282,14 @@ $HELPER_MARKER
 set -eu
 marker=$marker_quoted
 runuser=$runuser_quoted
-[ "\$#" -eq 2 ] || exit 64
+[ "\$#" -eq 3 ] || exit 64
 case "\$1" in *[!A-Za-z0-9._-]*|'') exit 64;; esac
 [ -x "\$2" ] || exit 1
+case "\$3" in tty[1-9]|tty[1-9][0-9]*) ;; *) exit 64;; esac
 [ ! -e "\$marker" ] && [ ! -L "\$marker" ] || { echo "stale tty8 ownership marker" >&2; exit 1; }
 umask 077
 : >"\$marker"
+printf '%s\n' "\$3" >"\$marker"
 exec "\$runuser" -u "\$1" -- "\$2"
 EOF
     } >"$rendered"
@@ -303,8 +309,10 @@ if [ -L "\$marker" ] || { [ -e "\$marker" ] && [ ! -f "\$marker" ]; }; then
     echo "unsafe tty8 ownership marker: \$marker" >&2; exit 1
 fi
 if [ -f "\$marker" ]; then
-    "\$chvt" 1 >/dev/null 2>&1 || true
-    "\$deallocvt" 8 >/dev/null 2>&1 || true
+    previous_vt=\$(cat "\$marker" 2>/dev/null || true)
+    case "\$previous_vt" in tty[1-9]|tty[1-9][0-9]*) ;; *) echo "invalid tty8 ownership marker" >&2; exit 1;; esac
+    "\$chvt" "\${previous_vt#tty}" || exit 1
+    "\$deallocvt" 8 || exit 1
     rm -f -- "\$marker"
 fi
 EOF
@@ -323,18 +331,29 @@ session=$session_quoted
 cleanup=$cleanup_quoted
 systemctl=$systemctl_quoted
 systemd_run=$systemd_run_quoted
+wait_unloaded() {
+  count=0
+  while [ "\$count" -lt 20 ]; do
+    [ "\$("\$systemctl" show --property=LoadState --value "\$unit" 2>/dev/null || true)" = not-found ] && return 0
+    sleep 0.1
+    count=\$((count + 1))
+  done
+  echo "timed out waiting for \$unit to unload" >&2; return 1
+}
 case "\${1:-}" in
   start)
     [ "\$#" -eq 1 ] || exit 64
-    if "\$systemctl" is-active --quiet "\$unit"; then
-      echo "dgx-fan display is already active" >&2; exit 1
-    fi
+    state=\$("\$systemctl" is-active "\$unit" 2>/dev/null || true)
+    case "\$state" in active|activating|deactivating|reloading) echo "dgx-fan display is already \$state" >&2; exit 1;; esac
     "\$systemctl" reset-failed "\$unit" >/dev/null 2>&1 || true
+    "\$systemctl" stop "\$unit" >/dev/null 2>&1 || true
+    wait_unloaded
     exec "\$systemd_run" --quiet --collect --service-type=exec --unit=dgx-fan-display --property=TimeoutStopSec=10s --property=ExecStopPost="\$cleanup" "\$session"
     ;;
   restart)
     [ "\$#" -eq 1 ] || exit 64
     "\$systemctl" stop "\$unit" >/dev/null 2>&1 || true
+    wait_unloaded
     "\$systemctl" reset-failed "\$unit" >/dev/null 2>&1 || true
     exec "\$systemd_run" --quiet --collect --service-type=exec --unit=dgx-fan-display --property=TimeoutStopSec=10s --property=ExecStopPost="\$cleanup" "\$session"
     ;;
@@ -408,9 +427,7 @@ ensure_managed_destination() {
     fi
     if [[ -e "$destination" ]]; then
         [[ -f "$destination" ]] || fail "refusing non-regular destination: $destination"
-        if [[ -z "$TEST_ROOT" ]]; then
-            [[ $(run_root stat -c '%h' -- "$destination") == 1 ]] || fail "refusing hardlinked destination: $destination"
-        fi
+        [[ $(run_root stat -c '%h' -- "$destination") == 1 ]] || fail "refusing hardlinked destination: $destination"
         if [[ -n "$TEST_ROOT" ]]; then
             grep -Fxq "$marker" "$destination" || fail "refusing unmanaged destination: $destination"
         else
@@ -465,12 +482,12 @@ ensure_destination_parent() {
     parent=$(dirname -- "$destination")
     if [[ -e "$parent" || -L "$parent" ]]; then
         [[ -d "$parent" && ! -L "$parent" ]] || fail "refusing unsafe parent directory: $parent"
-        if [[ -z "$TEST_ROOT" ]]; then
-            local owner mode
-            owner=$(run_root stat -c '%u' -- "$parent")
-            mode=$(run_root stat -c '%a' -- "$parent")
-            [[ "$owner" == 0 && $((8#$mode & 0022)) -eq 0 ]] || fail "refusing writable or non-root parent directory: $parent"
-        fi
+        local owner mode expected_owner
+        owner=$(run_root stat -c '%u' -- "$parent")
+        mode=$(run_root stat -c '%a' -- "$parent")
+        expected_owner=0
+        [[ -n "$TEST_ROOT" ]] && expected_owner=$EUID
+        [[ "$owner" == "$expected_owner" && $((8#$mode & 0022)) -eq 0 ]] || fail "refusing writable or wrong-owner parent directory: $parent"
     fi
 }
 
