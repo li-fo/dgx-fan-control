@@ -2,11 +2,11 @@
 
 [English README](README.md)
 
-`dgx-fan`은 Raspberry Pi 4에서 최대 두 DCGM exporter의 GPU 정보를 읽고, 두 개의 4선 PWM 팬을 각각 독립적으로 제어하는 직접 실행형 Python Textual 앱입니다. GPU 메모리, 사용률, 온도와 팬별 매핑 DGX, duty, RPM/상태를 보여 주며 실행 중 On/Off 제어는 전역으로 유지됩니다. DGX Spark endpoint는 node_exporter에서 host unified memory 점유율을 추가로 읽을 수 있습니다.
+`dgx-fan`은 Raspberry Pi 4에서 최대 두 DCGM exporter의 GPU 정보를 읽고, 두 개의 4선 PWM 팬을 각각 독립적으로 제어하는 Python Textual 앱입니다. Dashboard에는 GPU 메모리·사용률·온도와 팬별 매핑 DGX, duty, RPM, 상태가 표시됩니다. DGX Spark endpoint는 선택적으로 node_exporter에서 host unified-memory 점유율을 읽을 수 있습니다.
 
-## 실행
+## 로컬 실행
 
-Python 3.11+와 개발 의존성을 설치합니다.
+Python 3.11+와 개발 환경을 준비합니다.
 
 ```bash
 uv venv
@@ -14,7 +14,7 @@ uv pip install -e '.[dev]'
 cp config.example.toml config.toml
 ```
 
-가상환경을 활성화한 뒤 실행합니다.
+가상환경을 활성화한 뒤 Python 또는 console entry point로 실행합니다.
 
 ```bash
 source .venv/bin/activate
@@ -22,233 +22,75 @@ python -m dgx_fan --config config.toml
 # 또는: dgx-fan --config config.toml
 ```
 
-활성화하지 않고 uv의 프로젝트 환경으로 실행할 수도 있습니다.
+활성화 없이 uv를 통해 실행할 수도 있습니다.
 
 ```bash
 uv run dgx-fan --config config.toml
 ```
 
-시스템 `/usr/bin/python`을 사용하면 `src/` 레이아웃 패키지를 보지 못할 수 있습니다. 설정 탐색 순서는 `--config`, `DGX_FAN_CONFIG`, `./config.toml`입니다. 설정을 수정하면 앱을 재시작하세요. MVP에는 설정 UI와 hot reload가 없습니다.
+시스템 `/usr/bin/python`은 이 저장소의 `src/` 패키지를 보지 못할 수 있으므로 대체하지 마세요. 설정 탐색 순서는 `--config`, `DGX_FAN_CONFIG`, `./config.toml`이며, 설정을 수정하면 재시작해야 합니다. 설정 UI와 hot reload는 없습니다. 개발 PC에서는 먼저 `hardware.backend = "fake"`를 사용하세요.
 
-개발 PC에서는 `hardware.backend = "fake"`로 시작하세요. Pi에서는 `.[raspberry-pi]`를 설치하고 Linux PWM overlay를 활성화한 뒤, 배선을 확인한 다음에만 `raspberry-pi` backend로 전환하세요.
+## Raspberry Pi 설치와 디스플레이
 
-## Raspberry Pi 클론 로컬 설치와 콘솔 자동 시작
-
-Raspberry Pi OS 콘솔 설치에서는 저장소를 clone한 폴더에 편집 가능한 설정을 둡니다.
-`install.sh`는 애플리케이션 `config.toml`을 `/etc`로 복사하거나 이동하지 않지만,
-boot 통합에 필요한 좁은 범위의 파일은 `/etc`에 설치합니다.
+편집 가능한 `config.toml`은 clone 폴더에 유지합니다. `install.sh`는 이를 `/etc`로 복사하지 않습니다.
 
 ```bash
 git clone <repository-url> dgx-fan
 cd dgx-fan
 cp config.example.toml config.toml
-# DGX URL을 수정하고 계속하기 전에 [hardware] backend = "raspberry-pi"로 설정합니다.
+# DGX URL을 수정하고 [hardware] backend = "raspberry-pi"로 설정합니다.
 ./install.sh --reboot
 ```
 
-`install.sh`는 `uv sync --locked --extra raspberry-pi --no-dev`를 실행하고, 클론의
-`config.toml`을 검증한 다음, 2채널 PWM overlay와 Raspberry Pi 4의 Raspberry Pi OS tty1 콘솔 자동 로그인을
-구성합니다. `config.toml`이 없으면 `config.example.toml`에서 만들고 즉시 중지하므로, 파일을
-편집한 뒤 설치 스크립트를 다시 실행하세요. `uv`가 필요합니다. 설치되어 있지 않다면
-[공식 uv 설치 안내](https://docs.astral.sh/uv/getting-started/installation/)를 먼저 따르세요.
-`--reboot` 없이 `./install.sh`를 실행하면 설치 후 수동 재부팅할 수 있고,
-`./install.sh --dry-run`은 Pi를 바꾸지 않고 예정된 동작만 보여 줍니다.
+필요하면 먼저 [공식 uv 설치 안내](https://docs.astral.sh/uv/getting-started/installation/)를 따르세요. 설치 스크립트는 `uv sync --locked --extra raspberry-pi --no-dev`를 실행하고 clone-local 설정을 검증한 뒤 2채널 PWM overlay와 Raspberry Pi 4 tty1 콘솔 자동 로그인을 구성합니다. `config.toml`이 없으면 예시 파일을 만들고 중지하므로 편집 후 다시 실행하세요. `./install.sh`는 수동 재부팅용이고 `./install.sh --dry-run`은 예정 동작만 확인합니다.
 
-영구 systemd unit이나 cron `@reboot`는 설치하지 않습니다. root 소유 tty1 profile hook은 지정된
-로컬 로그인 사용자에서 한 번만 SSH를 제외하고 같은 transient 물리 디스플레이 경로를 시작합니다.
-앱이 실행되는 동안에만 `dgx-fan-display.service`가 만들어지고 tty8에서 동작하며, 충돌 후 자동 재시작은 하지 않습니다.
-`start.sh`는 PWM0, PWM1, `/dev/gpiochip0` 접근만 준비하는 root 소유·고정 helper에만 passwordless sudo를
-사용하고, 이후 `.venv/bin/dgx-fan --config <clone>/config.toml`을 일반 사용자 권한으로 실행합니다.
-Raspberry Pi PWM 소유권은 파일 lock이 아니라 hardware 객체 수명 동안 유지되는 kernel-managed abstract UNIX socket으로 보장됩니다.
-Python 프로젝트 전체를 root로 실행하지 않습니다.
-
-설치 후 수동 실행은 다음과 같습니다.
+앱은 root가 아닌 일반 사용자로 실행합니다. 설치 후 현재 터미널에서 실행하려면:
 
 ```bash
 ./start.sh
 ```
 
-### SSH에서 HDMI 물리 디스플레이 실행
-
-설치 뒤 SSH 터미널에서 clone 폴더의 launcher를 실행합니다.
+SSH에서 연결된 HDMI 디스플레이로 표시하려면:
 
 ```bash
 ./display.sh restart
 ./display.sh status
-# 시작 실패 진단:
 sudo journalctl -u dgx-fan-display.service --no-pager
 ```
 
-transient 프로세스는 `openvt -c 8 -s -w`로 tty8을 열므로 SSH 연결을 종료해도 1024x600 HDMI 콘솔의
-모니터링은 유지됩니다. Pi에 연결한 키보드에서는 **Ctrl+Q**로 정상 종료하며 service의 고정 `ExecStopPost` cleanup이 검증된 이전 virtual terminal로 돌아가 tty8을 해제합니다. 첫 tty8 deallocation이 실패하면 tty8에 carriage return 하나를 쓰고 한 번만 재시도하며, 실제 kernel 동작은 Pi에서 확인해야 합니다.
-`./display.sh stop`과 `restart`의 stop 단계는 unit의 dedicated clean-stop signal을 사용하므로 `shutdown_mode = "off"`에서 팬을 멈춥니다. 처리 가능한 비정상 SIGTERM과 예외는 기존 fan fail-safe release(기본 full duty)가 적용됩니다. SIGKILL과 전원 손실은 cleanup을 실행할 수 없어 마지막 PWM duty가 유지될 수 있습니다. display가 동작하는 동안 두 번째
-`./start.sh`를 실행하지 마세요. hardware-bound socket lock이 두 번째 소유자를 거부하며, 첫 프로세스를 종료하지 않습니다.
-`uv run dgx-fan --config config.toml`과 `uvx`는 기존처럼 현재 터미널의 foreground 명령입니다.
+transient display 프로세스는 tty8에서 동작하므로 SSH가 끊겨도 유지됩니다. Pi에 연결된 키보드에서는 **Ctrl+Q**로 정상 종료할 수 있습니다. display가 실행 중일 때 두 번째 `./start.sh`를 실행하지 마세요. hardware-owner lock이 기존 앱을 멈추지 않고 두 번째 실행을 거부합니다. `uv run dgx-fan --config config.toml`과 `uvx`는 현재 터미널의 foreground 명령입니다.
 
-클론과 설정을 유지하면서 이 프로젝트가 만든 profile hook, sudoers 정책, 고정 display helper와 hardware helper만
-제거하려면 다음을 사용합니다.
+clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 
 ```bash
 ./uninstall.sh --yes
 ```
 
-제거 스크립트는 존재하면 이 프로젝트의 transient unit을 동기적으로 중지하여 cleanup이 끝난 뒤 PWM overlay와 콘솔 자동 로그인을 의도적으로 유지합니다. 필요하면
-`sudo raspi-config`로 콘솔 자동 로그인을 끄고, boot 설정에서 정확한
-`dtoverlay=pwm-2chan,pin=18,pin2=19,func=2,func2=2` 줄만 지우거나 boot 설정 옆에 만든
-backup을 복원하세요. 로컬 자동 로그인은 물리 콘솔에서 해당 계정에 접근할 수 있게 하며,
-이 방식에는 앱 충돌 후 재시작 감독 기능이 없습니다. tty1 콘솔은 터미널 에뮬레이터보다
-마우스/터치 보고에 적합하지 않으므로 부팅 콘솔에서는 키보드 조작을 지원 대상으로 봅니다.
-무인 운용 전에 실제 Pi에서 boot, PWM 파형, RPM, 팬 fail-safe 동작을 측정하세요.
+제거는 transient display unit을 중지한 뒤 관리된 helper를 지우지만 PWM overlay와 콘솔 자동 로그인은 의도적으로 유지합니다. 필요하면 `sudo raspi-config`로 자동 로그인을 끄고, 정확한 overlay 줄을 제거하거나 backup을 복원하세요.
 
 ## 설정과 안전 동작
 
-`config.example.toml`은 schema v2를 설명합니다. `hardware.pwm_gpio_bcm`과 `control.fan_endpoint_ids`는 각각 Fan 1/Fan 2 순서의 정확히 두 항목이어야 합니다. endpoint ID는 설정된 `[[dgx]]` ID를 가리켜야 하며, DGX 한 대면 같은 ID를 두 번 씁니다. 정상 곡선, hysteresis, startup boost, tach 기대값, duty, TUI 상태는 팬별로 독립적이고 곡선/최대 속도 제한만 공통입니다.
+`config.example.toml`은 schema v2의 기준입니다. `[[dgx]]`는 최대 두 개까지 설정할 수 있습니다. `control.fan_endpoint_ids`와 `hardware.pwm_gpio_bcm`는 Fan 1/Fan 2 순서의 정확히 두 항목이며, 한 DGX에 두 팬을 쓸 때는 endpoint ID를 반복합니다. 정상 곡선, tach 상태, duty, dashboard 상태는 팬별로 독립적이고 곡선과 최대 속도 제한만 공통입니다.
 
-`control.fallback_speed_percent`는 선택 항목이며 `0`부터 `100`까지의 정수만 허용하고, 기본값은 `100`입니다. `max_speed_percent`와는 독립적입니다. 첫 telemetry 읽기 전과 모든 `SAFETY OVERRIDE`(endpoint 실패, 매핑된 온도 없음, **어느** 설정 GPU든 비상 온도, fan stall, safety recovery temperature/dwell)에서 두 팬에 함께 적용할 duty를 정합니다. UI Off로도 이 안전 상태는 해제되지 않습니다. 이 값을 낮추면 비상·stall fallback 속도도 함께 낮아지므로 무인 운용 전 냉각과 tach 동작을 확인하세요. 하드웨어 setup/write/release 오류 시의 low-level full-speed recovery에는 영향을 주지 않습니다. 설정 파일 수정 뒤에는 앱을 재시작해야 하며 hot reload는 지원하지 않습니다. 기존 v1의 `pwm_gpio_bcm = 18`은 시작 시 거부됩니다. `version = 2`, `[18, 19]`, `fan_endpoint_ids`로 마이그레이션하세요.
+`control.fallback_speed_percent`의 기본값은 `100`이며 `max_speed_percent`와 독립적입니다. 첫 telemetry sample 전과 `SAFETY OVERRIDE`에서 두 팬에 함께 적용됩니다. 여기에는 실패하거나 stale한 온도 telemetry, 설정된 GPU 중 어느 하나의 비상 온도, fan stall, recovery dwell이 포함됩니다. UI Off는 safety를 해제하지 않습니다. 값을 낮추면 비상·stall 냉각도 낮아지므로 무인 운용 전 실기 검증이 필요하며, low-level PWM/GPIO 오류는 계속 full speed로 복구합니다.
 
-### DCGM 네트워크 재시도
-
-전역 선택 설정인 `[collection]`으로 잠깐의 네트워크 단절에서 최신 DCGM 샘플을 재시도하는 동안 유지할 수 있습니다.
+`[collection]`에서 짧은 DCGM 연결 장애의 재시도를 설정할 수 있습니다.
 
 ```toml
 [collection]
 interval_seconds = 2.0
 timeout_seconds = 1.5
 stale_after_seconds = 6.0
-retry_count = 3          # 최초 요청 뒤의 추가 시도 횟수
+retry_count = 3
 retry_delay_seconds = 10.0
 ```
 
-기존 v2 파일에서 두 키를 생략하면 호환성을 유지하며 `retry_count = 0`, `retry_delay_seconds = 10.0`이 적용됩니다. 한 주기는 최초 요청 1회와 `retry_count`만큼의 추가 시도로 구성되고, 시도 사이에는 고정 대기 시간이 있으며 각 요청에는 `timeout_seconds`가 각각 적용됩니다. DNS/연결/timeout 등을 포함한 전송 오류와 HTTP 408, 429, 5xx만 재시도합니다. 그 밖의 4xx, 잘못된 metrics, 사용 가능한 GPU 데이터가 없는 응답은 즉시 실패합니다.
+각 DGX는 독립적으로 수집됩니다. 캐시 telemetry는 `stale_after_seconds`까지만 사용할 수 있고 stale 또는 재시도 소진 DCGM 온도 데이터는 fallback을 작동시킵니다. DGX Spark는 `memory_source = "node-exporter"` 및 `node_exporter_url`로 endpoint 전체 `UMA MEM`을 표시할 수 있습니다. GPU 온도·사용률은 계속 DCGM이 필수이며 fan safety에도 DCGM telemetry만 사용됩니다. 주석 처리된 Spark 예시는 `config.example.toml`을 참조하세요.
 
-각 DGX는 독립적으로 수집하므로 한 endpoint의 재시도가 정상 endpoint 수집을 지연시키지 않습니다. 재시도 중에는 캐시 샘플도 `stale_after_seconds` 안에서만 사용할 수 있습니다. 샘플이 stale해지거나 모든 시도가 끝나면 그 endpoint는 즉시 비정상이 되고, 두 팬은 `control.fallback_speed_percent`(기본 100%)로 동작합니다. 다음 수집 주기에서 네트워크가 복구되면 정상 복구할 수 있습니다. Dashboard 배너는 `WAITING`, `RETRYING n/N`, `RETRYING · STALE`, `FAILED after N attempts`, 정상 상태를 구분하며, 재시도만으로 그래프 샘플이 중복 추가되지는 않습니다.
+`hardware.shutdown_mode`의 기본값은 `"full"`입니다. 처리 가능한 비정상 종료는 full duty를 명령합니다. 0% PWM에서 멈추는 것을 실기로 확인한 팬에서만 `"off"`를 사용하세요. 이는 TUI가 정상 종료할 때만 적용됩니다. SIGKILL과 전원 손실은 cleanup을 실행할 수 없어 마지막 duty가 유지될 수 있습니다.
 
-### node_exporter로 DGX Spark unified memory 표시
-
-GPU 온도·사용률에는 계속 DCGM이 필요하며, fan safety에도 DCGM telemetry만 사용합니다. DGX Spark는 CPU/GPU가 memory를 공유하므로 framebuffer metric이 없을 수 있습니다. 이 endpoint에만 일반적으로 port 9100의 node_exporter를 추가하고 다음처럼 opt-in 하세요.
-
-```toml
-[[dgx]]
-id = "spark"
-name = "DGX Spark"
-url = "http://192.168.1.10:9400/metrics" # DCGM
-memory_source = "node-exporter"
-node_exporter_url = "http://192.168.1.10:9100/metrics"
-```
-
-node_exporter는 `collector.meminfo`만 필요합니다. 앱은 label 없는 `node_memory_MemTotal_bytes`, `node_memory_MemAvailable_bytes`를 각각 정확히 하나씩 요구하며, `UMA MEM = MemTotal - MemAvailable`, 사용률은 `(MemTotal - MemAvailable) / MemTotal`로 계산합니다. swap은 포함하지 않습니다. `UMA MEM`은 GPU별 allocation이 아니라 endpoint 전체의 물리 shared memory입니다. DCGM에 여러 GPU가 있어도 node-exporter source의 `UMA MEM` graph는 DGX마다 하나만 표시됩니다. opt-in하지 않은 DCGM endpoint는 기존 GPU별 `MEM` graph를 유지하므로 두 DGX를 혼합해 사용할 수 있습니다.
-
-Pi 설정 전 필요한 exporter 값만 read-only로 확인하세요.
-
-```bash
-curl -fsS http://<DGX-IP>:9100/metrics | grep -E '^node_memory_(MemTotal|MemAvailable)_bytes'
-```
-
-node_exporter는 DCGM과 같은 timeout/retry/stale 설정을 쓰지만 독립적으로 수집합니다. node 실패, 잘못된 memory 값, stale sample은 `UMA MEM N/A`와 source별 dashboard warning만 표시하며, 정상 DCGM endpoint를 unsafe로 바꾸거나 fan fallback을 작동시키지 않습니다. 반대로 UMA memory가 정상이어도 DCGM 온도 실패는 기존처럼 fan fallback을 작동시킵니다. 이 프로젝트는 node_exporter를 원격 설치하거나 관리하지 않습니다.
-
-최대 두 DGX endpoint에서는 일반 DCGM endpoint와 Spark를 다음처럼 명시적으로 혼합할 수 있습니다.
-
-```toml
-[[dgx]]
-id = "dgx-1"
-name = "Discrete DGX"
-url = "http://192.168.1.10:9400/metrics"
-
-[[dgx]]
-id = "spark"
-name = "DGX Spark"
-url = "http://192.168.1.11:9400/metrics"
-memory_source = "node-exporter"
-node_exporter_url = "http://192.168.1.11:9100/metrics"
-
-[control]
-fan_endpoint_ids = ["dgx-1", "spark"]
-```
-
-`hardware.shutdown_mode`은 선택 항목이며 기본값은 `"full"`입니다. SIGTERM, 시작/초기화 실패, 앱 오류를 포함해 소프트웨어가 처리할 수 있는 비정상 release에서는 두 팬에 full duty를 명령합니다. 직결 Noctua NF-A6x25 5V PWM처럼 제조사 사양상 0% PWM에서 0 RPM임을 확인한 팬에서만 `shutdown_mode = "off"`를 설정하세요. Textual이 exit code 0으로 정상 반환한 경우에만 두 팬을 0% duty로 멈추고 PWM channel은 enabled 상태로 유지합니다. Textual 내부/비정상 종료, 예외, 0% 쓰기 실패, tach join timeout, GPIO release 실패는 두 channel을 full duty로 되돌립니다. SIGKILL과 전원 손실은 소프트웨어 cleanup을 실행할 수 없으므로, hardware 또는 전원 상태가 바뀔 때까지 마지막 PWM duty가 유지될 수 있습니다.
-
-DGX 두 대는 물리 공기 흐름 매핑을 명시적으로 고정합니다.
-
-```toml
-[control]
-fan_endpoint_ids = ["dgx-1", "dgx-2"] # Fan 1 -> DGX-1, Fan 2 -> DGX-2
-
-[hardware]
-pwm_gpio_bcm = [18, 19] # Fan 1 -> BCM18, Fan 2 -> BCM19
-```
-
-## Raspberry Pi 4 배선
-
-이 직결 안내는 **Noctua NF-A6x25 5V PWM 정확한 모델에만** 적용됩니다. 4선이라는 이유만으로 다른 팬에 적용하지 말고 해당 모델 데이터시트의 커넥터, 논리, tach, 전압, 전류를 별도로 확인하세요. 배선 전에는 전원을 제거하세요.
-
-| 기능 | NF-A6x25 선 / 핀* | Fan 1 | Fan 2 | Raspberry Pi 4 |
-| --- | --- | --- | --- | --- |
-| 접지 | black / pin 1 | black | black | Pi GND(예: 물리 6/9), 모든 전원 공통 GND |
-| 팬 전원 | yellow / pin 2 | yellow +5 V | yellow +5 V | 전원 여유가 확인된 Pi 물리 2/4 또는 정격 외부 5 V |
-| Tach / RPM | green / pin 3 | green → BCM23 / 물리 16 | green → BCM24 / 물리 18 | green tach 선은 분리 |
-| PWM 제어 | blue / pin 4 | blue → BCM18 / 물리 12(PWM0) | blue → BCM19 / 물리 35(PWM1) | 직접·독립 GPIO 연결 |
-
-\* 색/핀 매핑은 이 정확한 Noctua 모델에만 해당합니다.
-
-각 blue PWM 선을 GPIO에 직접 연결합니다. 이 모델에는 NPN/MOSFET, 레벨 시프터, 외부 PWM pull-up을 추가하지 말고 blue 선도 묶지 마세요. Noctua 입력은 3.3 V CMOS 논리를 허용합니다. 25 kHz non-inverted PWM 및 `pwm_inverted = false`를 사용하세요.
-
-### Tach, 전원, 공통 접지
-
-tach 선은 서로 합치지 마세요. NF-A6x25 green tach 출력은 open collector입니다:
-
-```text
-Fan 1 green tach ---------------- BCM23 / 물리 16
-Fan 2 green tach ---------------- BCM24 / 물리 18
-```
-
-앱은 open-collector tach 입력에 Pi 내부 3.3 V pull-up(`PUD_UP`)을 설정합니다. 즉 floating input이 아닌 기본 직결입니다. `pulses_per_revolution = [2, 2]`를 사용하세요. 긴/노이즈 배선에는 Noctua가 제시한 선택적 3.3 V 1 kΩ pull-up과 선택적 1 µF non-polar capacitor를 추가할 수 있습니다. tach를 5 V로 pull-up하면 안 됩니다.
-
-팬 한 개는 typical 0.187 A, maximum 0.26 A이고 두 개는 typical 0.374 A, maximum 0.52 A입니다. 물리 2/4는 하나의 Pi 5 V rail이므로 Pi/USB 부하와 합산해 전원·케이블·커넥터 여유를 확인하세요. 외부 5 V 팬 전원은 GND를 Pi와 공통으로 하되, Pi가 다른 전원으로 켜진 상태에서 +5 V를 Pi 물리 2/4에 되먹이지 마세요.
-
-### Linux PWM/libgpiod 소유권과 첫 가동
-
-이 backend는 pigpiod를 사용하지 않습니다. 커널 Linux PWM sysfs와 libgpiod falling-edge tach 입력(내부 pull-up)을 사용합니다. 클론 로컬 설치 스크립트는 Raspberry Pi 4만 지원하며, 현재 Raspberry Pi OS의 활성 boot 설정(대개 `/boot/firmware/config.txt`)에 overlay를 추가하고, 접근 helper를 설치한 뒤 재부팅합니다. PWM channel은 공유 자원이므로 analogue audio나 다른 PWM 소비자를 동시에 실행하지 마세요.
-
-```bash
-pinout
-./install.sh --reboot
-# Pi가 재부팅된 후:
-ls -l /sys/class/pwm/pwmchip0 /dev/gpiochip0
-./start.sh
-```
-
-설치 스크립트가 이 주석 없는 줄을 기록합니다. 설치 스크립트를 의도적으로 사용하지 않을 때만 수동으로 추가하세요.
-
-```ini
-dtoverlay=pwm-2chan,pin=18,pin2=19,func=2,func2=2
-```
-
-```toml
-[hardware]
-backend = "raspberry-pi"
-pwm_gpio_bcm = [18, 19]
-pwm_frequency_hz = 25000
-pwm_inverted = false
-tach_gpio_bcm = [23, 24]
-shutdown_mode = "off" # 선택: 정상 종료에서만, 기본값은 fail-safe "full"
-```
-
-설치 스크립트는 로그인 사용자를 `gpio` 그룹에 추가하고 PWM sysfs와 `/dev/gpiochip0` 접근만 허용하는 좁은 root 소유 helper를 설치합니다. 설치 후에는 `sudo .venv/bin/dgx-fan` 대신 `./start.sh`를 사용하세요. 팬은 한 개씩 가동하세요. 전원 없는 배선과 5 V/공통 GND를 확인한 뒤 Fan 1을 연결하고 약 25 kHz non-inverted duty, RPM, 곡선 반응을 실측한 다음 Fan 2를 추가하세요. endpoint 손실, tach 분리/stall, 정상/오류 종료를 모두 시험하세요. 기본 release는 full duty를 명령하고 PWM enabled 상태를 유지합니다. 명시적 `shutdown_mode = "off"`에서는 TUI 정상 종료가 0% duty를 명령하고 enabled 상태를 유지하지만, PWM/tach/GPIO 정리 중 오류는 full duty로 되돌립니다. 이 저장소는 pinmux·파형·강제 종료·부팅·물리 속도를 증명하지 않으므로 무인 운용 전 실기 측정이 필요합니다. 롤백은 `shutdown_mode = "off"`를 제거하거나 `"full"`로 바꿔 재시작하거나, 해당 커밋을 되돌리는 방법이며 배선 변경은 필요하지 않습니다.
-
-
-GPIO, 케이블, 커넥터, 전원이 뜨거워지거나, GPIO가 3.3 V보다 높은 전압을 보거나, 극성이 불확실하거나, 팬이 시작하지 않거나, 측정 전류가 전원/케이블 정격을 넘으면 즉시 전원을 제거하고 중지하세요. 이 프로젝트는 알 수 없는 팬, 조립된 회로, 실시간 DGX 데이터를 검증할 수 없습니다.
-
-### 전기 참고 자료
-
-- [Noctua microcontroller PWM/RPM 가이드](https://www.noctua.at/en/support/faqs/microcontroller-guide-pwm-setup-and-rpm-monitoring)
-- [Noctua NF-A6x25 5V PWM 사양](https://www.noctua.at/en/products/nf-a6x25-5v-pwm/specifications)
-- [Noctua PWM specifications white paper](https://cdn.noctua.at/media/Noctua_PWM_specifications_white_paper.pdf)
-- [Raspberry Pi 4 Model B 데이터시트 및 핀아웃](https://datasheets.raspberrypi.com/rpi4/raspberry-pi-4-datasheet.pdf)
-- [공식 Raspberry Pi firmware overlay README](https://github.com/raspberrypi/firmware/blob/master/boot/overlays/README)
-- [Linux PWM sysfs 문서](https://docs.kernel.org/driver-api/pwm.html)
-- [libgpiod Python bindings](https://libgpiod.readthedocs.io/)
-위 1차 자료는 명시된 Noctua 모델만 뒷받침하며, 조립 회로나 현재 release 동작을 실기 검증하지는 않습니다.
+`hardware.backend = "raspberry-pi"`를 선택하기 전 전원을 끄고 상세 [Raspberry Pi 배선 안내](docs/raspberry-pi-wiring.ko.md)를 따르세요. 이 직결 안내는 **Noctua NF-A6x25 5V PWM**에만 적용됩니다. 다른 4선 팬에는 해당 모델의 데이터시트와 실기 검증 없이 적용하지 마세요.
 
 ## MVP 한계
 
-영구 systemd unit 또는 restart daemon, filesystem Unix socket, 영구 `/etc` 설정, 설정 편집기, meatball 메뉴, GPU process table, native touch 지원, `uvx` 릴리스 패키지, 충돌 후 재시작 감독, 실제 하드웨어 검증은 아직 없습니다. 선택 가능한 tty1 콘솔 통합은 transient systemd unit을 사용하고 Raspberry Pi hardware 경로는 kernel abstract Unix socket을 사용하며, 모두 대상 Pi에서 별도 검증이 필요합니다.
+영구 restart daemon, 설정 편집기, meatball 메뉴, GPU process table, native touch 지원, `uvx` 릴리스 패키지, 실제 하드웨어 검증은 아직 없습니다. 선택적 tty1 통합은 transient systemd unit을 사용하며, boot, PWM 파형, RPM, fan fail-safe, 물리 디스플레이 동작은 대상 Pi에서 검증해야 합니다.
