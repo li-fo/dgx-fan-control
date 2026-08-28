@@ -352,7 +352,7 @@ case "\${1:-}" in
     "\$systemctl" stop "\$unit" >/dev/null 2>&1 || true
     wait_unloaded
     run_cleanup
-    exec "\$systemd_run" --quiet --collect --service-type=exec --unit=dgx-fan-display --property=TimeoutStopSec=10s --property=ExecStopPost="\$cleanup" "\$session"
+    exec "\$systemd_run" --quiet --collect --service-type=exec --unit=dgx-fan-display --property=KillSignal=SIGUSR1 --property=TimeoutStopSec=10s --property=ExecStopPost="\$cleanup" "\$session"
     ;;
   restart)
     [ "\$#" -eq 1 ] || exit 64
@@ -360,7 +360,7 @@ case "\${1:-}" in
     wait_unloaded
     run_cleanup
     "\$systemctl" reset-failed "\$unit" >/dev/null 2>&1 || true
-    exec "\$systemd_run" --quiet --collect --service-type=exec --unit=dgx-fan-display --property=TimeoutStopSec=10s --property=ExecStopPost="\$cleanup" "\$session"
+    exec "\$systemd_run" --quiet --collect --service-type=exec --unit=dgx-fan-display --property=KillSignal=SIGUSR1 --property=TimeoutStopSec=10s --property=ExecStopPost="\$cleanup" "\$session"
     ;;
   stop)
     [ "\$#" -eq 1 ] || exit 64

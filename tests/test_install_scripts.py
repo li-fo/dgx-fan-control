@@ -488,6 +488,7 @@ def test_display_bridge_uses_transient_no_force_tty8_and_no_restart_policy(tmp_p
     session = (sandbox / "usr/local/libexec/dgx-fan-display-session").read_text()
 
     assert "--collect --service-type=exec --unit=dgx-fan-display" in manager
+    assert manager.count("--property=KillSignal=SIGUSR1") == 2
     assert "Restart=" not in manager
     assert '"$openvt" -c 8 -s -w' in session
     assert "-c 8 -s -w -f" not in session
@@ -569,6 +570,7 @@ def test_fake_manager_refuses_active_and_orders_restart(tmp_path: Path) -> None:
     assert entries[2] == "systemctl show --property=LoadState --value dgx-fan-display.service"
     assert entries[3] == "systemctl reset-failed dgx-fan-display.service"
     assert "--property=TimeoutStopSec=10s" in entries[-1]
+    assert "--property=KillSignal=SIGUSR1" in entries[-1]
     assert "--property=ExecStopPost=" + str(sandbox / "usr/local/libexec/dgx-fan-display-cleanup") in entries[-1]
 
 

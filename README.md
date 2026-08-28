@@ -83,9 +83,7 @@ sudo journalctl -u dgx-fan-display.service --no-pager
 
 The transient process opens tty8 with `openvt -c 8 -s -w`, so the 1024x600 HDMI console continues
 after the SSH session ends. A keyboard connected to the Pi can exit the TUI cleanly with **Ctrl+Q**;
-the service's fixed `ExecStopPost` cleanup returns to the validated preceding virtual terminal and releases tty8. `./display.sh stop` or a system-manager stop is an abnormal
-termination: its bounded SIGTERM handler releases PWM through the existing fan fail-safe path (normally full duty), rather than
-the optional clean `shutdown_mode = "off"` path. Do not launch a second foreground `./start.sh` while
+the service's fixed `ExecStopPost` cleanup returns to the validated preceding virtual terminal and releases tty8. `./display.sh stop` and the stop phase of `restart` use the unit's dedicated clean-stop signal, so `shutdown_mode = "off"` stops the fans. Ordinary SIGTERM, exceptions, and forced termination remain abnormal and use the fail-safe release path (normally full duty). Do not launch a second foreground `./start.sh` while
 the display is active: the hardware-bound socket lock refuses the second owner and never kills the
 first. `uv run dgx-fan --config config.toml` and `uvx` remain foreground terminal commands.
 

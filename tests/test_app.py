@@ -209,6 +209,37 @@ def test_sigterm_releases_hardware_non_cleanly_and_restores_handler(
     assert signal.getsignal(signal.SIGTERM) is previous_handler
 
 
+def test_clean_display_stop_signal_releases_hardware_cleanly_and_restores_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    releases: list[bool] = []
+    previous_handler = signal.getsignal(signal.SIGUSR1)
+
+    class Hardware:
+        def release(self, *, normal_shutdown: bool = False) -> None:
+            releases.append(normal_shutdown)
+
+    class StoppedApp:
+        def __init__(self, config: object) -> None:
+            self.hardware = Hardware()
+
+        def run(self) -> None:
+            handler = signal.getsignal(signal.SIGUSR1)
+            assert callable(handler)
+            handler(signal.SIGUSR1, None)
+
+    monkeypatch.setattr(app_module, "load_config", lambda path: object())
+    monkeypatch.setattr(app_module, "DGXFanApp", StoppedApp)
+    monkeypatch.setattr(app_module, "_capture_terminal_state", lambda: None)
+
+    with pytest.raises(SystemExit) as exit_error:
+        main(["--config", "unused.toml"])
+
+    assert exit_error.value.code == 0
+    assert releases == [True]
+    assert signal.getsignal(signal.SIGUSR1) is previous_handler
+
+
 def test_closed_stdin_does_not_prevent_app_run(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[str] = []
 
