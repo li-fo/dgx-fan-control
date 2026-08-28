@@ -42,7 +42,7 @@ cp config.example.toml config.toml
 ./install.sh --reboot
 ```
 
-필요하면 먼저 [공식 uv 설치 안내](https://docs.astral.sh/uv/getting-started/installation/)를 따르세요. 설치 스크립트는 `uv sync --locked --extra raspberry-pi --no-dev`를 실행하고 clone-local 설정을 검증한 뒤 2채널 PWM overlay와 Raspberry Pi 4 tty1 콘솔 자동 로그인을 구성합니다. `config.toml`이 없으면 예시 파일을 만들고 중지하므로 편집 후 다시 실행하세요. `./install.sh`는 수동 재부팅용이고 `./install.sh --dry-run`은 예정 동작만 확인합니다.
+필요하면 먼저 [공식 uv 설치 안내](https://docs.astral.sh/uv/getting-started/installation/)를 따르세요. 설치 스크립트는 `uv sync --locked --extra raspberry-pi --no-dev`를 실행하고 clone-local 설정을 검증한 뒤 2채널 PWM overlay와 Raspberry Pi 4 tty1 콘솔 자동 로그인을 구성합니다. `config.toml`이 없으면 예시 파일을 만들고 중지하므로 편집 후 다시 실행하세요. `--reboot` 없이 `./install.sh`를 실행하면 설치 후 직접 재부팅할 수 있고, `./install.sh --dry-run`은 예정 동작만 확인합니다.
 
 앱은 root가 아닌 일반 사용자로 실행합니다. 설치 후 현재 터미널에서 실행하려면:
 
@@ -58,7 +58,7 @@ SSH에서 연결된 HDMI 디스플레이로 표시하려면:
 sudo journalctl -u dgx-fan-display.service --no-pager
 ```
 
-transient display 프로세스는 tty8에서 동작하므로 SSH가 끊겨도 유지됩니다. Pi에 연결된 키보드에서는 **Ctrl+Q**로 정상 종료할 수 있습니다. display가 실행 중일 때 두 번째 `./start.sh`를 실행하지 마세요. hardware-owner lock이 기존 앱을 멈추지 않고 두 번째 실행을 거부합니다. `uv run dgx-fan --config config.toml`과 `uvx`는 현재 터미널의 foreground 명령입니다.
+transient display 프로세스는 tty8에서 동작하므로 SSH가 끊겨도 유지됩니다. `shutdown_mode = "off"`에서는 **Ctrl+Q**, `./display.sh stop`, `./display.sh restart`의 stop 단계가 clean-stop 경로를 사용해 0% duty를 명령합니다. 처리 가능한 비정상 종료에는 full-duty fail-safe가 적용되고, SIGKILL과 전원 손실은 cleanup을 실행할 수 없어 마지막 duty가 유지될 수 있습니다. display가 실행 중일 때 두 번째 `./start.sh`를 실행하지 마세요. hardware-owner lock이 기존 앱을 멈추지 않고 두 번째 실행을 거부합니다. `uv run dgx-fan --config config.toml`과 `uvx`는 현재 터미널의 foreground 명령입니다.
 
 clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 

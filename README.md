@@ -42,7 +42,7 @@ cp config.example.toml config.toml
 ./install.sh --reboot
 ```
 
-Install `uv` first using the [official instructions](https://docs.astral.sh/uv/getting-started/installation/) if needed. The installer runs `uv sync --locked --extra raspberry-pi --no-dev`, validates the clone-local configuration, adds the dual-PWM overlay, and configures Raspberry Pi 4 tty1 console auto-login. If `config.toml` is absent, it creates a copy and stops so you can edit it. Use `./install.sh` to reboot manually or `./install.sh --dry-run` to inspect its action.
+Install `uv` first using the [official instructions](https://docs.astral.sh/uv/getting-started/installation/) if needed. The installer runs `uv sync --locked --extra raspberry-pi --no-dev`, validates the clone-local configuration, adds the dual-PWM overlay, and configures Raspberry Pi 4 tty1 console auto-login. If `config.toml` is absent, it creates a copy and stops so you can edit it. Run `./install.sh` without `--reboot` to install first and reboot manually afterward, or use `./install.sh --dry-run` to inspect its action.
 
 The app itself runs as the regular user, never as root. After installation, launch it in the current terminal with:
 
@@ -58,7 +58,7 @@ To place the TUI on the connected HDMI display from SSH:
 sudo journalctl -u dgx-fan-display.service --no-pager
 ```
 
-The transient display process runs on tty8 and continues after SSH disconnects. A keyboard attached to the Pi can exit cleanly with **Ctrl+Q**. Do not start a second foreground `./start.sh` while the display is active; the hardware-owner lock rejects it without stopping the running app. `uv run dgx-fan --config config.toml` and `uvx` remain foreground terminal commands.
+The transient display process runs on tty8 and continues after SSH disconnects. With `shutdown_mode = "off"`, **Ctrl+Q**, `./display.sh stop`, and the stop phase of `./display.sh restart` use the clean-stop path and command 0% duty. Handled abnormal termination uses the full-duty fail-safe; SIGKILL and power loss cannot run cleanup and may preserve the last duty. Do not start a second foreground `./start.sh` while the display is active; the hardware-owner lock rejects it without stopping the running app. `uv run dgx-fan --config config.toml` and `uvx` remain foreground terminal commands.
 
 Remove only this project's integration while retaining the clone and configuration:
 
