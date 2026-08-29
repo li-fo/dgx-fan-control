@@ -248,6 +248,15 @@ class FanGauge(Static):
 
 class FanAppUI(Static):
     DEFAULT_CSS = """
+    #dashboard-status-row { height: 1; }
+    #error-banner {
+        width: 1fr;
+        height: 1;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }
+    #dashboard-fan-1-rpm, #dashboard-fan-2-rpm { width: 15; height: 1; }
+    #dashboard-fan-separator { width: 3; height: 1; }
     #fan-top-row { height: 5; }
     #fan-status { width: 1fr; height: 5; border: round $primary; }
     #power-toggle, #fan-settings { width: 15; height: 3; }
@@ -288,7 +297,11 @@ class FanAppUI(Static):
         yield Header()
         with TabbedContent(initial="dashboard"):
             with TabPane("DGX Dashboard", id="dashboard"):
-                yield Static("Waiting for DCGM metrics…", id="error-banner", markup=False)
+                with Horizontal(id="dashboard-status-row"):
+                    yield Static("Waiting for DCGM metrics…", id="error-banner", markup=False)
+                    yield Static("Fan 1: N/A", id="dashboard-fan-1-rpm", markup=False)
+                    yield Static(" | ", id="dashboard-fan-separator", markup=False)
+                    yield Static("Fan 2: N/A", id="dashboard-fan-2-rpm", markup=False)
                 yield Static(id="dashboard-warning")
                 yield VerticalScroll(id="dashboard-scroll")
             with TabPane("Fan Control", id="fan-control"), Vertical():
@@ -353,9 +366,16 @@ class FanAppUI(Static):
                 else:
                     memory_status = "WAITING"
                 errors.append(f"{name}: UMA MEM {memory_status} (sample age: {memory_age})")
+        status_message = " | ".join(errors) if errors else "All configured DGX endpoints are healthy."
         self.query_one("#error-banner", Static).update(
-            " | ".join(errors) if errors else "All configured DGX endpoints are healthy."
+            Text(status_message, no_wrap=True, overflow="ellipsis")
         )
+        for number in (1, 2):
+            rpm = snapshot.fans[number - 1].rpm
+            rpm_text = "N/A" if rpm is None else f"{rpm:.0f} RPM"
+            self.query_one(f"#dashboard-fan-{number}-rpm", Static).update(
+                f"Fan {number}: {rpm_text}"
+            )
         signature = tuple(
             (
                 endpoint.endpoint_id,

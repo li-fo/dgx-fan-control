@@ -6,7 +6,7 @@ from typing import Literal
 import pytest
 from rich.cells import cell_len
 from textual.app import App, ComposeResult
-from textual.containers import VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Static, TabbedContent
 
 from dgx_fan.app import DGXFanApp
@@ -283,6 +283,87 @@ def _contained_in(parent: Static, child: Static) -> bool:
         and child.region.right <= parent.region.right
         and child.region.bottom <= parent.region.bottom
     )
+
+
+def test_dashboard_status_row_shows_live_fan_rpm_without_chart_redraw(monkeypatch) -> None:
+    """Fan tach refreshes remain independent from revision-gated chart rendering."""
+    app = _DashboardApp()
+    endpoint = EndpointSnapshot(
+        "one", "One", False, 1, error="poll failed", retry_count=3, failed_attempts=4, sample_revision=1
+    )
+    initial = _fan_snapshot(
+        20,
+        "curve",
+        "AUTO ON",
+        40,
+        0,
+        (FanReading(1234, "RUNNING"), FanReading(None, "NO TACH")),
+        (endpoint,),
+    )
+    refreshed = _fan_snapshot(
+        20,
+        "curve",
+        "AUTO ON",
+        40,
+        0,
+        (FanReading(1500, "RUNNING"), FanReading(900, "RUNNING")),
+        (endpoint,),
+    )
+
+    async def exercise() -> None:
+        async with app.run_test(size=(79, 24)) as pilot:
+            ui = app.query_one(FanAppUI)
+            row = app.query_one("#dashboard-status-row", Horizontal)
+            banner = app.query_one("#error-banner", Static)
+            fan_one = app.query_one("#dashboard-fan-1-rpm", Static)
+            separator = app.query_one("#dashboard-fan-separator", Static)
+            fan_two = app.query_one("#dashboard-fan-2-rpm", Static)
+            assert [child.id for child in row.children] == [
+                "error-banner",
+                "dashboard-fan-1-rpm",
+                "dashboard-fan-separator",
+                "dashboard-fan-2-rpm",
+            ]
+            assert banner.render().plain == "Waiting for DCGM metrics…"
+            assert fan_one.render().plain == "Fan 1: N/A"
+            assert separator.render().plain == " | "
+            assert fan_two.render().plain == "Fan 2: N/A"
+
+            renders: list[float] = []
+            original = ui._render_dashboard
+
+            def traced(snapshot: ControlSnapshot, now: float) -> None:
+                renders.append(now)
+                original(snapshot, now)
+
+            monkeypatch.setattr(ui, "_render_dashboard", traced)
+            ui.update_snapshot(initial, 1)
+            await pilot.pause()
+            assert renders == [1]
+            assert "One: FAILED after 4 attempts: poll failed (sample age: 1.0s)" in banner.render().plain
+            assert fan_one.render().plain == "Fan 1: 1234 RPM"
+            assert fan_two.render().plain == "Fan 2: N/A"
+            assert row.region.height == 1
+            assert row.region.right <= app.screen.region.right
+            assert all(widget.region.y == row.region.y for widget in (banner, fan_one, separator, fan_two))
+            assert banner.region.right <= fan_one.region.x <= separator.region.x <= fan_two.region.x
+            assert all(_contained_in(row, widget) for widget in (banner, fan_one, separator, fan_two))
+
+            ui.update_snapshot(refreshed, 1.25)
+            assert renders == [1]
+            assert fan_one.render().plain == "Fan 1: 1500 RPM"
+            assert fan_two.render().plain == "Fan 2: 900 RPM"
+            assert len(ui.history.points) == 0
+
+            for width in (100, 79):
+                await pilot.resize_terminal(width, 24)
+                await pilot.pause()
+                assert row.region.height == 1
+                assert row.region.right <= app.screen.region.right
+                assert all(_contained_in(row, widget) for widget in (banner, fan_one, separator, fan_two))
+                assert banner.region.right <= fan_one.region.x <= separator.region.x <= fan_two.region.x
+
+    asyncio.run(exercise())
 
 
 def _assert_complete_fan_panel_borders(*widgets: Static) -> None:
