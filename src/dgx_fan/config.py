@@ -74,7 +74,7 @@ class DashboardColors:
 
 @dataclass(frozen=True)
 class WebConfig:
-    """Optional, local-only browser monitor transport settings."""
+    """Optional browser monitor transport settings for loopback or a trusted LAN."""
 
     enabled: bool = False
     host: str = "127.0.0.1"
@@ -180,8 +180,10 @@ def _web_config(raw: dict[str, object], config_path: Path) -> WebConfig:
         address = ip_address(host)
     except ValueError as error:
         raise ConfigError("web.host must be a numeric IP address") from error
-    if not address.is_loopback:
-        raise ConfigError("web.host must be an IPv4 or IPv6 loopback address for this MVP")
+    if not address.is_loopback and host != "0.0.0.0":
+        raise ConfigError(
+            "web.host must be an IPv4 or IPv6 loopback address, or exactly 0.0.0.0 for a trusted LAN"
+        )
     port = _integer(web.get("port", 8000), "web.port", minimum=1, maximum=65535)
     socket_raw = web.get("socket_path")
     if socket_raw is None:

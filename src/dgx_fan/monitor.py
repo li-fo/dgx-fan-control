@@ -45,6 +45,24 @@ class MonitorState:
     transport_error: str | None = None
 
 
+@dataclass(frozen=True)
+class _MonitorInput:
+    """An immutable controller-state hand-off to the serializer worker."""
+
+    generation: int
+    snapshot: ControlSnapshot
+    captured_at: float
+
+
+@dataclass(frozen=True)
+class _MonitorFrame:
+    """One complete wire frame whose identity and bytes are inseparable."""
+
+    generation: int
+    revision: int
+    encoded: bytes
+
+
 def _memory_to_wire(memory: MemoryStat | None) -> dict[str, float] | None:
     if memory is None:
         return None
@@ -300,15 +318,17 @@ class MonitorPublisher:
     def __init__(self, socket_path: Path, collection_interval_seconds: float = MIN_PUBLISH_INTERVAL_SECONDS) -> None:
         self.socket_path = socket_path
         self._server: asyncio.AbstractServer | None = None
-        self._latest: bytes | None = None
-        self._revision = 0
+        self._frame: _MonitorFrame | None = None
+        self._next_revision = 0
+        self._accepted_generation = 0
+        self._processed_generation = 0
         self._source_id = uuid.uuid4().hex
         self._clients: set[asyncio.StreamWriter] = set()
         self._publish_interval_seconds = max(MIN_PUBLISH_INTERVAL_SECONDS, collection_interval_seconds)
         self._next_publish_at = float("-inf")
         self._history = DashboardHistory(collection_interval_seconds)
-        self._pending: tuple[ControlSnapshot, float] | None = None
-        self._latest_input: tuple[ControlSnapshot, float] | None = None
+        self._pending: _MonitorInput | None = None
+        self._latest_input: _MonitorInput | None = None
         self._work_event = asyncio.Event()
         self._worker: asyncio.Task[None] | None = None
         self._closing = False
@@ -325,7 +345,10 @@ class MonitorPublisher:
         if now < self._next_publish_at:
             return False
         self._next_publish_at = now + self._publish_interval_seconds
-        self._pending = (snapshot, now)
+        self._accepted_generation += 1
+        item = _MonitorInput(self._accepted_generation, snapshot, now)
+        self._latest_input = item
+        self._pending = item
         self._work_event.set()
         return True
 
@@ -340,35 +363,53 @@ class MonitorPublisher:
             self._pending = None
             if item is None:
                 continue
-            self._latest_input = item
-            snapshot, now = item
+            # Revisions belong to the event loop.  The worker receives the
+            # proposed revision as immutable input and cannot advance it.
+            proposed_revision = self._next_revision + 1
             # With no viewers retain only history; JSON is deferred until a
             # client requests hydration.  This makes idle publication cheap.
             encode = bool(self._clients)
-            result = await asyncio.to_thread(self._build_frame, snapshot, now, encode)
-            if result is not None:
-                self._latest = result
+            result = await asyncio.to_thread(self._build_frame, item, proposed_revision, encode)
+            self._processed_generation = max(self._processed_generation, item.generation)
+            # A newer accepted input can arrive while JSON is being encoded.
+            # Never expose that older candidate as the current replacement
+            # frame: a client must receive a generation and its exact bytes.
+            if result is not None and result.generation == self._accepted_generation:
+                self._next_revision = result.revision
+                self._frame = result
 
-    def _build_frame(self, snapshot: ControlSnapshot, now: float, encode: bool) -> bytes | None:
-        for endpoint in snapshot.endpoint_snapshots:
+    def _build_frame(
+        self, item: _MonitorInput, revision: int, encode: bool
+    ) -> _MonitorFrame | None:
+        """Build a candidate using publisher-private history off the event loop."""
+        for endpoint in item.snapshot.endpoint_snapshots:
             self._history.append(
                 endpoint.endpoint_id,
                 endpoint.sample_revision,
                 endpoint.gpus,
-                now,
+                item.captured_at,
                 endpoint.memory_source,
                 endpoint.uma_memory,
                 endpoint.memory_sample_revision,
             )
         if not encode:
             return None
-        self._revision += 1
         try:
-            return encode_state(MonitorState(self._source_id, self._revision, now, snapshot, self._history))
-        except (MonitorProtocolError, ValueError) as error:
-            return encode_state(
-                MonitorState(self._source_id, self._revision, now, None, None, f"PUBLISH ERROR: {type(error).__name__}")
+            encoded = encode_state(
+                MonitorState(self._source_id, revision, item.captured_at, item.snapshot, self._history)
             )
+        except (MonitorProtocolError, ValueError) as error:
+            encoded = encode_state(
+                MonitorState(
+                    self._source_id,
+                    revision,
+                    item.captured_at,
+                    None,
+                    None,
+                    f"PUBLISH ERROR: {type(error).__name__}",
+                )
+            )
+        return _MonitorFrame(item.generation, revision, encoded)
 
     async def close(self) -> None:
         for writer in tuple(self._clients):
@@ -410,18 +451,16 @@ class MonitorPublisher:
     async def _serve_client(
         self, _reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        sent_revision = -1
+        sent_generation = -1
         self._clients.add(writer)
-        if self._latest is None and self._latest_input is not None:
-            self._pending = self._latest_input
-            self._work_event.set()
+        self._request_hydration()
         try:
             while True:
-                latest = self._latest
-                if latest is not None and sent_revision != self._revision:
-                    writer.write(latest)
+                frame = self._frame
+                if frame is not None and frame.generation > sent_generation:
+                    writer.write(frame.encoded)
                     await writer.drain()
-                    sent_revision = self._revision
+                    sent_generation = frame.generation
                 if _reader.at_eof():
                     return
                 await asyncio.sleep(0.25)
@@ -434,6 +473,19 @@ class MonitorPublisher:
                 await writer.wait_closed()
             except ConnectionError:
                 pass
+
+    def _request_hydration(self) -> None:
+        """Request the newest state without replacing newer queued input."""
+        item = self._latest_input
+        if item is None:
+            return
+        frame = self._frame
+        if frame is not None and frame.generation >= item.generation:
+            return
+        pending = self._pending
+        if pending is None or pending.generation <= item.generation:
+            self._pending = item
+        self._work_event.set()
 
 
 def _mapping(value: object, name: str) -> Mapping[str, object]:

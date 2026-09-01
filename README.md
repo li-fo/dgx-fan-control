@@ -73,7 +73,7 @@ Enable it in `config.toml`, then restart the primary controller so it creates th
 ```toml
 [web]
 enabled = true
-host = "127.0.0.1"
+host = "0.0.0.0" # Trusted private LAN; keep 127.0.0.1 for local-only access.
 port = 8000
 ```
 
@@ -86,7 +86,7 @@ Start it independently from the display process:
 ./web.sh stop
 ```
 
-`web.sh` creates a transient `systemd --user` service, so it is not installed or auto-started by `install.sh`. It normally persists after an SSH disconnect while the Raspberry Pi's console auto-login user session remains active. If you operate without that session, enable user lingering once (`sudo loginctl enable-linger "$USER"`) before relying on an SSH-started browser service. The MVP accepts only loopback `web.host` values, so use `http://127.0.0.1:8000` locally or an SSH tunnel such as `ssh -L 8000:127.0.0.1:8000 <pi>`. For remote network access, place an authenticated reverse proxy on the Pi's local endpoint; do not expose this unauthenticated renderer directly to the Internet.
+`web.sh` creates a transient `systemd --user` service, so it is not installed or auto-started by `install.sh`. It normally persists after an SSH disconnect while the Raspberry Pi's console auto-login user session remains active. If you operate without that session, enable user lingering once (`sudo loginctl enable-linger "$USER"`) before relying on an SSH-started browser service. The default `web.host = "127.0.0.1"` is local-only and works with an SSH tunnel such as `ssh -L 8000:127.0.0.1:8000 <pi>`. For a trusted internal LAN, explicitly set `web.host = "0.0.0.0"`, restart the primary controller, then browse to `http://<current-pi-ip>:8000` (for example `http://192.168.1.7:8000`). The wildcard follows the Pi across DHCP and `192.168.0.0/24`/`192.168.1.0/24` subnet changes; it does not authenticate users or filter client addresses. Do not port-forward this port or open it through a WAN firewall. Use loopback plus an SSH tunnel or an authenticated reverse proxy for an untrusted network or Internet access.
 
 Remove only this project's integration while retaining the clone and configuration:
 
@@ -118,7 +118,7 @@ Uninstall stops its transient display unit before removing managed helpers, but 
 | Field | Meaning and validation |
 | --- | --- |
 | `web.enabled` | Optional boolean; defaults to `false`. When true, the primary controller publishes its bounded read-only monitor state. Restart the primary app after changing it. |
-| `web.host` | Optional numeric IPv4 or IPv6 **loopback** address; defaults to `127.0.0.1`. `localhost`, wildcard, private-LAN, and public addresses are rejected. Use an SSH tunnel or authenticated local reverse proxy for remote access. |
+| `web.host` | Optional numeric loopback address; defaults to `127.0.0.1`. Exactly `0.0.0.0` is also allowed as an explicit, unauthenticated trusted-LAN bind; browse `http://<current-pi-ip>:8000`. CIDR strings, hostnames, IPv6 wildcard, and unicast/multicast/link-local/reserved addresses are rejected. Do not port-forward or open this listener to WAN. |
 | `web.port` | Optional integer `1..65535`; defaults to `8000`. |
 | `web.socket_path` | Optional absolute Unix-socket path. Defaults to `.dgx-fan-monitor.sock` beside the configuration file. The socket is same-user mode `0600`, command-free, and removed when the primary app exits. |
 

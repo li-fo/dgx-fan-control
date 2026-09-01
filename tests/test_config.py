@@ -95,13 +95,21 @@ socket_path = "/tmp/dgx-fan-monitor.sock"
     assert str(web.socket_path) == "/tmp/dgx-fan-monitor.sock"
 
 
+def test_loads_explicit_trusted_lan_wildcard_web_monitor_setting(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config() + '\n[web]\nenabled = true\nhost = "0.0.0.0"\n')
+    assert load_config(path).web.host == "0.0.0.0"
+
+
 @pytest.mark.parametrize(
     ("extra", "match"),
     [
         ('enabled = "yes"', r"web\.enabled"),
         ('host = "localhost"', r"web\.host"),
-        ('host = "0.0.0.0"', r"web\.host"),
+        ('host = "192.168.0.0/24"', r"web\.host"),
         ('host = "192.168.1.20"', r"web\.host"),
+        ('host = "::"', r"web\.host"),
+        ('host = "fe80::1"', r"web\.host"),
         ('host = "127.0.0.1"\nport = 0', r"web\.port"),
         ('socket_path = "relative.sock"', r"web\.socket_path"),
         ('unknown = true', r"web contains unknown key"),

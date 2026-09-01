@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+import threading
 
 import pytest
 
@@ -184,3 +185,75 @@ def test_monitor_publisher_publish_does_not_encode_on_caller_path(
         lambda _state: (_ for _ in ()).throw(AssertionError("caller encoded")),
     )
     assert publisher.publish(state.snapshot, 10.0) is True
+
+
+def test_monitor_publisher_installs_encoded_frame_atomically_after_delayed_worker(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An old encoder result must never be sent with a newer frame identity."""
+
+    async def exercise() -> None:
+        publisher = MonitorPublisher(tmp_path / "monitor.sock")
+        entered = threading.Event()
+        release = threading.Event()
+        original = publisher._build_frame
+
+        def delayed(item, revision, encode):
+            if item.generation == 1:
+                entered.set()
+                assert release.wait(timeout=2)
+            return original(item, revision, encode)
+
+        monkeypatch.setattr(publisher, "_build_frame", delayed)
+        await publisher.start()
+        reader, writer = await asyncio.open_unix_connection(str(publisher.socket_path))
+        try:
+            assert publisher.publish(_state(1).snapshot, 100) is True
+            assert await asyncio.to_thread(entered.wait, 1)
+            assert publisher.publish(_state(2).snapshot, 101) is True
+            release.set()
+            state = decode_state(await asyncio.wait_for(reader.readline(), timeout=2), 2)
+            assert state.revision == 1
+            assert state.snapshot is not None
+            assert state.snapshot.endpoint_snapshots[0].sample_revision == 2
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(reader.readline(), timeout=0.35)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            await publisher.close()
+
+    asyncio.run(exercise())
+
+
+def test_monitor_publisher_reconnect_hydrates_newest_pending_input_after_idle(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client joining after an idle interval cannot replace newer queued work."""
+
+    async def exercise() -> None:
+        publisher = MonitorPublisher(tmp_path / "monitor.sock")
+        await publisher.start()
+        try:
+            assert publisher.publish(_state(1).snapshot, 100) is True
+            for _ in range(40):
+                if publisher._processed_generation == 1:
+                    break
+                await asyncio.sleep(0.025)
+            assert publisher._processed_generation == 1
+            # No clients meant the first input updated private history but did
+            # not create a wire frame. Publish a newer value before hydration.
+            assert publisher.publish(_state(2).snapshot, 101) is True
+            reader, writer = await asyncio.open_unix_connection(str(publisher.socket_path))
+            try:
+                state = decode_state(await asyncio.wait_for(reader.readline(), timeout=2), 2)
+                assert state.snapshot is not None
+                assert state.snapshot.endpoint_snapshots[0].sample_revision == 2
+                assert state.revision == 1
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        finally:
+            await publisher.close()
+
+    asyncio.run(exercise())

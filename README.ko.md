@@ -73,7 +73,7 @@ transient display 프로세스는 tty8에서 동작하므로 SSH가 끊겨도 �
 ```toml
 [web]
 enabled = true
-host = "127.0.0.1"
+host = "0.0.0.0" # 신뢰된 내부 LAN; local-only면 127.0.0.1을 유지합니다.
 port = 8000
 ```
 
@@ -86,7 +86,7 @@ display 프로세스와 독립적으로 실행합니다.
 ./web.sh stop
 ```
 
-`web.sh`는 transient `systemd --user` 서비스를 만들며, `install.sh`가 설치 또는 자동 시작하지 않습니다. Raspberry Pi의 console auto-login 사용자 세션이 활성 상태라면 일반적으로 SSH 연결이 끊겨도 계속 실행됩니다. 해당 세션 없이 SSH에서 시작해 지속 실행하려면 먼저 한 번 `sudo loginctl enable-linger "$USER"`를 실행하세요. MVP에서는 loopback `web.host`만 허용하므로 로컬에서는 `http://127.0.0.1:8000`을 사용하고, 원격에서는 `ssh -L 8000:127.0.0.1:8000 <pi>`처럼 SSH tunnel을 사용하세요. 원격 네트워크 접근에는 Pi의 local endpoint 앞에 인증된 reverse proxy를 두고, 인증되지 않은 renderer를 인터넷에 직접 노출하지 마세요.
+`web.sh`는 transient `systemd --user` 서비스를 만들며, `install.sh`가 설치 또는 자동 시작하지 않습니다. Raspberry Pi의 console auto-login 사용자 세션이 활성 상태라면 일반적으로 SSH 연결이 끊겨도 계속 실행됩니다. 해당 세션 없이 SSH에서 시작해 지속 실행하려면 먼저 한 번 `sudo loginctl enable-linger "$USER"`를 실행하세요. 기본 `web.host = "127.0.0.1"`은 local-only이며 `ssh -L 8000:127.0.0.1:8000 <pi>` 같은 SSH tunnel과 함께 사용할 수 있습니다. 신뢰된 내부 LAN에서 직접 접속하려면 `web.host = "0.0.0.0"`으로 명시한 뒤 primary controller를 재시작하고 `http://<현재-Pi-IP>:8000`(예: `http://192.168.1.7:8000`)으로 여세요. wildcard bind는 DHCP 및 `192.168.0.0/24`/`192.168.1.0/24` subnet 변경에도 그대로 동작하지만, 사용자 인증이나 client IP 필터를 제공하지 않습니다. 이 port를 port-forward하거나 WAN firewall로 열지 마세요. 신뢰할 수 없는 네트워크나 인터넷 접근에는 loopback+SSH tunnel 또는 인증된 reverse proxy를 사용하세요.
 
 clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 
@@ -118,7 +118,7 @@ clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 | 항목 | 의미와 검증 조건 |
 | --- | --- |
 | `web.enabled` | 선택 boolean이며 기본값은 `false`입니다. `true`이면 primary controller가 제한된 읽기 전용 monitor state를 발행합니다. 변경 후 primary 앱을 재시작하세요. |
-| `web.host` | 선택 숫자 IPv4 또는 IPv6 **loopback** 주소이며 기본값은 `127.0.0.1`입니다. `localhost`, wildcard, private-LAN, public 주소는 거부됩니다. 원격 접근에는 SSH tunnel 또는 인증된 local reverse proxy를 사용하세요. |
+| `web.host` | 선택 숫자 loopback 주소이며 기본값은 `127.0.0.1`입니다. 정확히 `0.0.0.0`만 인증 없는 신뢰된 LAN bind로 추가 허용되며 `http://<현재-Pi-IP>:8000`으로 접속합니다. CIDR 문자열, hostname, IPv6 wildcard, unicast/multicast/link-local/reserved 주소는 거부됩니다. 이 listener를 port-forward하거나 WAN에 열지 마세요. |
 | `web.port` | 선택 정수 `1..65535`이며 기본값은 `8000`입니다. |
 | `web.socket_path` | 선택 absolute Unix socket 경로입니다. 기본값은 설정 파일 옆의 `.dgx-fan-monitor.sock`입니다. socket은 같은 사용자만 접근할 수 있도록 mode `0600`이며, command를 받지 않고 primary 앱 종료 시 제거됩니다. |
 

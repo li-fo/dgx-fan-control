@@ -155,18 +155,36 @@ def test_textual_serve_app_service_receives_monitor_first_frame(tmp_path: Path) 
             close=close,
             download_manager=DownloadManager(),
         )
-        try:
-            await service.start(100, 30)
-            for _ in range(80):
-                if b"DGX Dashboard" in b"".join(packets):
-                    break
+        async def wait_for_first_frame() -> None:
+            while b"DGX Dashboard" not in b"".join(packets):
                 await asyncio.sleep(0.05)
+
+        async def stop_owned_service() -> None:
+            stop_task = asyncio.create_task(service.stop())
+            try:
+                await asyncio.wait_for(asyncio.shield(stop_task), timeout=4)
+                return
+            except TimeoutError:
+                process = service._process
+                assert process is not None
+                if process.returncode is None:
+                    process.terminate()
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=2)
+                    except TimeoutError:
+                        process.kill()
+                        await asyncio.wait_for(process.wait(), timeout=2)
+                await asyncio.wait_for(stop_task, timeout=2)
+
+        try:
+            await asyncio.wait_for(service.start(100, 30), timeout=4)
+            await asyncio.wait_for(wait_for_first_frame(), timeout=4)
             assert packets, "textual-serve did not receive a first monitor frame"
             rendered = b"".join(packets)
             assert b"DGX Dashboard" in rendered
             assert b"Fan Control" in rendered
             assert b"READ ONLY" in rendered
         finally:
-            await service.stop()
+            await stop_owned_service()
 
     asyncio.run(exercise())
