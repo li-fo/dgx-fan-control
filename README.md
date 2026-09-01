@@ -4,6 +4,10 @@
 
 `dgx-fan` is a Python Textual application for a Raspberry Pi 4. It reads GPU data from up to two DCGM exporter endpoints and independently drives two 4-wire PWM fans. The dashboard shows GPU memory, utilisation, and temperature, plus each fan's mapped DGX, duty, RPM, and state. DGX Spark endpoints can optionally use node_exporter for host unified-memory occupancy.
 
+![DGX Fan Control 7inch LCE](./images/dgx-fan-control.webp)
+
+&nbsp;
+
 ## Run locally
 
 Use Python 3.11+ and install the development environment:
