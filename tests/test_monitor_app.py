@@ -151,6 +151,71 @@ def test_web_launcher_is_valid_shell_and_uses_user_transient_service() -> None:
     assert "display.sh" not in source and "start.sh" not in source
 
 
+def test_web_launcher_stop_treats_only_collected_unit_absence_as_success(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    script = project / "web.sh"
+    script.write_text(Path("web.sh").read_text())
+    script.chmod(0o755)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$2\" >> \"$DGX_TEST_WEB_LOG\"\n"
+        "case \"$2\" in\n"
+        "  show) printf '%s\\n' \"${DGX_TEST_LOAD_STATE:-not-found}\"; exit \"${DGX_TEST_SHOW_STATUS:-0}\";;\n"
+        "  stop) exit \"${DGX_TEST_STOP_STATUS:-0}\";;\n"
+        "esac\n"
+    )
+    systemctl.chmod(0o755)
+    command_log = tmp_path / "systemctl.log"
+    environment = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}", "DGX_TEST_WEB_LOG": str(command_log)}
+
+    absent = subprocess.run(
+        ["bash", str(script), "stop"], cwd=project, env=environment, text=True, capture_output=True, check=False
+    )
+    assert absent.returncode == 0, absent.stderr
+    assert command_log.read_text().splitlines() == ["show"]
+
+    command_log.unlink()
+    stopped = subprocess.run(
+        ["bash", str(script), "stop"],
+        cwd=project,
+        env={**environment, "DGX_TEST_LOAD_STATE": "loaded"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert stopped.returncode == 0, stopped.stderr
+    assert command_log.read_text().splitlines() == ["show", "stop"]
+
+    command_log.unlink()
+    show_failure = subprocess.run(
+        ["bash", str(script), "stop"],
+        cwd=project,
+        env={**environment, "DGX_TEST_SHOW_STATUS": "1"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert show_failure.returncode == 1
+    assert "could not determine browser monitor service state" in show_failure.stderr
+    assert command_log.read_text().splitlines() == ["show"]
+
+    command_log.unlink()
+    stop_failure = subprocess.run(
+        ["bash", str(script), "stop"],
+        cwd=project,
+        env={**environment, "DGX_TEST_LOAD_STATE": "loaded", "DGX_TEST_STOP_STATUS": "5"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert stop_failure.returncode == 5
+    assert command_log.read_text().splitlines() == ["show", "stop"]
+
+
 def test_web_launcher_prints_configured_access_urls_only_after_service_start(tmp_path: Path) -> None:
     """The launcher reports browser-facing URLs without changing service arguments."""
 

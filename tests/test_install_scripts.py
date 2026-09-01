@@ -111,6 +111,60 @@ def test_interactive_launcher_terminal_failure_stops_only_its_web_service(tmp_pa
     assert command_log.read_text().splitlines() == ["web.sh start", "start.sh ", "web.sh stop"]
 
 
+def test_interactive_launcher_stop_is_non_interactive_and_orders_web_before_display(tmp_path: Path) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+    (launcher.parent / "start.sh").unlink()
+
+    result = _run_launcher(launcher, command_log, "", "stop")
+
+    assert result.returncode == 0, result.stderr
+    assert command_log.read_text().splitlines() == ["web.sh stop", "display.sh stop"]
+
+
+def test_interactive_launcher_stop_attempts_both_and_returns_first_failure(tmp_path: Path) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+
+    web_failure = _run_launcher(
+        launcher,
+        command_log,
+        "",
+        "stop",
+        DGX_FAN_FAKE_WEB_STATUS="7",
+    )
+
+    assert web_failure.returncode == 7
+    assert "could not stop the web monitor" in web_failure.stderr
+    assert command_log.read_text().splitlines() == ["web.sh stop", "display.sh stop"]
+
+    command_log.unlink()
+    display_failure = _run_launcher(
+        launcher,
+        command_log,
+        "",
+        "stop",
+        DGX_FAN_FAKE_DISPLAY_STATUS="9",
+    )
+
+    assert display_failure.returncode == 9
+    assert "could not stop the HDMI display" in display_failure.stderr
+    assert command_log.read_text().splitlines() == ["web.sh stop", "display.sh stop"]
+
+    command_log.unlink()
+    both_failures = _run_launcher(
+        launcher,
+        command_log,
+        "",
+        "stop",
+        DGX_FAN_FAKE_WEB_STATUS="7",
+        DGX_FAN_FAKE_DISPLAY_STATUS="9",
+    )
+
+    assert both_failures.returncode == 7
+    assert "could not stop the web monitor" in both_failures.stderr
+    assert "could not stop the HDMI display" in both_failures.stderr
+    assert command_log.read_text().splitlines() == ["web.sh stop", "display.sh stop"]
+
+
 def test_interactive_launcher_hdmi_default_web_no_and_web_failure_keeps_display(tmp_path: Path) -> None:
     launcher, command_log = _launcher_clone(tmp_path)
 

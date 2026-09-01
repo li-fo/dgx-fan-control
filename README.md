@@ -56,6 +56,14 @@ The app itself runs as the regular user, never as root. For the usual interactiv
 
 Choose the current terminal or the attached HDMI display, then choose whether to start the optional read-only browser monitor. In current-terminal mode the app stays in the foreground; in HDMI mode the tty8 display service continues after SSH disconnects. A normal **Ctrl+Q** exit from the terminal leaves a web monitor selected by the launcher running. If the primary terminal startup fails, the launcher stops only a web monitor that it itself started.
 
+To stop the managed HDMI display and optional browser monitor together, without prompts:
+
+```bash
+./dgx-fan-control.sh stop
+```
+
+It stops the browser monitor first and always then attempts the HDMI display clean-stop path. This does not stop a foreground current-terminal TUI; return to that terminal and use **Ctrl+Q**.
+
 The direct commands remain available for automation and troubleshooting. Launch in the current terminal with:
 
 ```bash

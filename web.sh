@@ -28,8 +28,16 @@ case "$1" in
 esac
 command -v systemctl >/dev/null 2>&1 || fail 'systemctl is required'
 
-if [[ "$1" == stop || "$1" == status ]]; then
-    exec systemctl --user "$1" "$UNIT.service"
+if [[ "$1" == stop ]]; then
+    load_state=$(systemctl --user show --property=LoadState --value "$UNIT.service") ||
+        fail 'could not determine browser monitor service state'
+    # --collect removes a stopped transient unit.  Treat that expected absent
+    # state as an already-complete stop, but retain errors from real units.
+    [[ "$load_state" == not-found ]] && exit 0
+    exec systemctl --user stop "$UNIT.service"
+fi
+if [[ "$1" == status ]]; then
+    exec systemctl --user status "$UNIT.service"
 fi
 
 [[ -f "$CONFIG_PATH" ]] || fail "config not found: $CONFIG_PATH"

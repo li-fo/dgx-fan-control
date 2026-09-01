@@ -11,10 +11,15 @@ readonly WEB_SCRIPT="$PROJECT_ROOT/web.sh"
 usage() {
     cat <<'EOF'
 Usage: ./dgx-fan-control.sh
+       ./dgx-fan-control.sh stop
 
 Interactively starts the DGX Fan Controller in the current terminal or on the
 HDMI display, with an optional read-only browser monitor. Existing start.sh,
 display.sh, and web.sh commands remain available for direct operation.
+
+The stop command non-interactively stops the optional browser monitor first,
+then the managed HDMI display. A foreground current-terminal TUI remains
+owned by its terminal and must be closed with Ctrl+Q.
 EOF
 }
 
@@ -70,9 +75,38 @@ cleanup_started_web() {
     fi
 }
 
+stop_managed_components() {
+    local status=0 child_status
+    if "$WEB_SCRIPT" stop; then
+        :
+    else
+        child_status=$?
+        printf '%s\n' 'dgx-fan launcher: could not stop the web monitor' >&2
+        status=$child_status
+    fi
+    if "$DISPLAY_SCRIPT" stop; then
+        :
+    else
+        child_status=$?
+        printf '%s\n' 'dgx-fan launcher: could not stop the HDMI display' >&2
+        (( status == 0 )) && status=$child_status
+    fi
+    return "$status"
+}
+
 if [[ $# -eq 1 && ( "$1" == -h || "$1" == --help ) ]]; then
     usage
     exit 0
+fi
+if [[ $# -eq 1 && "$1" == stop ]]; then
+    for required_script in "$DISPLAY_SCRIPT" "$WEB_SCRIPT"; do
+        [[ -x "$required_script" ]] || {
+            printf 'dgx-fan launcher: required script is missing or not executable: %s\n' "$required_script" >&2
+            exit 1
+        }
+    done
+    stop_managed_components
+    exit $?
 fi
 [[ $# -eq 0 ]] || {
     usage >&2

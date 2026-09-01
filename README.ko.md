@@ -56,6 +56,14 @@ cp config.example.toml config.toml
 
 현재 터미널 또는 연결된 HDMI 디스플레이를 선택한 뒤, 선택적으로 읽기 전용 브라우저 모니터의 실행 여부를 고릅니다. 현재 터미널 모드는 foreground로 실행되고 HDMI 모드는 SSH 연결이 끊겨도 tty8 display service가 유지됩니다. 터미널에서 **Ctrl+Q**로 정상 종료하면 launcher가 선택해 시작한 web monitor는 계속 실행됩니다. 반대로 primary terminal 시작이 실패한 경우에는 launcher가 이번 실행에서 시작한 web monitor만 중지합니다.
 
+관리 중인 HDMI display와 선택적 브라우저 모니터를 함께, 질문 없이 중지하려면 다음을 실행합니다.
+
+```bash
+./dgx-fan-control.sh stop
+```
+
+브라우저 모니터를 먼저 중지하고, 이어서 항상 HDMI display의 clean-stop 경로를 시도합니다. 이 명령은 현재 터미널에서 foreground로 실행 중인 TUI를 중지하지 않습니다. 해당 터미널로 돌아가 **Ctrl+Q**를 사용하세요.
+
 자동화와 문제 해결을 위한 직접 명령도 계속 사용할 수 있습니다. 현재 터미널에서 실행하려면:
 
 ```bash
