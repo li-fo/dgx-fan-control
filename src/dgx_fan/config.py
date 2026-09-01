@@ -177,9 +177,11 @@ def _web_config(raw: dict[str, object], config_path: Path) -> WebConfig:
     if not isinstance(host, str):
         raise ConfigError("web.host must be a numeric IP address")
     try:
-        ip_address(host)
+        address = ip_address(host)
     except ValueError as error:
         raise ConfigError("web.host must be a numeric IP address") from error
+    if not address.is_loopback:
+        raise ConfigError("web.host must be an IPv4 or IPv6 loopback address for this MVP")
     port = _integer(web.get("port", 8000), "web.port", minimum=1, maximum=65535)
     socket_raw = web.get("socket_path")
     if socket_raw is None:

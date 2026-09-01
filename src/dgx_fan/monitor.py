@@ -19,9 +19,16 @@ from socket import AF_UNIX, SOCK_STREAM, socket
 from .models import ControlSnapshot, EndpointSnapshot, FanReading, GPUStat, MemoryStat
 from .ui import DashboardHistory, HistoryPoint
 
-SCHEMA_VERSION = 1
-MAX_HISTORY_POINTS = 4096
-MAX_MESSAGE_BYTES = 1_000_000
+SCHEMA_VERSION = 2
+# Two endpoints with eight GPUs each produce at most 16 * 3 chart series.  At
+# the supported 0.1 second collection interval that is 57,600 points over the
+# dashboard's 120 second window.  Leave room for the two UMA-memory series.
+MAX_HISTORY_POINTS = 65_536
+MAX_MESSAGE_BYTES = 8 * 1024 * 1024
+# Publishing each control tick would be wasteful at sub-second collection
+# rates.  A one-second replacement frame still carries the complete history
+# and every visible state field.
+MIN_PUBLISH_INTERVAL_SECONDS = 1.0
 
 
 class MonitorProtocolError(ValueError):
@@ -33,8 +40,9 @@ class MonitorState:
     source_id: str
     revision: int
     captured_at: float
-    snapshot: ControlSnapshot
-    history: DashboardHistory
+    snapshot: ControlSnapshot | None
+    history: DashboardHistory | None
+    transport_error: str | None = None
 
 
 def _memory_to_wire(memory: MemoryStat | None) -> dict[str, float] | None:
@@ -194,7 +202,10 @@ def _history_to_wire(history: DashboardHistory) -> list[dict[str, object]]:
                 "endpoint_id": endpoint_id,
                 "gpu_key": gpu_key,
                 "metric": metric,
-                "points": [{"at": point.at, "value": point.value} for point in points],
+                # Compact pairs keep a maximum supported 120-second history
+                # comfortably below the byte bound without altering chart
+                # samples or aggregation semantics.
+                "points": [[point.at, point.value] for point in points],
             }
         )
     return series
@@ -218,11 +229,14 @@ def _history_from_wire(value: object, interval_seconds: float) -> DashboardHisto
             point_count += 1
             if point_count > MAX_HISTORY_POINTS:
                 raise MonitorProtocolError("history exceeds its bounded transport limit")
-            point_map = _mapping(point, f"history[{series_index}].points[{point_index}]")
+            if not isinstance(point, list) or len(point) != 2:
+                raise MonitorProtocolError(
+                    f"history[{series_index}].points[{point_index}] must contain two values"
+                )
             points.append(
                 HistoryPoint(
-                    _number(point_map.get("at"), f"history[{series_index}].points[{point_index}].at"),
-                    _number(point_map.get("value"), f"history[{series_index}].points[{point_index}].value"),
+                    _number(point[0], f"history[{series_index}].points[{point_index}][0]"),
+                    _number(point[1], f"history[{series_index}].points[{point_index}][1]"),
                 )
             )
         history.points[(endpoint_id, gpu_key, metric)] = points
@@ -238,8 +252,9 @@ def encode_state(state: MonitorState) -> bytes:
         "source_id": state.source_id,
         "revision": state.revision,
         "captured_at": state.captured_at,
-        "snapshot": _snapshot_to_wire(state.snapshot),
-        "history": _history_to_wire(state.history),
+        "snapshot": None if state.snapshot is None else _snapshot_to_wire(state.snapshot),
+        "history": None if state.history is None else _history_to_wire(state.history),
+        "transport_error": state.transport_error,
     }
     encoded = (json.dumps(payload, separators=(",", ":"), allow_nan=False) + "\n").encode()
     if len(encoded) > MAX_MESSAGE_BYTES:
@@ -262,25 +277,35 @@ def decode_state(encoded: bytes, collection_interval_seconds: float) -> MonitorS
     mapping = _mapping(raw, "message")
     if _integer(mapping.get("schema_version"), "schema_version") != SCHEMA_VERSION:
         raise MonitorProtocolError("unsupported monitor schema_version")
+    transport_error = _optional_string(mapping.get("transport_error"), "transport_error")
+    snapshot_raw = mapping.get("snapshot")
+    history_raw = mapping.get("history")
+    if transport_error is None and (snapshot_raw is None or history_raw is None):
+        raise MonitorProtocolError("healthy monitor message requires snapshot and history")
+    if transport_error is not None and (snapshot_raw is not None or history_raw is not None):
+        raise MonitorProtocolError("monitor error message cannot include snapshot or history")
     return MonitorState(
         _string(mapping.get("source_id"), "source_id"),
         _integer(mapping.get("revision"), "revision"),
         _number(mapping.get("captured_at"), "captured_at"),
-        _snapshot_from_wire(mapping.get("snapshot")),
-        _history_from_wire(mapping.get("history"), collection_interval_seconds),
+        None if snapshot_raw is None else _snapshot_from_wire(snapshot_raw),
+        None if history_raw is None else _history_from_wire(history_raw, collection_interval_seconds),
+        transport_error,
     )
 
 
 class MonitorPublisher:
     """A non-blocking fan-controller side publisher with read-only clients."""
 
-    def __init__(self, socket_path: Path) -> None:
+    def __init__(self, socket_path: Path, collection_interval_seconds: float = MIN_PUBLISH_INTERVAL_SECONDS) -> None:
         self.socket_path = socket_path
         self._server: asyncio.AbstractServer | None = None
         self._latest: bytes | None = None
         self._revision = 0
         self._source_id = uuid.uuid4().hex
         self._clients: set[asyncio.StreamWriter] = set()
+        self._publish_interval_seconds = max(MIN_PUBLISH_INTERVAL_SECONDS, collection_interval_seconds)
+        self._next_publish_at = float("-inf")
 
     async def start(self) -> None:
         self.socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -288,17 +313,33 @@ class MonitorPublisher:
         self._server = await asyncio.start_unix_server(self._serve_client, path=str(self.socket_path))
         self.socket_path.chmod(0o600)
 
-    def publish(self, snapshot: ControlSnapshot, history: DashboardHistory, now: float) -> None:
+    def publish(self, snapshot: ControlSnapshot, history: DashboardHistory, now: float) -> bool:
         """Replace the latest state without awaiting or blocking control ticks."""
+        if now < self._next_publish_at:
+            return False
         self._revision += 1
+        self._next_publish_at = now + self._publish_interval_seconds
         try:
             self._latest = encode_state(
                 MonitorState(self._source_id, self._revision, now, snapshot, history)
             )
-        except (MonitorProtocolError, ValueError):
+        except (MonitorProtocolError, ValueError) as error:
             # A monitor serialization fault is display-only. The controller's
-            # existing fan-safety path must not observe it.
-            return
+            # existing fan-safety path must not observe it.  Replace rather
+            # than retain the prior healthy frame, so clients cannot display a
+            # frozen state as current.  The next cadence attempts publication
+            # again with fresh data.
+            self._latest = encode_state(
+                MonitorState(
+                    self._source_id,
+                    self._revision,
+                    now,
+                    None,
+                    None,
+                    f"PUBLISH ERROR: {type(error).__name__}",
+                )
+            )
+        return True
 
     async def close(self) -> None:
         for writer in tuple(self._clients):

@@ -83,14 +83,14 @@ def test_loads_opt_in_web_monitor_settings(tmp_path: Path) -> None:
         + """
 [web]
 enabled = true
-host = "192.168.1.20"
+host = "::1"
 port = 8123
 socket_path = "/tmp/dgx-fan-monitor.sock"
 """
     )
     web = load_config(path).web
     assert web.enabled is True
-    assert web.host == "192.168.1.20"
+    assert web.host == "::1"
     assert web.port == 8123
     assert str(web.socket_path) == "/tmp/dgx-fan-monitor.sock"
 
@@ -100,6 +100,8 @@ socket_path = "/tmp/dgx-fan-monitor.sock"
     [
         ('enabled = "yes"', r"web\.enabled"),
         ('host = "localhost"', r"web\.host"),
+        ('host = "0.0.0.0"', r"web\.host"),
+        ('host = "192.168.1.20"', r"web\.host"),
         ('host = "127.0.0.1"\nport = 0', r"web\.port"),
         ('socket_path = "relative.sock"', r"web\.socket_path"),
         ('unknown = true', r"web contains unknown key"),

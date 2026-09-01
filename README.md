@@ -86,7 +86,7 @@ Start it independently from the display process:
 ./web.sh stop
 ```
 
-`web.sh` creates a transient `systemd --user` service, so it is not installed or auto-started by `install.sh`. It normally persists after an SSH disconnect while the Raspberry Pi's console auto-login user session remains active. If you operate without that session, enable user lingering once (`sudo loginctl enable-linger "$USER"`) before relying on an SSH-started browser service. Use `http://127.0.0.1:8000` locally, or an SSH tunnel such as `ssh -L 8000:127.0.0.1:8000 <pi>`. Do not expose this unauthenticated service directly to the Internet; use a VPN or authenticated TLS reverse proxy if remote network access is required.
+`web.sh` creates a transient `systemd --user` service, so it is not installed or auto-started by `install.sh`. It normally persists after an SSH disconnect while the Raspberry Pi's console auto-login user session remains active. If you operate without that session, enable user lingering once (`sudo loginctl enable-linger "$USER"`) before relying on an SSH-started browser service. The MVP accepts only loopback `web.host` values, so use `http://127.0.0.1:8000` locally or an SSH tunnel such as `ssh -L 8000:127.0.0.1:8000 <pi>`. For remote network access, place an authenticated reverse proxy on the Pi's local endpoint; do not expose this unauthenticated renderer directly to the Internet.
 
 Remove only this project's integration while retaining the clone and configuration:
 
@@ -118,11 +118,11 @@ Uninstall stops its transient display unit before removing managed helpers, but 
 | Field | Meaning and validation |
 | --- | --- |
 | `web.enabled` | Optional boolean; defaults to `false`. When true, the primary controller publishes its bounded read-only monitor state. Restart the primary app after changing it. |
-| `web.host` | Optional numeric IPv4 or IPv6 bind address; defaults to `127.0.0.1`. `localhost` names are intentionally rejected so launcher input cannot be interpreted as shell syntax. Bind a private-LAN address only after arranging network access controls. |
+| `web.host` | Optional numeric IPv4 or IPv6 **loopback** address; defaults to `127.0.0.1`. `localhost`, wildcard, private-LAN, and public addresses are rejected. Use an SSH tunnel or authenticated local reverse proxy for remote access. |
 | `web.port` | Optional integer `1..65535`; defaults to `8000`. |
 | `web.socket_path` | Optional absolute Unix-socket path. Defaults to `.dgx-fan-monitor.sock` beside the configuration file. The socket is same-user mode `0600`, command-free, and removed when the primary app exits. |
 
-Browser clients receive a complete versioned replacement snapshot containing the current 120-second chart history. Older revisions are ignored, and malformed or disconnected monitor data is shown as a monitor-stream state rather than being treated as healthy telemetry. Starting, stopping, or reconnecting browser clients never changes fan duty or the primary app's lifetime.
+Browser clients receive a complete versioned replacement snapshot containing the current 120-second chart history. Older revisions are ignored; malformed, publish-error, disconnected, or stalled monitor data is shown as a monitor-stream state rather than being treated as healthy telemetry. Starting, stopping, or reconnecting browser clients never changes fan duty or the primary app's lifetime. Open the served URL without `?delay`; textual-serve connects automatically and replaces its launch page as soon as the monitor stream starts.
 
 ### Collection
 

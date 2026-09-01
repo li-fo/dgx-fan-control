@@ -86,7 +86,7 @@ display 프로세스와 독립적으로 실행합니다.
 ./web.sh stop
 ```
 
-`web.sh`는 transient `systemd --user` 서비스를 만들며, `install.sh`가 설치 또는 자동 시작하지 않습니다. Raspberry Pi의 console auto-login 사용자 세션이 활성 상태라면 일반적으로 SSH 연결이 끊겨도 계속 실행됩니다. 해당 세션 없이 SSH에서 시작해 지속 실행하려면 먼저 한 번 `sudo loginctl enable-linger "$USER"`를 실행하세요. 로컬에서는 `http://127.0.0.1:8000`을 사용하고, 원격에서는 `ssh -L 8000:127.0.0.1:8000 <pi>`처럼 SSH tunnel을 사용하세요. 인증되지 않은 서비스를 인터넷에 직접 노출하지 말고, 원격 네트워크 접근이 필요하면 VPN 또는 인증된 TLS reverse proxy를 사용하세요.
+`web.sh`는 transient `systemd --user` 서비스를 만들며, `install.sh`가 설치 또는 자동 시작하지 않습니다. Raspberry Pi의 console auto-login 사용자 세션이 활성 상태라면 일반적으로 SSH 연결이 끊겨도 계속 실행됩니다. 해당 세션 없이 SSH에서 시작해 지속 실행하려면 먼저 한 번 `sudo loginctl enable-linger "$USER"`를 실행하세요. MVP에서는 loopback `web.host`만 허용하므로 로컬에서는 `http://127.0.0.1:8000`을 사용하고, 원격에서는 `ssh -L 8000:127.0.0.1:8000 <pi>`처럼 SSH tunnel을 사용하세요. 원격 네트워크 접근에는 Pi의 local endpoint 앞에 인증된 reverse proxy를 두고, 인증되지 않은 renderer를 인터넷에 직접 노출하지 마세요.
 
 clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 
@@ -118,11 +118,11 @@ clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 | 항목 | 의미와 검증 조건 |
 | --- | --- |
 | `web.enabled` | 선택 boolean이며 기본값은 `false`입니다. `true`이면 primary controller가 제한된 읽기 전용 monitor state를 발행합니다. 변경 후 primary 앱을 재시작하세요. |
-| `web.host` | 선택 숫자 IPv4 또는 IPv6 bind 주소이며 기본값은 `127.0.0.1`입니다. launcher 입력이 shell 문법으로 해석되는 것을 막기 위해 `localhost` 이름은 의도적으로 거부합니다. private LAN 주소를 bind하려면 먼저 네트워크 접근 제어를 구성하세요. |
+| `web.host` | 선택 숫자 IPv4 또는 IPv6 **loopback** 주소이며 기본값은 `127.0.0.1`입니다. `localhost`, wildcard, private-LAN, public 주소는 거부됩니다. 원격 접근에는 SSH tunnel 또는 인증된 local reverse proxy를 사용하세요. |
 | `web.port` | 선택 정수 `1..65535`이며 기본값은 `8000`입니다. |
 | `web.socket_path` | 선택 absolute Unix socket 경로입니다. 기본값은 설정 파일 옆의 `.dgx-fan-monitor.sock`입니다. socket은 같은 사용자만 접근할 수 있도록 mode `0600`이며, command를 받지 않고 primary 앱 종료 시 제거됩니다. |
 
-브라우저 client는 현재 120초 그래프 이력이 포함된 완전한 versioned replacement snapshot을 받습니다. 오래된 revision은 무시하며 malformed 또는 연결이 끊긴 monitor 데이터는 정상 telemetry로 취급하지 않고 monitor-stream 상태로 표시합니다. browser client의 시작·중지·재연결은 fan duty나 primary 앱의 수명에 영향을 주지 않습니다.
+브라우저 client는 현재 120초 그래프 이력이 포함된 완전한 versioned replacement snapshot을 받습니다. 오래된 revision은 무시하며 malformed, publish error, 연결 끊김 또는 publisher stall 데이터는 정상 telemetry로 취급하지 않고 monitor-stream 상태로 표시합니다. browser client의 시작·중지·재연결은 fan duty나 primary 앱의 수명에 영향을 주지 않습니다. textual-serve의 launch page를 건너뛰려면 `?delay` 없이 served URL을 여세요. monitor stream이 시작되면 자동으로 연결되어 화면이 바뀝니다.
 
 ### Collection
 

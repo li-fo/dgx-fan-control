@@ -172,9 +172,10 @@ class DGXFanApp(App[None]):
         self._node_poll_tasks: tuple[Task[None], ...] = ()
         self._control_timer: Any | None = None
         self.monitor_publisher: MonitorPublisher | None = (
-            MonitorPublisher(config.web.socket_path) if config.web.enabled and config.web.socket_path else None
+            MonitorPublisher(config.web.socket_path, config.collection.interval_seconds)
+            if config.web.enabled and config.web.socket_path
+            else None
         )
-        self._monitor_signature: tuple[object, ...] | None = None
 
     def compose(self) -> ComposeResult:
         yield FanAppUI(
@@ -247,20 +248,18 @@ class DGXFanApp(App[None]):
         self.latest = self.controller.update(self.endpoints, fans, current)
         self.hardware.set_duties(self.latest.duty_percents)
         ui = self.query_one(FanAppUI)
-        ui.update_snapshot(self.latest, current)
-        monitor_signature = (
-            self.latest.duty_percents,
-            self.latest.state,
-            self.latest.reason,
-            tuple(fan.state for fan in self.latest.fans),
-            tuple(
-                (endpoint.endpoint_id, endpoint.sample_revision, endpoint.memory_sample_revision)
-                for endpoint in self.latest.endpoint_snapshots
-            ),
-        )
-        if self.monitor_publisher is not None and monitor_signature != self._monitor_signature:
+        # App mount can precede the nested widget tree's first refresh.  Keep
+        # the controller/snapshot immediate, but defer only the paint when
+        # that tree is not ready yet.
+        if ui.is_mounted:
+            ui.update_snapshot(self.latest, current)
+        else:
+            ui.call_after_refresh(ui.update_snapshot, self.latest, current)
+        if self.monitor_publisher is not None:
+            # The publisher itself bounds this to at most one full frame per
+            # second.  Do not reduce state to a sparse signature: RPM, ages,
+            # retry/error and health values are all visible in the companion.
             self.monitor_publisher.publish(self.latest, ui.history, current)
-            self._monitor_signature = monitor_signature
 
     @staticmethod
     def _merge_memory_snapshot(

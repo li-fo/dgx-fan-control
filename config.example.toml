@@ -27,8 +27,8 @@ temperature = "red"
 
 [web]
 # The browser companion is opt-in and read-only. `./web.sh start` serves the
-# current physical TUI state at this numeric address and port. Keep loopback
-# unless access is provided by an SSH tunnel or a separately secured private LAN.
+# current physical TUI state at this loopback-only numeric address and port.
+# Use an SSH tunnel or an authenticated local reverse proxy for remote access.
 enabled = false
 host = "127.0.0.1"
 port = 8000

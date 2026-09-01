@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import time
 from asyncio import CancelledError, Task, create_task, open_unix_connection, sleep
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 
 from .config import AppConfig, ConfigError, load_config, resolve_config_path
-from .monitor import MAX_MESSAGE_BYTES, MonitorProtocolError, decode_state
+from .monitor import (
+    MAX_MESSAGE_BYTES,
+    MIN_PUBLISH_INTERVAL_SECONDS,
+    MonitorProtocolError,
+    MonitorState,
+    decode_state,
+)
 from .ui import FanAppUI
 
 
@@ -22,6 +29,7 @@ class DGXFanMonitorApp(App[None]):
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True)
     ]
     RECONNECT_SECONDS = 1.0
+    WATCHDOG_SECONDS = 0.25
 
     def __init__(self, config: AppConfig) -> None:
         super().__init__()
@@ -29,6 +37,9 @@ class DGXFanMonitorApp(App[None]):
         self._receive_task: Task[None] | None = None
         self._last_revision = -1
         self._source_id: str | None = None
+        self._last_fresh_received_at: float | None = None
+        self._last_captured_at: float | None = None
+        self._watchdog_timer: Any | None = None
 
     def compose(self) -> ComposeResult:
         yield FanAppUI(
@@ -42,8 +53,12 @@ class DGXFanMonitorApp(App[None]):
 
     def on_mount(self) -> None:
         self._receive_task = create_task(self._receive_loop())
+        self._watchdog_timer = self.set_interval(self.WATCHDOG_SECONDS, self._watchdog)
 
     async def on_unmount(self) -> None:
+        if self._watchdog_timer is not None:
+            self._watchdog_timer.stop()
+            self._watchdog_timer = None
         if self._receive_task is None:
             return
         self._receive_task.cancel()
@@ -71,14 +86,7 @@ class DGXFanMonitorApp(App[None]):
                         except MonitorProtocolError:
                             ui.set_monitor_transport_status("Monitor stream: INVALID MESSAGE")
                             continue
-                        if state.source_id != self._source_id:
-                            self._source_id = state.source_id
-                            self._last_revision = -1
-                        if state.revision <= self._last_revision:
-                            continue
-                        self._last_revision = state.revision
-                        ui.set_monitor_transport_status(None)
-                        ui.update_monitor_snapshot(state.snapshot, state.captured_at, state.history)
+                        self._accept_state(ui, state)
                     ui.set_monitor_transport_status("Monitor stream: DISCONNECTED")
                 finally:
                     writer.close()
@@ -91,6 +99,45 @@ class DGXFanMonitorApp(App[None]):
             except (ConnectionError, OSError, ValueError):
                 ui.set_monitor_transport_status("Monitor stream: DISCONNECTED")
             await sleep(self.RECONNECT_SECONDS)
+
+    def _accept_state(
+        self, ui: FanAppUI, state: MonitorState, received_at: float | None = None
+    ) -> bool:
+        """Accept one ordered replacement state; return whether it was fresh."""
+        # Keep the socket loop narrow while making source-reset and watchdog
+        # semantics directly testable without a real browser connection.
+        if state.source_id != self._source_id:
+            self._source_id = state.source_id
+            self._last_revision = -1
+        if state.revision <= self._last_revision:
+            return False
+        self._last_revision = state.revision
+        self._last_fresh_received_at = time.monotonic() if received_at is None else received_at
+        self._last_captured_at = state.captured_at
+        if state.transport_error is not None:
+            ui.set_monitor_transport_status(f"Monitor stream: {state.transport_error}")
+            return True
+        assert state.snapshot is not None and state.history is not None
+        ui.set_monitor_transport_status(None)
+        ui.update_monitor_snapshot(state.snapshot, state.captured_at, state.history)
+        return True
+
+    def _watchdog(self, now: float | None = None) -> None:
+        """Expose a stalled publisher even while the Unix socket stays open."""
+        if self._last_fresh_received_at is None:
+            return
+        current = time.monotonic() if now is None else now
+        timeout = max(
+            MIN_PUBLISH_INTERVAL_SECONDS * 3,
+            self.config.collection.interval_seconds * 3,
+        )
+        receive_stale = current - self._last_fresh_received_at > timeout
+        captured_stale = (
+            self._last_captured_at is not None
+            and 0 <= current - self._last_captured_at > timeout
+        )
+        if receive_stale or captured_stale:
+            self.query_one(FanAppUI).set_monitor_transport_status("Monitor stream: STALE")
 
 
 def build_parser() -> argparse.ArgumentParser:
