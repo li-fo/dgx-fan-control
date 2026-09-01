@@ -16,6 +16,7 @@ from rich.terminal_theme import DEFAULT_TERMINAL_THEME
 from textual import constants
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
+from textual.css.query import NoMatches
 from textual.driver import Driver
 from textual.reactive import Reactive
 
@@ -252,14 +253,17 @@ class DGXFanApp(App[None]):
         # the controller/snapshot immediate, but defer only the paint when
         # that tree is not ready yet.
         if ui.is_mounted:
-            ui.update_snapshot(self.latest, current)
+            try:
+                ui.update_snapshot(self.latest, current)
+            except NoMatches:
+                ui.call_after_refresh(ui.update_snapshot, self.latest, current)
         else:
             ui.call_after_refresh(ui.update_snapshot, self.latest, current)
         if self.monitor_publisher is not None:
             # The publisher itself bounds this to at most one full frame per
             # second.  Do not reduce state to a sparse signature: RPM, ages,
             # retry/error and health values are all visible in the companion.
-            self.monitor_publisher.publish(self.latest, ui.history, current)
+            self.monitor_publisher.publish(self.latest, current)
 
     @staticmethod
     def _merge_memory_snapshot(

@@ -24,7 +24,7 @@ def test_monitor_app_hydrates_read_only_ui_without_hardware(tmp_path: Path) -> N
         publisher = MonitorPublisher(socket_path)
         await publisher.start()
         state = _state()
-        publisher.publish(state.snapshot, state.history, state.captured_at)
+        publisher.publish(state.snapshot, state.captured_at)
         app = DGXFanMonitorApp(config)
         try:
             async with app.run_test(size=(100, 30)) as pilot:
@@ -95,6 +95,23 @@ def test_monitor_app_shows_retry_state_from_fresh_cached_snapshot(tmp_path: Path
             ui = app.query_one(FanAppUI)
             assert app._accept_state(ui, retry, received_at=10.0)
             assert "RETRYING 2/3" in app.query_one("#error-banner", Static).render().plain
+
+    asyncio.run(exercise())
+
+
+def test_monitor_watchdog_preserves_disconnected_phase(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        config = load_config(Path("config.example.toml"))
+        app = DGXFanMonitorApp(replace(config, web=WebConfig(True, "127.0.0.1", 8000, tmp_path / "x.sock")))
+        async with app.run_test():
+            ui = app.query_one(FanAppUI)
+            app._last_fresh_received_at = 0.0
+            app._last_captured_at = 0.0
+            app._set_phase(ui, "DISCONNECTED")
+            app._watchdog(now=100.0)
+            assert ui.monitor_transport_status == "Monitor stream: DISCONNECTED"
+            assert app._accept_state(ui, _state(), received_at=101.0)
+            assert ui.monitor_transport_status is None
 
     asyncio.run(exercise())
 

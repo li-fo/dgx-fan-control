@@ -40,6 +40,7 @@ class DGXFanMonitorApp(App[None]):
         self._last_fresh_received_at: float | None = None
         self._last_captured_at: float | None = None
         self._watchdog_timer: Any | None = None
+        self._phase = "DISCONNECTED"
 
     def compose(self) -> ComposeResult:
         yield FanAppUI(
@@ -74,12 +75,12 @@ class DGXFanMonitorApp(App[None]):
         ui = self.query_one(FanAppUI)
         while True:
             try:
-                ui.set_monitor_transport_status("Monitor stream: CONNECTING")
+                self._set_phase(ui, "CONNECTING")
                 reader, writer = await open_unix_connection(
                     str(socket_path), limit=MAX_MESSAGE_BYTES
                 )
                 try:
-                    ui.set_monitor_transport_status(None)
+                    self._phase = "CONNECTED"
                     while line := await reader.readline():
                         try:
                             state = decode_state(line, self.config.collection.interval_seconds)
@@ -87,7 +88,7 @@ class DGXFanMonitorApp(App[None]):
                             ui.set_monitor_transport_status("Monitor stream: INVALID MESSAGE")
                             continue
                         self._accept_state(ui, state)
-                    ui.set_monitor_transport_status("Monitor stream: DISCONNECTED")
+                    self._set_phase(ui, "DISCONNECTED")
                 finally:
                     writer.close()
                     try:
@@ -97,7 +98,7 @@ class DGXFanMonitorApp(App[None]):
             except CancelledError:
                 raise
             except (ConnectionError, OSError, ValueError):
-                ui.set_monitor_transport_status("Monitor stream: DISCONNECTED")
+                self._set_phase(ui, "DISCONNECTED")
             await sleep(self.RECONNECT_SECONDS)
 
     def _accept_state(
@@ -112,6 +113,7 @@ class DGXFanMonitorApp(App[None]):
         if state.revision <= self._last_revision:
             return False
         self._last_revision = state.revision
+        self._phase = "CONNECTED"
         self._last_fresh_received_at = time.monotonic() if received_at is None else received_at
         self._last_captured_at = state.captured_at
         if state.transport_error is not None:
@@ -122,9 +124,13 @@ class DGXFanMonitorApp(App[None]):
         ui.update_monitor_snapshot(state.snapshot, state.captured_at, state.history)
         return True
 
+    def _set_phase(self, ui: FanAppUI, phase: str) -> None:
+        self._phase = phase
+        ui.set_monitor_transport_status(f"Monitor stream: {phase}")
+
     def _watchdog(self, now: float | None = None) -> None:
         """Expose a stalled publisher even while the Unix socket stays open."""
-        if self._last_fresh_received_at is None:
+        if self._phase != "CONNECTED" or self._last_fresh_received_at is None:
             return
         current = time.monotonic() if now is None else now
         timeout = max(

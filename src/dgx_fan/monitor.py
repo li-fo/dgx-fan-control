@@ -306,40 +306,69 @@ class MonitorPublisher:
         self._clients: set[asyncio.StreamWriter] = set()
         self._publish_interval_seconds = max(MIN_PUBLISH_INTERVAL_SECONDS, collection_interval_seconds)
         self._next_publish_at = float("-inf")
+        self._history = DashboardHistory(collection_interval_seconds)
+        self._pending: tuple[ControlSnapshot, float] | None = None
+        self._latest_input: tuple[ControlSnapshot, float] | None = None
+        self._work_event = asyncio.Event()
+        self._worker: asyncio.Task[None] | None = None
+        self._closing = False
 
     async def start(self) -> None:
         self.socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._remove_owned_stale_socket()
         self._server = await asyncio.start_unix_server(self._serve_client, path=str(self.socket_path))
         self.socket_path.chmod(0o600)
+        self._worker = asyncio.create_task(self._run_worker())
 
-    def publish(self, snapshot: ControlSnapshot, history: DashboardHistory, now: float) -> bool:
-        """Replace the latest state without awaiting or blocking control ticks."""
+    def publish(self, snapshot: ControlSnapshot, now: float) -> bool:
+        """Coalesce immutable state for the private off-loop serializer."""
         if now < self._next_publish_at:
             return False
-        self._revision += 1
         self._next_publish_at = now + self._publish_interval_seconds
-        try:
-            self._latest = encode_state(
-                MonitorState(self._source_id, self._revision, now, snapshot, history)
-            )
-        except (MonitorProtocolError, ValueError) as error:
-            # A monitor serialization fault is display-only. The controller's
-            # existing fan-safety path must not observe it.  Replace rather
-            # than retain the prior healthy frame, so clients cannot display a
-            # frozen state as current.  The next cadence attempts publication
-            # again with fresh data.
-            self._latest = encode_state(
-                MonitorState(
-                    self._source_id,
-                    self._revision,
-                    now,
-                    None,
-                    None,
-                    f"PUBLISH ERROR: {type(error).__name__}",
-                )
-            )
+        self._pending = (snapshot, now)
+        self._work_event.set()
         return True
+
+    async def _run_worker(self) -> None:
+        """Build bounded history and JSON outside the control event-loop path."""
+        while True:
+            await self._work_event.wait()
+            self._work_event.clear()
+            if self._closing:
+                return
+            item = self._pending
+            self._pending = None
+            if item is None:
+                continue
+            self._latest_input = item
+            snapshot, now = item
+            # With no viewers retain only history; JSON is deferred until a
+            # client requests hydration.  This makes idle publication cheap.
+            encode = bool(self._clients)
+            result = await asyncio.to_thread(self._build_frame, snapshot, now, encode)
+            if result is not None:
+                self._latest = result
+
+    def _build_frame(self, snapshot: ControlSnapshot, now: float, encode: bool) -> bytes | None:
+        for endpoint in snapshot.endpoint_snapshots:
+            self._history.append(
+                endpoint.endpoint_id,
+                endpoint.sample_revision,
+                endpoint.gpus,
+                now,
+                endpoint.memory_source,
+                endpoint.uma_memory,
+                endpoint.memory_sample_revision,
+            )
+        if not encode:
+            return None
+        self._revision += 1
+        try:
+            return encode_state(MonitorState(self._source_id, self._revision, now, snapshot, self._history))
+        except (MonitorProtocolError, ValueError) as error:
+            return encode_state(
+                MonitorState(self._source_id, self._revision, now, None, None, f"PUBLISH ERROR: {type(error).__name__}")
+            )
 
     async def close(self) -> None:
         for writer in tuple(self._clients):
@@ -348,6 +377,11 @@ class MonitorPublisher:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+        self._closing = True
+        self._work_event.set()
+        if self._worker is not None:
+            await self._worker
+            self._worker = None
         try:
             info = self.socket_path.lstat()
         except FileNotFoundError:
@@ -378,6 +412,9 @@ class MonitorPublisher:
     ) -> None:
         sent_revision = -1
         self._clients.add(writer)
+        if self._latest is None and self._latest_input is not None:
+            self._pending = self._latest_input
+            self._work_event.set()
         try:
             while True:
                 latest = self._latest

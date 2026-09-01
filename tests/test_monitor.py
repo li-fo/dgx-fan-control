@@ -105,7 +105,7 @@ def test_monitor_publisher_is_read_only_bounded_and_cleans_up(tmp_path) -> None:
         publisher = MonitorPublisher(path)
         await publisher.start()
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
-        publisher.publish(_state().snapshot, _state().history, 100)
+        publisher.publish(_state().snapshot, 100)
         reader, writer = await asyncio.open_unix_connection(str(path))
         message = await asyncio.wait_for(reader.readline(), timeout=2)
         assert decode_state(message, 2).revision == 1
@@ -132,7 +132,7 @@ def test_monitor_publisher_replaces_encode_fault_with_observable_error_and_retri
                 "_history_to_wire",
                 lambda _history: (_ for _ in ()).throw(MonitorProtocolError("too large")),
             )
-            assert publisher.publish(_state().snapshot, _state().history, 100) is True
+            assert publisher.publish(_state().snapshot, 100) is True
             reader, writer = await asyncio.open_unix_connection(str(path))
             error_state = decode_state(await asyncio.wait_for(reader.readline(), timeout=2), 2)
             assert error_state.transport_error == "PUBLISH ERROR: MonitorProtocolError"
@@ -140,7 +140,7 @@ def test_monitor_publisher_replaces_encode_fault_with_observable_error_and_retri
             writer.close()
             await writer.wait_closed()
             monkeypatch.undo()
-            assert publisher.publish(_state(2).snapshot, _state(2).history, 101) is True
+            assert publisher.publish(_state(2).snapshot, 101) is True
             reader, writer = await asyncio.open_unix_connection(str(path))
             recovered = decode_state(await asyncio.wait_for(reader.readline(), timeout=2), 2)
             assert recovered.revision == 2
@@ -169,6 +169,18 @@ def test_monitor_publisher_rejects_non_socket_path(tmp_path) -> None:
 def test_monitor_publisher_bounds_subsecond_publish_cadence(tmp_path) -> None:
     publisher = MonitorPublisher(tmp_path / "monitor.sock", collection_interval_seconds=0.1)
     state = _state()
-    assert publisher.publish(state.snapshot, state.history, 10.0) is True
-    assert publisher.publish(state.snapshot, state.history, 10.5) is False
-    assert publisher.publish(state.snapshot, state.history, 11.0) is True
+    assert publisher.publish(state.snapshot, 10.0) is True
+    assert publisher.publish(state.snapshot, 10.5) is False
+    assert publisher.publish(state.snapshot, 11.0) is True
+
+
+def test_monitor_publisher_publish_does_not_encode_on_caller_path(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publisher = MonitorPublisher(tmp_path / "monitor.sock")
+    state = _state()
+    monkeypatch.setattr(
+        "dgx_fan.monitor.encode_state",
+        lambda _state: (_ for _ in ()).throw(AssertionError("caller encoded")),
+    )
+    assert publisher.publish(state.snapshot, 10.0) is True
