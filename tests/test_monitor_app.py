@@ -146,7 +146,7 @@ def test_web_launcher_is_valid_shell_and_uses_user_transient_service() -> None:
     assert result.returncode == 0, result.stderr
     source = script.read_text()
     assert "systemd-run --user --collect" in source
-    assert "textual_serve.server import Server" in source
+    assert "dgx_fan.web_server import RequestOriginServer" in source
     assert "display.sh" not in source and "start.sh" not in source
 
 

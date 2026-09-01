@@ -65,8 +65,9 @@ command -v systemd-run >/dev/null 2>&1 || fail 'systemd-run is required'
 
 # textual-serve accepts a single command string. Build it with shell quoting so
 # a clone path containing spaces cannot alter monitor arguments. Version 1.1.3
-# exposes its Server API rather than a console-script command.
+# exposes its Server API rather than a console-script command. The local
+# adapter keeps the bind address separate from browser-visible request URLs.
 printf -v MONITOR_COMMAND '%q ' "$MONITOR_BIN" --config "$CONFIG_PATH"
-readonly SERVER_PROGRAM='from textual_serve.server import Server; import sys; Server(sys.argv[1], host=sys.argv[2], port=int(sys.argv[3])).serve()'
+readonly SERVER_PROGRAM='from dgx_fan.web_server import RequestOriginServer; import sys; RequestOriginServer(sys.argv[1], host=sys.argv[2], port=int(sys.argv[3])).serve()'
 exec systemd-run --user --collect --service-type=exec --unit="$UNIT" \
     --property=Restart=no "$PYTHON_BIN" -c "$SERVER_PROGRAM" "$MONITOR_COMMAND" "$HOST" "$PORT"
