@@ -73,12 +73,12 @@ def _launcher_clone(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _run_launcher(
-    launcher: Path, command_log: Path, responses: str, **statuses: str
+    launcher: Path, command_log: Path, responses: str, *arguments: str, **statuses: str
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment.update({"DGX_FAN_LAUNCHER_LOG": str(command_log), **statuses})
     return subprocess.run(
-        ["bash", str(launcher)],
+        ["bash", str(launcher), *arguments],
         cwd=launcher.parent,
         env=environment,
         input=responses,
@@ -151,6 +151,39 @@ def test_interactive_launcher_display_failure_blocks_web_and_cancel_has_no_side_
     assert cancelled.returncode == 0
     assert "Invalid choice" in cancelled.stderr
     assert not command_log.exists()
+
+
+def test_interactive_launcher_web_prompt_cancel_or_eof_has_no_side_effects(tmp_path: Path) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+
+    cancelled = _run_launcher(launcher, command_log, "1\nq\n")
+
+    assert cancelled.returncode == 0
+    assert "Cancelled." in cancelled.stdout
+    assert not command_log.exists()
+
+    eof_after_primary = _run_launcher(launcher, command_log, "1\n")
+
+    assert eof_after_primary.returncode == 0
+    assert "Cancelled." in eof_after_primary.stdout
+    assert not command_log.exists()
+
+
+def test_interactive_launcher_help_requires_exactly_one_argument(tmp_path: Path) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+
+    help_result = _run_launcher(launcher, command_log, "", "--help")
+
+    assert help_result.returncode == 0
+    assert "Usage: ./dgx-fan-control.sh" in help_result.stdout
+    assert not command_log.exists()
+
+    for arguments in (("--help", "extra"), ("-h", "extra"), ("unknown",)):
+        invalid_result = _run_launcher(launcher, command_log, "", *arguments)
+
+        assert invalid_result.returncode == 64
+        assert "Usage: ./dgx-fan-control.sh" in invalid_result.stderr
+        assert not command_log.exists()
 
 
 def _sandbox(tmp_path: Path) -> Path:

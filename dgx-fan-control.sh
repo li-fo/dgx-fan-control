@@ -40,10 +40,7 @@ choose_primary() {
 
 choose_web() {
     while true; do
-        read -r -p 'Start the optional read-only web monitor? [y/N] ' choice || {
-            WEB_REQUESTED=false
-            return 0
-        }
+        read -r -p 'Start the optional read-only web monitor? [y/N] ' choice || return 1
         case "${choice,,}" in
             ''|n|no) WEB_REQUESTED=false; return 0 ;;
             y|yes) WEB_REQUESTED=true; return 0 ;;
@@ -73,11 +70,11 @@ cleanup_started_web() {
     fi
 }
 
+if [[ $# -eq 1 && ( "$1" == -h || "$1" == --help ) ]]; then
+    usage
+    exit 0
+fi
 [[ $# -eq 0 ]] || {
-    if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then
-        usage
-        exit 0
-    fi
     usage >&2
     exit 64
 }
