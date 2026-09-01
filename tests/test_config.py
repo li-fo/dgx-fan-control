@@ -70,6 +70,46 @@ def test_load_valid_config(tmp_path: Path) -> None:
     assert config.collection.retry_delay_seconds == 10.0
     assert config.endpoints[0].memory_source == "dcgm"
     assert config.endpoints[0].node_exporter_url is None
+    assert config.web.enabled is False
+    assert config.web.host == "127.0.0.1"
+    assert config.web.port == 8000
+    assert config.web.socket_path == (path.parent / ".dgx-fan-monitor.sock").resolve()
+
+
+def test_loads_opt_in_web_monitor_settings(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        _config()
+        + """
+[web]
+enabled = true
+host = "192.168.1.20"
+port = 8123
+socket_path = "/tmp/dgx-fan-monitor.sock"
+"""
+    )
+    web = load_config(path).web
+    assert web.enabled is True
+    assert web.host == "192.168.1.20"
+    assert web.port == 8123
+    assert str(web.socket_path) == "/tmp/dgx-fan-monitor.sock"
+
+
+@pytest.mark.parametrize(
+    ("extra", "match"),
+    [
+        ('enabled = "yes"', r"web\.enabled"),
+        ('host = "localhost"', r"web\.host"),
+        ('host = "127.0.0.1"\nport = 0', r"web\.port"),
+        ('socket_path = "relative.sock"', r"web\.socket_path"),
+        ('unknown = true', r"web contains unknown key"),
+    ],
+)
+def test_rejects_unsafe_web_monitor_settings(tmp_path: Path, extra: str, match: str) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config() + f"\n[web]\n{extra}\n")
+    with pytest.raises(ConfigError, match=match):
+        load_config(path)
 
 
 def test_loads_node_exporter_memory_source(tmp_path: Path) -> None:

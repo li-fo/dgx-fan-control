@@ -25,6 +25,15 @@ memory = "yellow"
 utilization = "cyan"
 temperature = "red"
 
+[web]
+# The browser companion is opt-in and read-only. `./web.sh start` serves the
+# current physical TUI state at this numeric address and port. Keep loopback
+# unless access is provided by an SSH tunnel or a separately secured private LAN.
+enabled = false
+host = "127.0.0.1"
+port = 8000
+# socket_path = "/absolute/path/to/.dgx-fan-monitor.sock"
+
 [collection]
 interval_seconds = 2.0
 timeout_seconds = 1.5

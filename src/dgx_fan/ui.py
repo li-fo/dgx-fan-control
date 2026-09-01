@@ -257,6 +257,7 @@ class FanAppUI(Static):
     }
     #dashboard-fan-1-rpm, #dashboard-fan-2-rpm { width: 15; height: 1; }
     #dashboard-fan-separator { width: 3; height: 1; }
+    #read-only-indicator { width: 11; height: 1; }
     #fan-top-row { height: 5; }
     #fan-status { width: 1fr; height: 5; border: round $primary; }
     #power-toggle, #fan-settings { width: 15; height: 3; }
@@ -276,6 +277,8 @@ class FanAppUI(Static):
         emergency_temperature: float,
         collection_interval_seconds: float,
         dashboard_colors: DashboardColors | None = None,
+        *,
+        read_only: bool = False,
     ) -> None:
         super().__init__()
         self.config_path, self.toggle, self.emergency_temperature = (
@@ -284,11 +287,13 @@ class FanAppUI(Static):
             emergency_temperature,
         )
         self.dashboard_colors = dashboard_colors or DashboardColors()
+        self.read_only = read_only
         self.snapshot: ControlSnapshot | None = None
         self.history = DashboardHistory(collection_interval_seconds)
         self.panels: dict[str, Static] = {}
         self.last_render_time: float | None = None
         self.last_signature: tuple[tuple[str, int, int, bool, bool, str | None], ...] | None = None
+        self.monitor_transport_status: str | None = None
         self._resize_redraw_pending = False
         self._dashboard_layout_signature: tuple[int, int, int, int, int, int] | None = None
         self._layout_convergence_passes = 0
@@ -298,6 +303,8 @@ class FanAppUI(Static):
         with TabbedContent(initial="dashboard"):
             with TabPane("DGX Dashboard", id="dashboard"):
                 with Horizontal(id="dashboard-status-row"):
+                    if self.read_only:
+                        yield Static("READ ONLY", id="read-only-indicator", markup=False)
                     yield Static("Waiting for DCGM metrics…", id="error-banner", markup=False)
                     yield Static("Fan 1: N/A", id="dashboard-fan-1-rpm", markup=False)
                     yield Static(" | ", id="dashboard-fan-separator", markup=False)
@@ -311,26 +318,29 @@ class FanAppUI(Static):
                         id="fan-status",
                         markup=False,
                     )
-                    yield Button("Turn On / Off", id="power-toggle")
-                    yield Button("Setting", id="fan-settings")
+                    yield Button("Turn On / Off", id="power-toggle", disabled=self.read_only)
+                    yield Button("Setting", id="fan-settings", disabled=self.read_only)
                 with Horizontal(id="fan-gauge-row"):
                     yield FanGauge(1)
                     yield FanGauge(2)
         yield Footer()
 
-    def update_snapshot(self, snapshot: ControlSnapshot, now: float) -> None:
+    def update_snapshot(
+        self, snapshot: ControlSnapshot, now: float, *, append_history: bool = True
+    ) -> None:
         self.snapshot = snapshot
         self.last_render_time = now
-        for endpoint in snapshot.endpoint_snapshots:
-            self.history.append(
-                endpoint.endpoint_id,
-                endpoint.sample_revision,
-                endpoint.gpus,
-                now,
-                endpoint.memory_source,
-                endpoint.uma_memory,
-                endpoint.memory_sample_revision,
-            )
+        if append_history:
+            for endpoint in snapshot.endpoint_snapshots:
+                self.history.append(
+                    endpoint.endpoint_id,
+                    endpoint.sample_revision,
+                    endpoint.gpus,
+                    now,
+                    endpoint.memory_source,
+                    endpoint.uma_memory,
+                    endpoint.memory_sample_revision,
+                )
         errors = []
         for endpoint in snapshot.endpoint_snapshots:
             age = "N/A" if endpoint.age_seconds is None else f"{endpoint.age_seconds:.1f}s"
@@ -367,6 +377,8 @@ class FanAppUI(Static):
                     memory_status = "WAITING"
                 errors.append(f"{name}: UMA MEM {memory_status} (sample age: {memory_age})")
         status_message = " | ".join(errors) if errors else "All configured DGX endpoints are healthy."
+        if self.monitor_transport_status is not None:
+            status_message = f"{self.monitor_transport_status} | {status_message}"
         self.query_one("#error-banner", Static).update(
             Text(status_message, no_wrap=True, overflow="ellipsis")
         )
@@ -401,13 +413,31 @@ class FanAppUI(Static):
             )
 
         self.query_one("#fan-status", Static).update(
-            f"Fan Status / Control · {snapshot.state}\n"
+            f"Fan Status / Control{' · READ ONLY' if self.read_only else ''} · {snapshot.state}\n"
             f"{fan_summary(0)}\n{fan_summary(1)}"
         )
         for number in (1, 2):
             fan = snapshot.fans[number - 1]
             self.query_one(f"#fan-{number}-gauge", FanGauge).set_reading(
                 snapshot.duty_percents[number - 1], fan.rpm, fan.state
+            )
+
+    def update_monitor_snapshot(
+        self, snapshot: ControlSnapshot, now: float, history: DashboardHistory
+    ) -> None:
+        """Apply a full replacement received from the read-only local monitor stream."""
+        self.history = history
+        self.last_signature = None
+        self.update_snapshot(snapshot, now, append_history=False)
+
+    def set_monitor_transport_status(self, status: str | None) -> None:
+        """Show monitor connection state without changing controller data."""
+        self.monitor_transport_status = status
+        if self.snapshot is not None and self.last_render_time is not None:
+            self.update_snapshot(self.snapshot, self.last_render_time, append_history=False)
+        elif status is not None:
+            self.query_one("#error-banner", Static).update(
+                Text(status, no_wrap=True, overflow="ellipsis")
             )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

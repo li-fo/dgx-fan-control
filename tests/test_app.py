@@ -1,5 +1,7 @@
+import asyncio
 import signal
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,7 +23,8 @@ from dgx_fan.app import (
     _TerminalState,
     main,
 )
-from dgx_fan.config import DashboardColors, load_config
+from dgx_fan.config import DashboardColors, WebConfig, load_config
+from dgx_fan.monitor import decode_state
 from dgx_fan.ui import FanAppUI
 
 
@@ -73,7 +76,54 @@ def test_app_transports_dashboard_colors_to_ui() -> None:
         async with app.run_test() as _:
             assert app.query_one(FanAppUI).dashboard_colors == config.dashboard_colors
 
-    import asyncio
+    asyncio.run(exercise())
+
+
+def test_primary_app_publishes_monitor_state_without_another_hardware_owner(
+    tmp_path: Path,
+) -> None:
+    config = load_config(Path("config.example.toml"))
+    config = replace(
+        config,
+        web=WebConfig(True, "127.0.0.1", 8000, tmp_path / "monitor.sock"),
+    )
+    app = DGXFanApp(config)
+
+    async def exercise() -> None:
+        async with app.run_test() as _:
+            assert app.hardware is not None
+            assert app.monitor_publisher is not None
+            reader, writer = await asyncio.open_unix_connection(str(config.web.socket_path))
+            message = await asyncio.wait_for(reader.readline(), timeout=2)
+            assert decode_state(message, config.collection.interval_seconds).snapshot.duty_percents
+            writer.close()
+            await writer.wait_closed()
+        assert not config.web.socket_path.exists()
+
+    asyncio.run(exercise())
+
+
+def test_monitor_publisher_start_failure_does_not_change_primary_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = load_config(Path("config.example.toml"))
+    config = replace(
+        config,
+        web=WebConfig(True, "127.0.0.1", 8000, tmp_path / "monitor.sock"),
+    )
+
+    async def unavailable(_self: object) -> None:
+        raise OSError("monitor socket unavailable")
+
+    monkeypatch.setattr(app_module.MonitorPublisher, "start", unavailable)
+    app = DGXFanApp(config)
+
+    async def exercise() -> None:
+        async with app.run_test():
+            assert app.monitor_publisher is None
+            assert app.latest is not None
+            assert app.hardware is not None
+            assert getattr(app.hardware, "duties", None) == app.latest.duty_percents
 
     asyncio.run(exercise())
 

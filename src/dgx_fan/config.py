@@ -4,6 +4,7 @@ import os
 import re
 import tomllib
 from dataclasses import dataclass, field
+from ipaddress import ip_address
 from math import isfinite
 from pathlib import Path
 from urllib.parse import urlparse
@@ -72,6 +73,16 @@ class DashboardColors:
 
 
 @dataclass(frozen=True)
+class WebConfig:
+    """Optional, local-only browser monitor transport settings."""
+
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 8000
+    socket_path: Path | None = None
+
+
+@dataclass(frozen=True)
 class AppConfig:
     path: Path
     endpoints: tuple[EndpointConfig, ...]
@@ -79,6 +90,7 @@ class AppConfig:
     control: ControlConfig
     hardware: HardwareConfig
     dashboard_colors: DashboardColors = field(default_factory=DashboardColors)
+    web: WebConfig = field(default_factory=WebConfig)
 
 
 def resolve_config_path(explicit: str | None) -> Path:
@@ -151,6 +163,34 @@ def _dashboard_colors(raw: dict[str, object]) -> DashboardColors:
     )
 
 
+def _web_config(raw: dict[str, object], config_path: Path) -> WebConfig:
+    web_raw = raw.get("web")
+    default_socket = (config_path.parent / ".dgx-fan-monitor.sock").resolve()
+    if web_raw is None:
+        return WebConfig(socket_path=default_socket)
+    web = _mapping(web_raw, "web")
+    _reject_unknown_keys(web, "web", {"enabled", "host", "port", "socket_path"})
+    enabled = web.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError("web.enabled must be true or false")
+    host = web.get("host", "127.0.0.1")
+    if not isinstance(host, str):
+        raise ConfigError("web.host must be a numeric IP address")
+    try:
+        ip_address(host)
+    except ValueError as error:
+        raise ConfigError("web.host must be a numeric IP address") from error
+    port = _integer(web.get("port", 8000), "web.port", minimum=1, maximum=65535)
+    socket_raw = web.get("socket_path")
+    if socket_raw is None:
+        socket_path = default_socket
+    elif not isinstance(socket_raw, str) or not socket_raw or not socket_raw.startswith("/"):
+        raise ConfigError("web.socket_path must be an absolute non-empty path")
+    else:
+        socket_path = Path(socket_raw)
+    return WebConfig(enabled, host, port, socket_path)
+
+
 def load_config(path: Path) -> AppConfig:
     try:
         with path.open("rb") as source:
@@ -168,6 +208,7 @@ def load_config(path: Path) -> AppConfig:
             )
         raise ConfigError("version must be 2")
     dashboard_colors = _dashboard_colors(raw)
+    web_config = _web_config(raw, path)
     raw_endpoints = raw.get("dgx")
     if not isinstance(raw_endpoints, list) or not 1 <= len(raw_endpoints) <= 2:
         raise ConfigError("dgx must contain one or two endpoint tables")
@@ -334,4 +375,5 @@ def load_config(path: Path) -> AppConfig:
             shutdown_mode,
         ),
         dashboard_colors,
+        web_config,
     )

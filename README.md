@@ -64,6 +64,30 @@ sudo journalctl -u dgx-fan-display.service --no-pager
 
 The transient display process runs on tty8 and continues after SSH disconnects. With `shutdown_mode = "off"`, **Ctrl+Q**, `./display.sh stop`, and the stop phase of `./display.sh restart` use the clean-stop path and command 0% duty. Handled abnormal termination uses the full-duty fail-safe; SIGKILL and power loss cannot run cleanup and may preserve the last duty. Do not start a second foreground `./start.sh` while the display is active; the hardware-owner lock rejects it without stopping the running app. `uv run dgx-fan --config config.toml` and `uvx` remain foreground terminal commands.
 
+## Read-only browser monitor
+
+The optional browser view renders the same Textual `DGX Dashboard` and `Fan Control` tabs, including RPM, charts, and gauges. It is deliberately **READ ONLY**: browser visitors cannot toggle fans, change configuration, acquire GPIO/PWM ownership, or alter fallback behavior.
+
+Enable it in `config.toml`, then restart the primary controller so it creates the local monitor socket:
+
+```toml
+[web]
+enabled = true
+host = "127.0.0.1"
+port = 8000
+```
+
+Start it independently from the display process:
+
+```bash
+./web.sh start
+./web.sh status
+# Stop only the browser renderer; the physical controller keeps running.
+./web.sh stop
+```
+
+`web.sh` creates a transient `systemd --user` service, so it is not installed or auto-started by `install.sh`. It normally persists after an SSH disconnect while the Raspberry Pi's console auto-login user session remains active. If you operate without that session, enable user lingering once (`sudo loginctl enable-linger "$USER"`) before relying on an SSH-started browser service. Use `http://127.0.0.1:8000` locally, or an SSH tunnel such as `ssh -L 8000:127.0.0.1:8000 <pi>`. Do not expose this unauthenticated service directly to the Internet; use a VPN or authenticated TLS reverse proxy if remote network access is required.
+
 Remove only this project's integration while retaining the clone and configuration:
 
 ```bash
@@ -88,6 +112,17 @@ Uninstall stops its transient display unit before removing managed helpers, but 
 ### Dashboard colours
 
 `[dashboard.colors]` is optional. `memory`, `utilization`, and `temperature` independently set the foreground colour of their charts. Each may be a valid Rich foreground colour name (for example `"ansi_yellow"` on an 8-colour terminal) or an exact `#RRGGBB` value. Omit a key to use the terminal default; `"default"` is not accepted.
+
+### Browser monitor
+
+| Field | Meaning and validation |
+| --- | --- |
+| `web.enabled` | Optional boolean; defaults to `false`. When true, the primary controller publishes its bounded read-only monitor state. Restart the primary app after changing it. |
+| `web.host` | Optional numeric IPv4 or IPv6 bind address; defaults to `127.0.0.1`. `localhost` names are intentionally rejected so launcher input cannot be interpreted as shell syntax. Bind a private-LAN address only after arranging network access controls. |
+| `web.port` | Optional integer `1..65535`; defaults to `8000`. |
+| `web.socket_path` | Optional absolute Unix-socket path. Defaults to `.dgx-fan-monitor.sock` beside the configuration file. The socket is same-user mode `0600`, command-free, and removed when the primary app exits. |
+
+Browser clients receive a complete versioned replacement snapshot containing the current 120-second chart history. Older revisions are ignored, and malformed or disconnected monitor data is shown as a monitor-stream state rather than being treated as healthy telemetry. Starting, stopping, or reconnecting browser clients never changes fan duty or the primary app's lifetime.
 
 ### Collection
 

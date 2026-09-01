@@ -64,6 +64,30 @@ sudo journalctl -u dgx-fan-display.service --no-pager
 
 transient display 프로세스는 tty8에서 동작하므로 SSH가 끊겨도 유지됩니다. `shutdown_mode = "off"`에서는 **Ctrl+Q**, `./display.sh stop`, `./display.sh restart`의 stop 단계가 clean-stop 경로를 사용해 0% duty를 명령합니다. 처리 가능한 비정상 종료에는 full-duty fail-safe가 적용되고, SIGKILL과 전원 손실은 cleanup을 실행할 수 없어 마지막 duty가 유지될 수 있습니다. display가 실행 중일 때 두 번째 `./start.sh`를 실행하지 마세요. hardware-owner lock이 기존 앱을 멈추지 않고 두 번째 실행을 거부합니다. `uv run dgx-fan --config config.toml`과 `uvx`는 현재 터미널의 foreground 명령입니다.
 
+## 읽기 전용 브라우저 모니터
+
+선택적 브라우저 화면은 RPM, 그래프, 게이지를 포함한 같은 Textual `DGX Dashboard`, `Fan Control` 탭을 표시합니다. 이 화면은 의도적으로 **READ ONLY**입니다. 브라우저 방문자는 팬을 토글하거나 설정을 수정할 수 없고, GPIO/PWM 소유권이나 fallback 동작에도 영향을 줄 수 없습니다.
+
+`config.toml`에서 활성화한 뒤, primary controller를 재시작하여 local monitor socket을 생성합니다.
+
+```toml
+[web]
+enabled = true
+host = "127.0.0.1"
+port = 8000
+```
+
+display 프로세스와 독립적으로 실행합니다.
+
+```bash
+./web.sh start
+./web.sh status
+# 브라우저 renderer만 중단하며 물리 controller는 계속 동작합니다.
+./web.sh stop
+```
+
+`web.sh`는 transient `systemd --user` 서비스를 만들며, `install.sh`가 설치 또는 자동 시작하지 않습니다. Raspberry Pi의 console auto-login 사용자 세션이 활성 상태라면 일반적으로 SSH 연결이 끊겨도 계속 실행됩니다. 해당 세션 없이 SSH에서 시작해 지속 실행하려면 먼저 한 번 `sudo loginctl enable-linger "$USER"`를 실행하세요. 로컬에서는 `http://127.0.0.1:8000`을 사용하고, 원격에서는 `ssh -L 8000:127.0.0.1:8000 <pi>`처럼 SSH tunnel을 사용하세요. 인증되지 않은 서비스를 인터넷에 직접 노출하지 말고, 원격 네트워크 접근이 필요하면 VPN 또는 인증된 TLS reverse proxy를 사용하세요.
+
 clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 
 ```bash
@@ -88,6 +112,17 @@ clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 ### Dashboard 색상
 
 `[dashboard.colors]`는 선택 사항입니다. `memory`, `utilization`, `temperature`는 각 차트의 전경색을 개별 지정합니다. Rich가 지원하는 색 이름(예: 8색 터미널의 `"ansi_yellow"`) 또는 정확한 `#RRGGBB`를 사용하세요. 항목을 생략하면 터미널 기본색을 사용하며, `"default"` 값은 허용되지 않습니다.
+
+### 브라우저 모니터
+
+| 항목 | 의미와 검증 조건 |
+| --- | --- |
+| `web.enabled` | 선택 boolean이며 기본값은 `false`입니다. `true`이면 primary controller가 제한된 읽기 전용 monitor state를 발행합니다. 변경 후 primary 앱을 재시작하세요. |
+| `web.host` | 선택 숫자 IPv4 또는 IPv6 bind 주소이며 기본값은 `127.0.0.1`입니다. launcher 입력이 shell 문법으로 해석되는 것을 막기 위해 `localhost` 이름은 의도적으로 거부합니다. private LAN 주소를 bind하려면 먼저 네트워크 접근 제어를 구성하세요. |
+| `web.port` | 선택 정수 `1..65535`이며 기본값은 `8000`입니다. |
+| `web.socket_path` | 선택 absolute Unix socket 경로입니다. 기본값은 설정 파일 옆의 `.dgx-fan-monitor.sock`입니다. socket은 같은 사용자만 접근할 수 있도록 mode `0600`이며, command를 받지 않고 primary 앱 종료 시 제거됩니다. |
+
+브라우저 client는 현재 120초 그래프 이력이 포함된 완전한 versioned replacement snapshot을 받습니다. 오래된 revision은 무시하며 malformed 또는 연결이 끊긴 monitor 데이터는 정상 telemetry로 취급하지 않고 monitor-stream 상태로 표시합니다. browser client의 시작·중지·재연결은 fan duty나 primary 앱의 수명에 영향을 주지 않습니다.
 
 ### Collection
 

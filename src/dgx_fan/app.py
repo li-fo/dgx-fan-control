@@ -53,6 +53,7 @@ from .controller import FanController
 from .dcgm import DCGMCollector
 from .hardware import FanHardware, create_hardware
 from .models import ControlSnapshot, EndpointSnapshot, NodeMemorySnapshot
+from .monitor import MonitorPublisher
 from .node_exporter import NodeExporterCollector
 from .ui import FanAppUI
 
@@ -169,6 +170,11 @@ class DGXFanApp(App[None]):
         self.latest: ControlSnapshot | None = None
         self._poll_tasks: tuple[Task[None], ...] = ()
         self._node_poll_tasks: tuple[Task[None], ...] = ()
+        self._control_timer: Any | None = None
+        self.monitor_publisher: MonitorPublisher | None = (
+            MonitorPublisher(config.web.socket_path) if config.web.enabled and config.web.socket_path else None
+        )
+        self._monitor_signature: tuple[object, ...] | None = None
 
     def compose(self) -> ComposeResult:
         yield FanAppUI(
@@ -184,13 +190,20 @@ class DGXFanApp(App[None]):
         self.hardware.set_duties(
             (self.config.control.fallback_speed_percent,) * 2
         )  # Application fallback before any external read.
-        self.set_interval(self.CONTROL_TICK_SECONDS, self.control_tick)
+        self._control_timer = self.set_interval(self.CONTROL_TICK_SECONDS, self.control_tick)
         self._poll_tasks = tuple(
             create_task(self._poll_loop(endpoint)) for endpoint in self.config.endpoints
         )
         self._node_poll_tasks = tuple(
             create_task(self._node_poll_loop(endpoint)) for endpoint in self.node_endpoints
         )
+        if self.monitor_publisher is not None:
+            try:
+                await self.monitor_publisher.start()
+            except (OSError, RuntimeError):
+                # Browser publication is optional display output. It must not
+                # prevent or alter the fan controller's safety lifecycle.
+                self.monitor_publisher = None
         self.control_tick()
 
     async def _poll_loop(self, endpoint: EndpointConfig) -> None:
@@ -233,7 +246,21 @@ class DGXFanApp(App[None]):
         fans = self.hardware.readings(current)
         self.latest = self.controller.update(self.endpoints, fans, current)
         self.hardware.set_duties(self.latest.duty_percents)
-        self.query_one(FanAppUI).update_snapshot(self.latest, current)
+        ui = self.query_one(FanAppUI)
+        ui.update_snapshot(self.latest, current)
+        monitor_signature = (
+            self.latest.duty_percents,
+            self.latest.state,
+            self.latest.reason,
+            tuple(fan.state for fan in self.latest.fans),
+            tuple(
+                (endpoint.endpoint_id, endpoint.sample_revision, endpoint.memory_sample_revision)
+                for endpoint in self.latest.endpoint_snapshots
+            ),
+        )
+        if self.monitor_publisher is not None and monitor_signature != self._monitor_signature:
+            self.monitor_publisher.publish(self.latest, ui.history, current)
+            self._monitor_signature = monitor_signature
 
     @staticmethod
     def _merge_memory_snapshot(
@@ -263,6 +290,9 @@ class DGXFanApp(App[None]):
         self.controller.set_power(not self.controller.power)
 
     async def on_unmount(self) -> None:
+        if self._control_timer is not None:
+            self._control_timer.stop()
+            self._control_timer = None
         for task in (*self._poll_tasks, *self._node_poll_tasks):
             task.cancel()
         for task in (*self._poll_tasks, *self._node_poll_tasks):
@@ -272,6 +302,9 @@ class DGXFanApp(App[None]):
                 pass
         self._poll_tasks = ()
         self._node_poll_tasks = ()
+        if self.monitor_publisher is not None:
+            await self.monitor_publisher.close()
+            self.monitor_publisher = None
 
 
 def build_parser() -> argparse.ArgumentParser:
