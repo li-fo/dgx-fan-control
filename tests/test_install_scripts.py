@@ -165,6 +165,61 @@ def test_interactive_launcher_stop_attempts_both_and_returns_first_failure(tmp_p
     assert command_log.read_text().splitlines() == ["web.sh stop", "display.sh stop"]
 
 
+def test_interactive_launcher_stop_attempts_available_helper_when_other_is_missing_or_not_executable(
+    tmp_path: Path,
+) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+    web_script = launcher.parent / "web.sh"
+    display_script = launcher.parent / "display.sh"
+
+    web_script.unlink()
+    missing_web = _run_launcher(launcher, command_log, "", "stop")
+
+    assert missing_web.returncode == 1
+    assert "could not stop the web monitor; script is missing or not executable" in missing_web.stderr
+    assert command_log.read_text().splitlines() == ["display.sh stop"]
+
+    command_log.unlink()
+    web_script.write_text("#!/bin/sh\nprintf '%s %s\\n' \"$(basename \"$0\")\" \"$*\" >> \"$DGX_FAN_LAUNCHER_LOG\"\n")
+    web_script.chmod(0o644)
+    non_executable_web = _run_launcher(launcher, command_log, "", "stop")
+
+    assert non_executable_web.returncode == 1
+    assert "could not stop the web monitor; script is missing or not executable" in non_executable_web.stderr
+    assert command_log.read_text().splitlines() == ["display.sh stop"]
+
+    command_log.unlink()
+    web_script.chmod(0o755)
+    display_script.unlink()
+    missing_display = _run_launcher(launcher, command_log, "", "stop")
+
+    assert missing_display.returncode == 1
+    assert "could not stop the HDMI display; script is missing or not executable" in missing_display.stderr
+    assert command_log.read_text().splitlines() == ["web.sh stop"]
+
+    command_log.unlink()
+    display_script.write_text(
+        "#!/bin/sh\n"
+        "printf '%s %s\\n' \"$(basename \"$0\")\" \"$*\" >> \"$DGX_FAN_LAUNCHER_LOG\"\n"
+    )
+    display_script.chmod(0o644)
+    non_executable_display = _run_launcher(launcher, command_log, "", "stop")
+
+    assert non_executable_display.returncode == 1
+    assert "could not stop the HDMI display; script is missing or not executable" in non_executable_display.stderr
+    assert command_log.read_text().splitlines() == ["web.sh stop"]
+
+
+def test_interactive_launcher_stop_with_extra_argument_has_no_side_effects(tmp_path: Path) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+
+    result = _run_launcher(launcher, command_log, "", "stop", "extra")
+
+    assert result.returncode == 64
+    assert "Usage: ./dgx-fan-control.sh" in result.stderr
+    assert not command_log.exists()
+
+
 def test_interactive_launcher_hdmi_default_web_no_and_web_failure_keeps_display(tmp_path: Path) -> None:
     launcher, command_log = _launcher_clone(tmp_path)
 

@@ -77,14 +77,20 @@ cleanup_started_web() {
 
 stop_managed_components() {
     local status=0 child_status
-    if "$WEB_SCRIPT" stop; then
+    if [[ ! -x "$WEB_SCRIPT" ]]; then
+        printf 'dgx-fan launcher: could not stop the web monitor; script is missing or not executable: %s\n' "$WEB_SCRIPT" >&2
+        status=1
+    elif "$WEB_SCRIPT" stop; then
         :
     else
         child_status=$?
         printf '%s\n' 'dgx-fan launcher: could not stop the web monitor' >&2
         status=$child_status
     fi
-    if "$DISPLAY_SCRIPT" stop; then
+    if [[ ! -x "$DISPLAY_SCRIPT" ]]; then
+        printf 'dgx-fan launcher: could not stop the HDMI display; script is missing or not executable: %s\n' "$DISPLAY_SCRIPT" >&2
+        (( status == 0 )) && status=1
+    elif "$DISPLAY_SCRIPT" stop; then
         :
     else
         child_status=$?
@@ -99,12 +105,6 @@ if [[ $# -eq 1 && ( "$1" == -h || "$1" == --help ) ]]; then
     exit 0
 fi
 if [[ $# -eq 1 && "$1" == stop ]]; then
-    for required_script in "$DISPLAY_SCRIPT" "$WEB_SCRIPT"; do
-        [[ -x "$required_script" ]] || {
-            printf 'dgx-fan launcher: required script is missing or not executable: %s\n' "$required_script" >&2
-            exit 1
-        }
-    done
     stop_managed_components
     exit $?
 fi
