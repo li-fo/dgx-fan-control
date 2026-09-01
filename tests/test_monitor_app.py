@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shlex
 import subprocess
 import sys
@@ -148,6 +149,117 @@ def test_web_launcher_is_valid_shell_and_uses_user_transient_service() -> None:
     assert "systemd-run --user --collect" in source
     assert "dgx_fan.web_server import RequestOriginServer" in source
     assert "display.sh" not in source and "start.sh" not in source
+
+
+def test_web_launcher_prints_configured_access_urls_only_after_service_start(tmp_path: Path) -> None:
+    """The launcher reports browser-facing URLs without changing service arguments."""
+
+    project = tmp_path / "project"
+    project.mkdir()
+    script = project / "web.sh"
+    script.write_text(Path("web.sh").read_text())
+    script.chmod(0o755)
+    (project / "config.toml").write_text(
+        '[web]\nenabled = true\nhost = "0.0.0.0"\nport = 8123\n'
+    )
+    virtual_bin = project / ".venv" / "bin"
+    virtual_bin.mkdir(parents=True)
+    for name, body in {
+        "python": '#!/bin/sh\nprintf "%s\\n%s\\n" "${DGX_TEST_WEB_HOST:-0.0.0.0}" "${DGX_TEST_WEB_PORT:-8123}"\n',
+        "dgx-fan-monitor": "#!/bin/sh\nexit 0\n",
+    }.items():
+        command = virtual_bin / name
+        command.write_text(body)
+        command.chmod(0o755)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for name, body in {
+        "systemctl": '#!/bin/sh\nif [ "$2" = is-active ]; then exit 3; fi\nexit 0\n',
+        "systemd-run": '#!/bin/sh\nexit "${DGX_TEST_SYSTEMD_RUN_STATUS:-0}"\n',
+        "ip": "#!/bin/sh\nprintf '%s\\n' '2: eth0    inet 192.168.1.7/24 scope global eth0'\n",
+    }.items():
+        command = fake_bin / name
+        command.write_text(body)
+        command.chmod(0o755)
+
+    environment = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+    started = subprocess.run(
+        ["bash", str(script), "start"],
+        cwd=project,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert started.returncode == 0, started.stderr
+    assert started.stdout == "Browser monitor: http://192.168.1.7:8123/\n"
+
+    failed = subprocess.run(
+        ["bash", str(script), "start"],
+        cwd=project,
+        env={**environment, "DGX_TEST_SYSTEMD_RUN_STATUS": "1"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert failed.returncode == 1
+    assert "Browser monitor:" not in failed.stdout
+
+
+def test_web_launcher_formats_loopback_and_wildcard_fallback_urls(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    script = project / "web.sh"
+    script.write_text(Path("web.sh").read_text())
+    script.chmod(0o755)
+    (project / "config.toml").write_text('[web]\nenabled = true\nhost = "::1"\nport = 9000\n')
+    virtual_bin = project / ".venv" / "bin"
+    virtual_bin.mkdir(parents=True)
+    for name, body in {
+        "python": '#!/bin/sh\nprintf "%s\\n%s\\n" "${DGX_TEST_WEB_HOST}" "${DGX_TEST_WEB_PORT}"\n',
+        "dgx-fan-monitor": "#!/bin/sh\nexit 0\n",
+    }.items():
+        command = virtual_bin / name
+        command.write_text(body)
+        command.chmod(0o755)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for name, body in {
+        "systemctl": '#!/bin/sh\nif [ "$2" = is-active ]; then exit 3; fi\nexit 0\n',
+        "systemd-run": "#!/bin/sh\nexit 0\n",
+        "ip": "#!/bin/sh\nexit 0\n",
+    }.items():
+        command = fake_bin / name
+        command.write_text(body)
+        command.chmod(0o755)
+    environment = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "DGX_TEST_WEB_HOST": "::1",
+        "DGX_TEST_WEB_PORT": "9000",
+    }
+    loopback = subprocess.run(
+        ["bash", str(script), "restart"],
+        cwd=project,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert loopback.returncode == 0, loopback.stderr
+    assert loopback.stdout == "Browser monitor: http://[::1]:9000/\n"
+
+    wildcard = subprocess.run(
+        ["bash", str(script), "start"],
+        cwd=project,
+        env={**environment, "DGX_TEST_WEB_HOST": "0.0.0.0", "DGX_TEST_WEB_PORT": "8123"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert wildcard.returncode == 0, wildcard.stderr
+    assert wildcard.stdout == "Browser monitor: http://<this-pi-ip>:8123/\n"
 
 
 def test_textual_serve_app_service_receives_monitor_first_frame(tmp_path: Path) -> None:

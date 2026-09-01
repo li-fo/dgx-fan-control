@@ -55,6 +55,37 @@ PY
 HOST=${WEB_VALUES[0]}
 PORT=${WEB_VALUES[1]}
 
+print_browser_urls() {
+    case "$HOST" in
+        0.0.0.0)
+            # A wildcard listener is reachable through each non-loopback IPv4
+            # address assigned to this Pi.  Keep discovery best-effort so a
+            # minimal image without iproute2 still starts the monitor.
+            local -a addresses=()
+            if command -v ip >/dev/null 2>&1; then
+                mapfile -t addresses < <(
+                    ip -4 -o addr show scope global 2>/dev/null |
+                        awk '$3 == "inet" { sub(/\/.*/, "", $4); if ($4 !~ /^127\./ && !seen[$4]++) print $4 }'
+                )
+            fi
+            if [[ ${#addresses[@]} -eq 0 ]]; then
+                printf 'Browser monitor: http://<this-pi-ip>:%s/\n' "$PORT"
+                return
+            fi
+            local address
+            for address in "${addresses[@]}"; do
+                printf 'Browser monitor: http://%s:%s/\n' "$address" "$PORT"
+            done
+            ;;
+        ::1)
+            printf 'Browser monitor: http://[::1]:%s/\n' "$PORT"
+            ;;
+        *)
+            printf 'Browser monitor: http://%s:%s/\n' "$HOST" "$PORT"
+            ;;
+    esac
+}
+
 if [[ "$1" == restart ]] && systemctl --user is-active --quiet "$UNIT.service"; then
     systemctl --user stop "$UNIT.service"
 fi
@@ -69,5 +100,6 @@ command -v systemd-run >/dev/null 2>&1 || fail 'systemd-run is required'
 # adapter keeps the bind address separate from browser-visible request URLs.
 printf -v MONITOR_COMMAND '%q ' "$MONITOR_BIN" --config "$CONFIG_PATH"
 readonly SERVER_PROGRAM='from dgx_fan.web_server import RequestOriginServer; import sys; RequestOriginServer(sys.argv[1], host=sys.argv[2], port=int(sys.argv[3])).serve()'
-exec systemd-run --user --collect --service-type=exec --unit="$UNIT" \
+systemd-run --user --collect --service-type=exec --unit="$UNIT" \
     --property=Restart=no "$PYTHON_BIN" -c "$SERVER_PROGRAM" "$MONITOR_COMMAND" "$HOST" "$PORT"
+print_browser_urls
