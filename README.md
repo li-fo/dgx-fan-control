@@ -48,7 +48,15 @@ cp config.example.toml config.toml
 
 Install `uv` first using the [official instructions](https://docs.astral.sh/uv/getting-started/installation/) if needed. The installer runs `uv sync --locked --extra raspberry-pi --no-dev`, validates the clone-local configuration, adds the dual-PWM overlay, and configures Raspberry Pi 4 tty1 console auto-login. If `config.toml` is absent, it creates a copy and stops so you can edit it. Run `./install.sh` without `--reboot` to install first and reboot manually afterward, or use `./install.sh --dry-run` to inspect its action.
 
-The app itself runs as the regular user, never as root. After installation, launch it in the current terminal with:
+The app itself runs as the regular user, never as root. For the usual interactive launch, run:
+
+```bash
+./dgx-fan-control.sh
+```
+
+Choose the current terminal or the attached HDMI display, then choose whether to start the optional read-only browser monitor. In current-terminal mode the app stays in the foreground; in HDMI mode the tty8 display service continues after SSH disconnects. A normal **Ctrl+Q** exit from the terminal leaves a web monitor selected by the launcher running. If the primary terminal startup fails, the launcher stops only a web monitor that it itself started.
+
+The direct commands remain available for automation and troubleshooting. Launch in the current terminal with:
 
 ```bash
 ./start.sh

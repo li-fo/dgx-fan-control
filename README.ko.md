@@ -48,7 +48,15 @@ cp config.example.toml config.toml
 
 필요하면 먼저 [공식 uv 설치 안내](https://docs.astral.sh/uv/getting-started/installation/)를 따르세요. 설치 스크립트는 `uv sync --locked --extra raspberry-pi --no-dev`를 실행하고 clone-local 설정을 검증한 뒤 2채널 PWM overlay와 Raspberry Pi 4 tty1 콘솔 자동 로그인을 구성합니다. `config.toml`이 없으면 예시 파일을 만들고 중지하므로 편집 후 다시 실행하세요. `--reboot` 없이 `./install.sh`를 실행하면 설치 후 직접 재부팅할 수 있고, `./install.sh --dry-run`은 예정 동작만 확인합니다.
 
-앱은 root가 아닌 일반 사용자로 실행합니다. 설치 후 현재 터미널에서 실행하려면:
+앱은 root가 아닌 일반 사용자로 실행합니다. 일반적인 대화형 실행은 다음 명령을 사용합니다.
+
+```bash
+./dgx-fan-control.sh
+```
+
+현재 터미널 또는 연결된 HDMI 디스플레이를 선택한 뒤, 선택적으로 읽기 전용 브라우저 모니터의 실행 여부를 고릅니다. 현재 터미널 모드는 foreground로 실행되고 HDMI 모드는 SSH 연결이 끊겨도 tty8 display service가 유지됩니다. 터미널에서 **Ctrl+Q**로 정상 종료하면 launcher가 선택해 시작한 web monitor는 계속 실행됩니다. 반대로 primary terminal 시작이 실패한 경우에는 launcher가 이번 실행에서 시작한 web monitor만 중지합니다.
+
+자동화와 문제 해결을 위한 직접 명령도 계속 사용할 수 있습니다. 현재 터미널에서 실행하려면:
 
 ```bash
 ./start.sh

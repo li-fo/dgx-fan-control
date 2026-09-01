@@ -51,6 +51,108 @@ def _run(
     )
 
 
+def _launcher_clone(tmp_path: Path) -> tuple[Path, Path]:
+    clone = tmp_path / "launcher-clone"
+    clone.mkdir()
+    launcher = clone / "dgx-fan-control.sh"
+    shutil.copy2(ROOT / "dgx-fan-control.sh", launcher)
+    command_log = tmp_path / "launcher-command.log"
+    for name, status_variable in {
+        "start.sh": "DGX_FAN_FAKE_START_STATUS",
+        "display.sh": "DGX_FAN_FAKE_DISPLAY_STATUS",
+        "web.sh": "DGX_FAN_FAKE_WEB_STATUS",
+    }.items():
+        script = clone / name
+        script.write_text(
+            "#!/bin/sh\n"
+            "printf '%s %s\\n' \"$(basename \"$0\")\" \"$*\" >> \"$DGX_FAN_LAUNCHER_LOG\"\n"
+            f"exit \"${{{status_variable}:-0}}\"\n"
+        )
+        script.chmod(0o755)
+    return launcher, command_log
+
+
+def _run_launcher(
+    launcher: Path, command_log: Path, responses: str, **statuses: str
+) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment.update({"DGX_FAN_LAUNCHER_LOG": str(command_log), **statuses})
+    return subprocess.run(
+        ["bash", str(launcher)],
+        cwd=launcher.parent,
+        env=environment,
+        input=responses,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_interactive_launcher_terminal_starts_web_before_foreground_primary(tmp_path: Path) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+
+    result = _run_launcher(launcher, command_log, "1\ny\n")
+
+    assert result.returncode == 0, result.stderr
+    assert command_log.read_text().splitlines() == ["web.sh start", "start.sh "]
+
+
+def test_interactive_launcher_terminal_failure_stops_only_its_web_service(tmp_path: Path) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+
+    result = _run_launcher(
+        launcher,
+        command_log,
+        "terminal\nyes\n",
+        DGX_FAN_FAKE_START_STATUS="7",
+    )
+
+    assert result.returncode == 7
+    assert command_log.read_text().splitlines() == ["web.sh start", "start.sh ", "web.sh stop"]
+
+
+def test_interactive_launcher_hdmi_default_web_no_and_web_failure_keeps_display(tmp_path: Path) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+
+    no_web = _run_launcher(launcher, command_log, "2\n\n")
+
+    assert no_web.returncode == 0, no_web.stderr
+    assert command_log.read_text().splitlines() == ["display.sh start"]
+
+    command_log.unlink()
+    web_failure = _run_launcher(
+        launcher,
+        command_log,
+        "hdmi\ny\n",
+        DGX_FAN_FAKE_WEB_STATUS="9",
+    )
+
+    assert web_failure.returncode == 0, web_failure.stderr
+    assert command_log.read_text().splitlines() == ["display.sh start", "web.sh start"]
+    assert "continuing with the selected primary display" in web_failure.stderr
+
+
+def test_interactive_launcher_display_failure_blocks_web_and_cancel_has_no_side_effects(tmp_path: Path) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+
+    display_failure = _run_launcher(
+        launcher,
+        command_log,
+        "2\ny\n",
+        DGX_FAN_FAKE_DISPLAY_STATUS="5",
+    )
+
+    assert display_failure.returncode == 5
+    assert command_log.read_text().splitlines() == ["display.sh start"]
+
+    command_log.unlink()
+    cancelled = _run_launcher(launcher, command_log, "h\nnot-a-choice\nq\n")
+
+    assert cancelled.returncode == 0
+    assert "Invalid choice" in cancelled.stderr
+    assert not command_log.exists()
+
+
 def _sandbox(tmp_path: Path) -> Path:
     sandbox = tmp_path / "system-root"
     (sandbox / "boot/firmware").mkdir(parents=True)
