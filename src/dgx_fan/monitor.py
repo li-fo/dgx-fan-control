@@ -371,10 +371,12 @@ class MonitorPublisher:
             encode = bool(self._clients)
             result = await asyncio.to_thread(self._build_frame, item, proposed_revision, encode)
             self._processed_generation = max(self._processed_generation, item.generation)
-            # A newer accepted input can arrive while JSON is being encoded.
-            # Never expose that older candidate as the current replacement
-            # frame: a client must receive a generation and its exact bytes.
-            if result is not None and result.generation == self._accepted_generation:
+            # The event loop installs each completed candidate as one atomic
+            # identity/bytes pair.  Do not drop a completed older candidate
+            # merely because another input arrived while it encoded: doing so
+            # can starve all delivery when encoding is slower than cadence.
+            # New clients apply their connection-generation barrier below.
+            if result is not None:
                 self._next_revision = result.revision
                 self._frame = result
 
@@ -451,13 +453,20 @@ class MonitorPublisher:
     async def _serve_client(
         self, _reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        sent_generation = -1
+        # A client that reconnects after a newer state was accepted must not
+        # hydrate the previous wire frame while the newest one is encoding.
+        required_generation = self._accepted_generation
+        sent_generation = required_generation - 1
         self._clients.add(writer)
         self._request_hydration()
         try:
             while True:
                 frame = self._frame
-                if frame is not None and frame.generation > sent_generation:
+                if (
+                    frame is not None
+                    and frame.generation >= required_generation
+                    and frame.generation > sent_generation
+                ):
                     writer.write(frame.encoded)
                     await writer.drain()
                     sent_generation = frame.generation

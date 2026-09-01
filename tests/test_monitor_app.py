@@ -6,6 +6,7 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from test_monitor import _state
 from textual.widgets import Button, Static
@@ -14,6 +15,29 @@ from dgx_fan.config import WebConfig, load_config
 from dgx_fan.monitor import MonitorPublisher
 from dgx_fan.monitor_app import DGXFanMonitorApp
 from dgx_fan.ui import FanAppUI
+
+
+async def _stop_owned_app_service(service: Any, *, stop_timeout: float = 4, process_timeout: float = 2) -> None:
+    """Bound textual-serve shutdown without touching processes it does not own."""
+    stop_task = asyncio.create_task(service.stop())
+    try:
+        await asyncio.wait_for(asyncio.shield(stop_task), timeout=stop_timeout)
+        return
+    except TimeoutError:
+        process = service._process
+        assert process is not None
+        if process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=process_timeout)
+            except TimeoutError:
+                process.kill()
+                await asyncio.wait_for(process.wait(), timeout=process_timeout)
+        try:
+            await asyncio.wait_for(asyncio.shield(stop_task), timeout=process_timeout)
+        except TimeoutError:
+            stop_task.cancel()
+            await asyncio.gather(stop_task, return_exceptions=True)
 
 
 def test_monitor_app_hydrates_read_only_ui_without_hardware(tmp_path: Path) -> None:
@@ -159,23 +183,6 @@ def test_textual_serve_app_service_receives_monitor_first_frame(tmp_path: Path) 
             while b"DGX Dashboard" not in b"".join(packets):
                 await asyncio.sleep(0.05)
 
-        async def stop_owned_service() -> None:
-            stop_task = asyncio.create_task(service.stop())
-            try:
-                await asyncio.wait_for(asyncio.shield(stop_task), timeout=4)
-                return
-            except TimeoutError:
-                process = service._process
-                assert process is not None
-                if process.returncode is None:
-                    process.terminate()
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=2)
-                    except TimeoutError:
-                        process.kill()
-                        await asyncio.wait_for(process.wait(), timeout=2)
-                await asyncio.wait_for(stop_task, timeout=2)
-
         try:
             await asyncio.wait_for(service.start(100, 30), timeout=4)
             await asyncio.wait_for(wait_for_first_frame(), timeout=4)
@@ -185,6 +192,45 @@ def test_textual_serve_app_service_receives_monitor_first_frame(tmp_path: Path) 
             assert b"Fan Control" in rendered
             assert b"READ ONLY" in rendered
         finally:
-            await stop_owned_service()
+            await _stop_owned_app_service(service)
+
+    asyncio.run(exercise())
+
+
+def test_app_service_timeout_cleanup_terminates_only_the_owned_child() -> None:
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.terminate_calls = 0
+            self.kill_calls = 0
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+
+        async def wait(self) -> int:
+            if self.kill_calls == 0:
+                await asyncio.Future()
+            self.returncode = 9
+            return self.returncode
+
+    class HangingService:
+        def __init__(self, process: FakeProcess) -> None:
+            self._process = process
+
+        async def stop(self) -> None:
+            await asyncio.Future()
+
+    async def exercise() -> None:
+        owned = FakeProcess()
+        unrelated = FakeProcess()
+        await _stop_owned_app_service(HangingService(owned), stop_timeout=0.01, process_timeout=0.01)
+        assert owned.terminate_calls == 1
+        assert owned.kill_calls == 1
+        assert owned.returncode == 9
+        assert unrelated.terminate_calls == 0
+        assert unrelated.kill_calls == 0
 
     asyncio.run(exercise())
