@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from dgx_fan.config import AppConfig, load_config
+from dgx_fan.config import AppConfig, ConfigError, load_config
 from dgx_fan.settings import (
     SettingsApplicationError,
     SettingsCommandServer,
@@ -95,6 +95,36 @@ def test_persists_comment_preserving_patch_backup_and_consecutive_saves(
         assert path.with_name("config.toml.bak").read_text() != original
         assert stat.S_IMODE(path.stat().st_mode) == 0o640
         assert stat.S_IMODE(path.with_name("config.toml.bak").stat().st_mode) == 0o640
+
+    asyncio.run(exercise())
+
+
+def test_fan_mode_patch_persists_and_omitting_it_retains_current_mode(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        path = _config_path(tmp_path)
+        applied: list[AppConfig] = []
+        service, _power = _service(path, applied)
+        saved = await service.save({"control": {"fan_mode": "linked"}}, 0)
+        assert saved.config.control.fan_mode == "linked"
+        assert service.response()["settings"]["control"]["fan_mode"] == "linked"
+        retained = await service.save(_patch(2.5), 1)
+        assert retained.config.control.fan_mode == "linked"
+        assert applied[-1].control.fan_mode == "linked"
+
+    asyncio.run(exercise())
+
+
+def test_invalid_fan_mode_patch_does_not_persist_or_apply(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        path = _config_path(tmp_path)
+        original = path.read_bytes()
+        applied: list[AppConfig] = []
+        service, _power = _service(path, applied)
+        with pytest.raises(ConfigError, match=r"control\.fan_mode"):
+            await service.save({"control": {"fan_mode": "invalid"}}, 0)
+        assert path.read_bytes() == original
+        assert applied == []
+        assert service.effective.revision == 0
 
     asyncio.run(exercise())
 

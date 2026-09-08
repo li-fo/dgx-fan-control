@@ -2,7 +2,7 @@
 
 [English README](README.md)
 
-`dgx-fan`은 Raspberry Pi 4에서 최대 두대의 DCGM exporter의 GPU 정보를 읽고, 두 개의 4선 PWM 팬을 각각 독립적으로 제어하는 Python Textual 앱입니다. Dashboard에는 GPU 메모리·사용률·온도와 개별 팬의 상태가 표시됩니다. DCGM에서 DGX Spark 메모리 정보를 읽을 수 없기 때문에, node_exporter를 통해각 DGX의  unified-memory 점유율을 읽을 수 있습니다.
+`dgx-fan`은 Raspberry Pi 4에서 최대 두대의 DCGM exporter의 GPU 정보를 읽고, 두 개의 4선 PWM 팬을 각각 독립적으로 또는 더 높은 demand를 함께 따르는 linked 모드로 제어하는 Python Textual 앱입니다. Dashboard에는 GPU 메모리·사용률·온도와 개별 팬의 상태가 표시됩니다. DCGM에서 DGX Spark 메모리 정보를 읽을 수 없기 때문에, node_exporter를 통해각 DGX의  unified-memory 점유율을 읽을 수 있습니다.
 
 ![DGX Fan Control 7inch LCE](./images/dgx-fan-control.webp)
 
@@ -177,6 +177,7 @@ clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 | 항목 | 의미와 검증 조건 |
 | --- | --- |
 | `control.fan_endpoint_ids` | 필수 두 항목 배열이며 **Fan 1, Fan 2** 순서입니다. 각 값은 설정된 `[[dgx]].id`를 참조해야 합니다. 두 팬이 같은 DGX를 냉각하면 같은 ID를 반복하세요. 각 팬은 매핑된 endpoint의 유효 GPU 온도 중 최고값을 사용합니다. |
+| `control.fan_mode` | 선택값 `"independent"`(기본값) 또는 `"linked"`입니다. independent는 각 매핑 endpoint의 hysteresis 적용, normal cap 제한 곡선 demand를 사용합니다. linked는 두 demand 중 큰 값을 두 팬에 적용하며 온도를 평균내지 않습니다. startup/tach boost도 더 높은 최종 duty로 두 출력을 함께 올립니다. |
 | `control.enabled_at_startup` | 필수 boolean입니다. `true`이면 자동 제어로 시작하며, `false`이면 safety override가 없는 한 사용자 Off 상태로 시작합니다. |
 | `control.max_speed_percent` | 필수 정수 `1..100`입니다. 정상 stage duty만 제한합니다. |
 | `control.fallback_speed_percent` | 선택 정수 `0..100`이며 생략 시 `100`입니다. 첫 유효 sample 전과 safety override 동안 두 팬에 적용되며 `max_speed_percent`와 독립적입니다. |
@@ -185,6 +186,8 @@ clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 | `control.recovery_seconds` | 필수 유한 수 `>= 0`입니다. 아래에 설명한 safety recovery dwell 시간입니다. |
 
 DCGM endpoint unavailable/stale, 매핑된 GPU 온도 누락, fan stall, 비상 온도에서는 두 팬 모두 safety override가 적용됩니다. 이 상태는 UI Off보다 우선합니다. 복구 가능한 safety 조건이 해제된 뒤에도 모든 유효 GPU의 최고 온도가 `emergency_temperature_celsius - hysteresis_celsius`보다 낮은 상태를 `recovery_seconds` 동안 연속 유지해야 자동 제어로 복귀합니다. 이 dwell은 일반 stage 전환에는 적용되지 않습니다. stall된 팬은 앱을 재시작할 때까지 unsafe 상태로 유지됩니다.
+
+**Setting > Fan Control**에서 **Independent** 또는 **Linked (higher demand)**를 고르고 **Save and Apply**를 누르면 저장 및 즉시 적용됩니다. 이 mode만 바꾸면 endpoint mapping, endpoint별 stage/hysteresis, safety/boost 상태는 유지되고 다음 evaluation에서 출력 coordination만 바뀝니다. `config.toml`을 직접 편집하면 controller 재시작이 필요합니다. normal cap은 linked demand를 비교하기 전에 계속 적용되고, safety fallback은 이 cap과 독립적입니다. 두 editor가 같은 setting을 보이도록 updated controller와 display/web monitor 코드를 함께 실행하세요.
 
 #### `[[control.stages]]`: 4단계 온도 곡선
 

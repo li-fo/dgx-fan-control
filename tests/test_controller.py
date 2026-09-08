@@ -5,12 +5,15 @@ from dgx_fan.controller import FanController
 from dgx_fan.models import EndpointSnapshot, FanReading, GPUStat, Stage
 
 
-def _controller(fallback_speed_percent: int = 100) -> FanController:
+def _controller(
+    fallback_speed_percent: int = 100, *, fan_mode: str = "independent", max_speed_percent: int = 90
+) -> FanController:
     control = ControlConfig(
-        True, 90, 2, 75, 10,
+        True, max_speed_percent, 2, 75, 10,
         (Stage(45, 20), Stage(55, 50), Stage(70, 80), Stage(None, 100)),
         ("one", "two"),
         fallback_speed_percent,
+        fan_mode,
     )
     hardware = HardwareConfig("fake", (18, 19), 25000, True, (23, 24), (2, 2), 1, 5)
     return FanController(control, hardware)
@@ -37,6 +40,39 @@ def test_normal_curve_hysteresis_and_targets_are_independent() -> None:
     assert snapshot.fan_temperatures_celsius == (40, 60)
     assert controller.update(_endpoints(54, 52), FANS, 1).duty_percents == (50, 50)
     assert controller.update(_endpoints(54, 52), FANS, 2).active_stages == (1, 1)
+
+
+def test_linked_mode_uses_higher_capped_mapped_demand_in_both_directions() -> None:
+    controller = _controller(fan_mode="linked", max_speed_percent=100)
+    first_hot = controller.update(_endpoints(40, 71), FANS, 0)
+    assert first_hot.state == "AUTO ON" and first_hot.duty_percents == (100, 100)
+    second_hot = controller.update(_endpoints(71, 40), FANS, 1)
+    assert second_hot.state == "AUTO ON" and second_hot.duty_percents == (100, 100)
+    assert controller.update(_endpoints(40, 40), FANS, 2).duty_percents == (20, 20)
+    controller.reconfigure(replace(controller.config, fan_mode="independent"), controller.hardware)
+    assert controller.update(_endpoints(71, 40), FANS, 3).duty_percents == (100, 20)
+
+
+def test_linked_mode_preserves_stages_and_applies_zero_and_normal_cap() -> None:
+    controller = _controller(fan_mode="linked", max_speed_percent=25)
+    assert controller.update(_endpoints(60, 40), FANS, 0).duty_percents == (25, 25)
+    assert controller.update(_endpoints(54, 40), FANS, 1).active_stages == (2, 0)
+    control = replace(controller.config, stages=(Stage(45, 0), Stage(55, 0), Stage(70, 0), Stage(None, 100)))
+    controller.reconfigure(control, controller.hardware)
+    assert controller.update(_endpoints(40, 40), FANS, 2).duty_percents == (0, 0)
+
+
+def test_mode_reconfigure_preserves_latches_and_linked_boost_is_shared() -> None:
+    controller = _controller()
+    controller.set_power(False)
+    assert controller.update(_endpoints(40, 60), FANS, 0).duty_percents == (0, 0)
+    controller.reconfigure(replace(controller.config, fan_mode="linked"), controller.hardware)
+    controller.set_power(True)
+    snapshot = controller.update(_endpoints(40, 60), FANS, 1)
+    assert snapshot.duty_percents == (100, 100)
+    assert snapshot.active_stages == (0, 2)
+    assert controller._previous_duties == [100, 100]
+    assert controller.update(_endpoints(40, 60), FANS, 2).duty_percents == (80, 80)
 
 
 def test_global_off_and_per_fan_startup_boost() -> None:

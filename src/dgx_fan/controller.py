@@ -116,6 +116,8 @@ class FanController:
             self._select_stage(1, normal_temperatures[1]),
         )
         targets = tuple(min(self.config.stages[stage].speed_percent, self.config.max_speed_percent) for stage in stages)
+        if self.config.fan_mode == "linked":
+            targets = (max(targets),) * 2
         duties = list(targets)
         boosting = False
         for index, target in enumerate(targets):
@@ -127,6 +129,8 @@ class FanController:
                 boosting = True
             else:
                 self._boost_until[index] = None
+        if self.config.fan_mode == "linked":
+            duties = [max(duties)] * 2
         self._previous_duties = duties
         return self._snapshot(
             (duties[0], duties[1]), "startup boost" if boosting else "temperature curve",

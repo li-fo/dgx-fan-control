@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from textual.widgets import Button, Input
+from textual.widgets import Button, Input, Select
 
 from dgx_fan.app import DGXFanApp
 from dgx_fan.config import load_config
@@ -353,10 +353,12 @@ def test_local_and_browser_modals_save_and_browser_power_button_uses_real_socket
                 await browser_pilot.pause()
                 assert isinstance(browser.screen, SettingsScreen)
                 browser.screen.query_one("#setting-collection-interval_seconds", Input).value = "0.31"
+                browser.screen.query_one("#setting-control-fan-mode", Select).value = "linked"
                 browser.screen.query_one("#setting-save", Button).press()
                 await browser_pilot.pause(0.5)
                 assert not isinstance(browser.screen, SettingsScreen)
                 assert controller.config.collection.interval_seconds == 0.31
+                assert controller.config.control.fan_mode == "linked"
 
                 controller.query_one("#fan-settings", Button).press()
                 await controller_pilot.pause()

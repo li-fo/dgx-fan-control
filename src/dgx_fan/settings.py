@@ -111,6 +111,7 @@ def settings_payload(config: AppConfig) -> dict[str, object]:
         },
         "control": {
             "fan_endpoint_ids": list(config.control.fan_endpoint_ids),
+            "fan_mode": config.control.fan_mode,
             "enabled_at_startup": config.control.enabled_at_startup,
             "max_speed_percent": config.control.max_speed_percent,
             "fallback_speed_percent": config.control.fallback_speed_percent,
@@ -560,6 +561,7 @@ class SettingsService:
                 },
                 "control": {
                     "fan_endpoint_ids",
+                    "fan_mode",
                     "enabled_at_startup",
                     "max_speed_percent",
                     "fallback_speed_percent",

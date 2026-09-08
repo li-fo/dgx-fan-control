@@ -2,7 +2,7 @@
 
 [한국어 README](README.ko.md)
 
-`dgx-fan` is a Python Textual application for a Raspberry Pi 4. It reads GPU data from up to two DCGM exporter endpoints and independently drives two 4-wire PWM fans. The dashboard shows GPU memory, utilisation, and temperature, along with each fan's status. Since DCGM cannot report DGX Spark memory information, node_exporter can provide unified-memory usage for each DGX.
+`dgx-fan` is a Python Textual application for a Raspberry Pi 4. It reads GPU data from up to two DCGM exporter endpoints and drives two 4-wire PWM fans independently or in a linked higher-demand mode. The dashboard shows GPU memory, utilisation, and temperature, along with each fan's status. Since DCGM cannot report DGX Spark memory information, node_exporter can provide unified-memory usage for each DGX.
 
 ![DGX Fan Control 7inch LCE](./images/dgx-fan-control.webp)
 
@@ -177,6 +177,7 @@ Each DGX is collected independently. A fresh cached sample can be used only unti
 | Field | Meaning and validation |
 | --- | --- |
 | `control.fan_endpoint_ids` | Required two-item array in **Fan 1, Fan 2** order. Each item must reference a configured `[[dgx]].id`. Repeat one ID when both fans cool the same DGX. Each fan uses the highest valid GPU temperature at its mapped endpoint. |
+| `control.fan_mode` | Optional `"independent"` (default) or `"linked"`. Independent uses each mapped endpoint's own hysteresis-aware, normal-cap-limited curve demand. Linked applies the higher of those two demands to both fans; it does not average temperatures. Startup/tach boost also makes both outputs follow the higher final duty. |
 | `control.enabled_at_startup` | Required boolean. `true` starts normal automatic control; `false` starts in user-Off state unless safety override is active. |
 | `control.max_speed_percent` | Required integer `1..100`. Caps normal stage duty only. |
 | `control.fallback_speed_percent` | Optional integer `0..100`, default `100`. Duty for both fans before the first valid sample and during safety override; it is independent of `max_speed_percent`. |
@@ -185,6 +186,8 @@ Each DGX is collected independently. A fresh cached sample can be used only unti
 | `control.recovery_seconds` | Required finite number `>= 0`. Safety-recovery dwell, described below. |
 
 Safety override applies to both fans for unavailable/stale DCGM endpoints, missing mapped GPU temperatures, a stalled fan, or emergency temperature. It overrides the UI Off control. After a recoverable safety condition clears, the maximum valid GPU temperature must remain below `emergency_temperature_celsius - hysteresis_celsius` continuously for `recovery_seconds` before automatic control resumes. This dwell is **not** used for ordinary stage changes. A stalled fan remains unsafe until the app is restarted.
+
+Select **Independent** or **Linked (higher demand)** in **Setting > Fan Control**, then **Save and Apply** to persist and apply it live. Changing only this mode retains endpoint mappings, per-endpoint stages/hysteresis, and safety/boost state; it changes output coordination on the next evaluation. Manual `config.toml` edits require a controller restart. The normal cap still applies before linked demands are compared; safety fallback remains independent of that cap. Run the updated controller and display/web monitor code together so both editors expose the same setting.
 
 #### `[[control.stages]]`: four-stage temperature curve
 

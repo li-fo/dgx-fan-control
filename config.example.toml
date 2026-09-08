@@ -50,6 +50,9 @@ retry_delay_seconds = 10.0
 [control]
 # Fan 1 and Fan 2 are explicitly mapped. For one DGX, use the same ID twice.
 fan_endpoint_ids = ["dgx-1", "dgx-1"]
+# independent uses each mapped endpoint's own curve demand; linked applies the
+# higher mapped demand to both fans. Safety and startup/tach boost stay shared.
+fan_mode = "independent"
 enabled_at_startup = true
 max_speed_percent = 100
 # Optional integer 0..100 (default 100) for missing/stale/failed telemetry,

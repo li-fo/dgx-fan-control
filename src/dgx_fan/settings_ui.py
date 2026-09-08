@@ -233,6 +233,18 @@ class SettingsScreen(ModalScreen[bool]):
                         ),
                     )
                     yield self._row(
+                        "Fan mode",
+                        Select(
+                            [
+                                ("Independent", "independent"),
+                                ("Linked (higher demand)", "linked"),
+                            ],
+                            value=control.get("fan_mode", "independent"),
+                            id="setting-control-fan-mode",
+                            classes="setting-input",
+                        ),
+                    )
+                    yield self._row(
                         "Enable at next startup",
                         Switch(
                             bool(control.get("enabled_at_startup")),
@@ -379,6 +391,7 @@ class SettingsScreen(ModalScreen[bool]):
                     self._select_value("control-fan-1", "Fan 1 endpoint"),
                     self._select_value("control-fan-2", "Fan 2 endpoint"),
                 ],
+                "fan_mode": self._select_value("control-fan-mode", "Fan mode"),
                 "enabled_at_startup": self.query_one(
                     "#setting-control-enabled-at-startup", Switch
                 ).value,

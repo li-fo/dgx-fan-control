@@ -46,6 +46,7 @@ class ControlConfig:
     stages: tuple[Stage, ...]
     fan_endpoint_ids: tuple[str, str]
     fallback_speed_percent: int = 100
+    fan_mode: str = "independent"
 
 
 @dataclass(frozen=True)
@@ -301,6 +302,9 @@ def load_config(path: Path) -> AppConfig:
     endpoint_ids = {endpoint.id for endpoint in endpoints}
     if any(endpoint_id not in endpoint_ids for endpoint_id in fan_endpoint_ids):
         raise ConfigError("control.fan_endpoint_ids must reference configured dgx IDs")
+    fan_mode = control.get("fan_mode", "independent")
+    if not isinstance(fan_mode, str) or fan_mode not in {"independent", "linked"}:
+        raise ConfigError("control.fan_mode must be independent or linked")
     control_config = ControlConfig(
         enabled,
         _integer(
@@ -318,6 +322,7 @@ def load_config(path: Path) -> AppConfig:
             "control.fallback_speed_percent",
             maximum=100,
         ),
+        fan_mode,
     )
     hardware = _mapping(raw.get("hardware"), "hardware")
     backend = hardware.get("backend")

@@ -65,6 +65,7 @@ def test_load_valid_config(tmp_path: Path) -> None:
     assert config.hardware.shutdown_mode == "full"
     assert config.control.fan_endpoint_ids == ("one", "one")
     assert config.control.fallback_speed_percent == 100
+    assert config.control.fan_mode == "independent"
     assert config.dashboard_colors == DashboardColors()
     assert config.collection.retry_count == 0
     assert config.collection.retry_delay_seconds == 10.0
@@ -184,6 +185,20 @@ def test_rejects_invalid_control_fallback_speed_percent(tmp_path: Path, value: s
     path.write_text(_config().replace("max_speed_percent = 90", f"max_speed_percent = 90\nfallback_speed_percent = {value}"))
     with pytest.raises(ConfigError, match=r"control\.fallback_speed_percent"):
         load_config(path)
+
+
+@pytest.mark.parametrize("value", ['"together"', "1", "true", "[\"linked\"]"])
+def test_rejects_invalid_control_fan_mode(tmp_path: Path, value: str) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config().replace("max_speed_percent = 90", f"max_speed_percent = 90\nfan_mode = {value}"))
+    with pytest.raises(ConfigError, match=r"control\.fan_mode"):
+        load_config(path)
+
+
+def test_loads_optional_control_fan_mode(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config().replace("max_speed_percent = 90", 'max_speed_percent = 90\nfan_mode = "linked"'))
+    assert load_config(path).control.fan_mode == "linked"
 
 
 @pytest.mark.parametrize(

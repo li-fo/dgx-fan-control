@@ -110,6 +110,7 @@ def test_settings_save_sends_typed_allowlisted_patch() -> None:
             screen.query_one("#setting-collection-retry_count", Input).value = "4"
             screen.query_one("#setting-stage-4-speed", Input).value = "95"
             screen.query_one("#setting-control-max_speed_percent", Input).value = "88"
+            screen.query_one("#setting-control-fan-mode", Select).value = "linked"
             screen.query_one("#setting-hardware-shutdown-mode", Select).value = "off"
             screen.query_one("#setting-color-memory", Select).value = "bright_blue"
             screen.query_one("#setting-color-utilization", Select).value = ""
@@ -123,6 +124,7 @@ def test_settings_save_sends_typed_allowlisted_patch() -> None:
     assert patch["collection"]["retry_count"] == 4
     assert isinstance(patch["collection"]["interval_seconds"], float)
     assert patch["control"]["stages"][3] == {"speed_percent": 95}
+    assert patch["control"]["fan_mode"] == "linked"
     assert patch["control"]["max_speed_percent"] == 88
     assert patch["hardware"]["shutdown_mode"] == "off"
     assert patch["dashboard"]["colors"]["memory"] == "bright_blue"
