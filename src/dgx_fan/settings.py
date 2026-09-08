@@ -408,9 +408,10 @@ class SettingsService:
 
     def _target_matches(self, expected_fingerprint: str) -> bool:
         try:
-            return _fingerprint(self._target) == expected_fingerprint
-        except OSError:
+            self._check_source(expected_fingerprint)
+        except (OSError, RuntimeError):
             return False
+        return True
 
     def _rollback(self, persisted: _PersistedSave) -> str:
         info = self._target.stat()

@@ -242,6 +242,52 @@ def test_external_edit_during_live_apply_is_not_blessed(
     asyncio.run(exercise())
 
 
+def test_symlink_retarget_during_live_apply_is_not_acknowledged(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        target = _config_path(tmp_path, "target.toml")
+        alternate = _config_path(tmp_path, "alternate.toml")
+        link = tmp_path / "config.toml"
+        link.symlink_to(target.name)
+        apply_started = asyncio.Event()
+        release_apply = asyncio.Event()
+
+        async def apply(_config: AppConfig, revision: int) -> None:
+            assert revision == 1
+            apply_started.set()
+            await asyncio.wait_for(release_apply.wait(), 2)
+
+        service = SettingsService(
+            load_config(link), apply, lambda _enabled: None, lambda: True, "controller-one"
+        )
+        save = asyncio.create_task(service.save(_patch(3.0), 0))
+        try:
+            await asyncio.wait_for(apply_started.wait(), 2)
+            installed_fingerprint = _fingerprint(target)
+            link.unlink()
+            link.symlink_to(alternate.name)
+            release_apply.set()
+
+            with pytest.raises(SettingsApplicationError, match="applied.*changed.*restart"):
+                await asyncio.wait_for(save, 2)
+
+            assert link.resolve() == alternate
+            assert load_config(target).collection.interval_seconds == 3.0
+            assert load_config(alternate).collection.interval_seconds == 2.0
+            assert service.effective.revision == 1
+            assert service.effective.config.collection.interval_seconds == 3.0
+            assert service.effective.fingerprint == installed_fingerprint
+            with pytest.raises(SettingsConflict, match="path changed"):
+                await service.save(_patch(3.5), 1)
+        finally:
+            release_apply.set()
+            if not save.done():
+                save.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await save
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize("replacement", [False, True], ids=["in-place", "replacement"])
 def test_external_edit_during_rollback_apply_is_not_blessed(
     tmp_path: Path, replacement: bool
@@ -281,6 +327,59 @@ def test_external_edit_during_rollback_apply_is_not_blessed(
             assert service.effective.fingerprint == restored_fingerprint
             assert service.effective.fingerprint != _fingerprint(path)
             with pytest.raises(SettingsConflict, match="file changed"):
+                await service.save(_patch(3.5), 0)
+        finally:
+            release_rollback.set()
+            if not save.done():
+                save.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await save
+
+    asyncio.run(exercise())
+
+
+def test_symlink_retarget_during_rollback_apply_is_not_acknowledged(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        target = _config_path(tmp_path, "target.toml")
+        alternate = _config_path(tmp_path, "alternate.toml")
+        link = tmp_path / "config.toml"
+        link.symlink_to(target.name)
+        rollback_started = asyncio.Event()
+        release_rollback = asyncio.Event()
+
+        async def apply(_config: AppConfig, revision: int) -> None:
+            if revision == 1:
+                raise RuntimeError("candidate application failed")
+            assert revision == 0
+            rollback_started.set()
+            await asyncio.wait_for(release_rollback.wait(), 2)
+
+        service = SettingsService(
+            load_config(link), apply, lambda _enabled: None, lambda: True, "controller-one"
+        )
+        save = asyncio.create_task(service.save(_patch(3.0), 0))
+        try:
+            await asyncio.wait_for(rollback_started.wait(), 2)
+            restored_fingerprint = _fingerprint(target)
+            link.unlink()
+            link.symlink_to(alternate.name)
+            release_rollback.set()
+
+            with pytest.raises(
+                SettingsApplicationError,
+                match="restored.*changed.*restart",
+            ):
+                await asyncio.wait_for(save, 2)
+
+            assert link.resolve() == alternate
+            assert load_config(target).collection.interval_seconds == 2.0
+            assert load_config(alternate).collection.interval_seconds == 2.0
+            assert service.effective.revision == 0
+            assert service.effective.config.collection.interval_seconds == 2.0
+            assert service.effective.fingerprint == restored_fingerprint
+            with pytest.raises(SettingsConflict, match="path changed"):
                 await service.save(_patch(3.5), 0)
         finally:
             release_rollback.set()
