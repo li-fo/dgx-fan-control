@@ -163,29 +163,29 @@ class DashboardHistory:
         # Stack only portable ASCII levels. A dot occupies half a terminal row
         # and a colon occupies a complete row, keeping compact plots legible on
         # both Linux virtual consoles and PTYs.
-        def column(value: float | None, row: int) -> str:
+        columns: list[str] = []
+        for value in values:
             if value is None:
-                return " "
+                columns.append(" " * plot_height)
+                continue
             clamped = min(max(value, 0), maximum)
             if clamped == 0:
-                return "." if row == plot_height - 1 else " "
+                columns.append(" " * (plot_height - 1) + ".")
+                continue
 
             # Clamp first so malformed over-range telemetry cannot draw beyond
             # the plot. ceil preserves a visible positive half-row minimum.
             occupied = max(1, ceil(clamped / maximum * plot_height * 2))
             full_rows, partial = divmod(occupied, 2)
-            rows_from_bottom = plot_height - 1 - row
-            if rows_from_bottom < full_rows:
-                return ":"
-            if rows_from_bottom == full_rows and partial:
-                return "."
-            return " "
+            columns.append(
+                " " * (plot_height - full_rows - partial) + "." * partial + ":" * full_rows
+            )
 
         rows: list[str] = []
         label_rows = {0, plot_height // 2, plot_height - 1}
         for row in range(plot_height):
             threshold = (plot_height - 1 - row) / max(1, plot_height - 1) * maximum
-            line = "".join(column(value, row) for value in values)
+            line = "".join(column[row] for column in columns)
             label = f"{threshold:>4.0f} " if row in label_rows else "     "
             rows.append(label + line)
         axis = (
