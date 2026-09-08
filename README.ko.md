@@ -2,13 +2,27 @@
 
 [English README](README.md)
 
-`dgx-fan`은 Raspberry Pi 4에서 최대 두 DCGM exporter의 GPU 정보를 읽고, 두 개의 4선 PWM 팬을 각각 독립적으로 제어하는 Python Textual 앱입니다. Dashboard에는 GPU 메모리·사용률·온도와 팬별 매핑 DGX, duty, RPM, 상태가 표시됩니다. DGX Spark endpoint는 선택적으로 node_exporter에서 host unified-memory 점유율을 읽을 수 있습니다.
+`dgx-fan`은 Raspberry Pi 4에서 최대 두대의 DCGM exporter의 GPU 정보를 읽고, 두 개의 4선 PWM 팬을 각각 독립적으로 제어하는 Python Textual 앱입니다. Dashboard에는 GPU 메모리·사용률·온도와 개별 팬의 상태가 표시됩니다. DCGM에서 DGX Spark 메모리 정보를 읽을 수 없기 때문에, node_exporter를 통해각 DGX의  unified-memory 점유율을 읽을 수 있습니다.
 
 ![DGX Fan Control 7inch LCE](./images/dgx-fan-control.webp)
 
 &nbsp;
 
-## 로컬 실행
+## 손쉬운 설치 및 실행 (Raspberry Pi)
+
+먼저 [`uv`](https://docs.astral.sh/uv/getting-started/installation/)를 설치한 뒤, 프로젝트를 clone하고 일반 로그인 사용자로 설치 스크립트를 실행합니다.
+
+```bash
+git clone <repository-url> dgx-fan
+cd dgx-fan
+./install.sh
+```
+
+처음 실행할 때 `config.toml`이 없으면 설치 스크립트가 파일을 만들고 중지합니다. 이 파일에 DGX URL을 입력하고 `hardware.backend = "raspberry-pi"`로 설정한 뒤 `./install.sh`를 다시 실행하세요. 시스템이 준비되어 있으면 설치 후 터미널 또는 HDMI 디스플레이와 선택적 web monitor를 고르는 메뉴가 열립니다. 최초 설치에서는 재부팅이나 재로그인을 먼저 안내할 수 있습니다. 그 이후에는 다시 설치할 필요 없이 `./dgx-fan-control.sh`로 실행하세요.
+
+제거하려면 `./uninstall.sh`를 실행하고 기본값 No인 확인에 답하세요. 의도적인 비대화형 제거에만 `./uninstall.sh --yes`를 사용합니다. 제거 후에도 clone과 `config.toml`은 유지됩니다. 준비 사항, 직접 실행 명령과 유지되는 시스템 설정은 [자세한 Raspberry Pi 설치 및 디스플레이 안내](#raspberry-pi-설치와-디스플레이)를 참고하세요.
+
+## 개발 및 수동 실행
 
 Python 3.11+와 개발 환경을 준비합니다.
 

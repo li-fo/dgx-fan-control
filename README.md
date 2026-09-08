@@ -2,13 +2,27 @@
 
 [한국어 README](README.ko.md)
 
-`dgx-fan` is a Python Textual application for a Raspberry Pi 4. It reads GPU data from up to two DCGM exporter endpoints and independently drives two 4-wire PWM fans. The dashboard shows GPU memory, utilisation, and temperature, plus each fan's mapped DGX, duty, RPM, and state. DGX Spark endpoints can optionally use node_exporter for host unified-memory occupancy.
+`dgx-fan` is a Python Textual application for a Raspberry Pi 4. It reads GPU data from up to two DCGM exporter endpoints and independently drives two 4-wire PWM fans. The dashboard shows GPU memory, utilisation, and temperature, along with each fan's status. Since DCGM cannot report DGX Spark memory information, node_exporter can provide unified-memory usage for each DGX.
 
 ![DGX Fan Control 7inch LCE](./images/dgx-fan-control.webp)
 
 &nbsp;
 
-## Run locally
+## Easy installation and launch (Raspberry Pi)
+
+Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/) first, then clone the project and run the installer as your regular login user:
+
+```bash
+git clone <repository-url> dgx-fan
+cd dgx-fan
+./install.sh
+```
+
+On the first run, the installer creates `config.toml` if it is missing and stops. Edit that file with your DGX URLs and set `hardware.backend = "raspberry-pi"`, then run `./install.sh` again. When the system is ready, installation opens a menu for the terminal or HDMI display and the optional web monitor. A first installation may instead ask you to reboot or log in again; afterward, use `./dgx-fan-control.sh` for normal launches without reinstalling.
+
+For removal, run `./uninstall.sh` and answer its default-No confirmation. Use `./uninstall.sh --yes` only for intentional non-interactive removal. Uninstall keeps the clone and `config.toml`. See the [detailed Raspberry Pi installation and display guide](#raspberry-pi-installation-and-display) for prerequisites, direct commands, and retained system settings.
+
+## Development and manual execution
 
 Use Python 3.11+ and install the development environment:
 
