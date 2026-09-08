@@ -238,32 +238,65 @@ class SettingsService:
                         current, fingerprint=error.recovered_fingerprint
                     )
                 raise
+            if not self._target_matches(persisted.replacement_fingerprint):
+                raise SettingsConflict(
+                    "configuration changed after persistence and before live application; "
+                    "external file preserved; restart the controller before saving"
+                )
             try:
                 await self._apply(persisted.config, current.revision + 1)
             except BaseException as error:
-                rollback_error: BaseException | None = None
+                disk_rollback_error: BaseException | None = None
+                runtime_rollback_error: BaseException | None = None
+                restored_fingerprint: str | None = None
                 try:
-                    await asyncio.to_thread(self._rollback, persisted)
-                    await self._apply(current.config, current.revision)
-                    self._effective = replace(
-                        current, fingerprint=_fingerprint(self._target)
+                    restored_fingerprint = await asyncio.to_thread(
+                        self._rollback, persisted
                     )
+                except BaseException as candidate:  # noqa: BLE001 - preserve external bytes.
+                    disk_rollback_error = candidate
+                try:
+                    await self._apply(current.config, current.revision)
                 except BaseException as candidate:  # noqa: BLE001 - rollback must survive cancellation.
-                    rollback_error = candidate
-                if rollback_error is not None:
+                    runtime_rollback_error = candidate
+                if runtime_rollback_error is None:
+                    self._effective = replace(
+                        current,
+                        fingerprint=(
+                            restored_fingerprint
+                            if restored_fingerprint is not None
+                            else current.fingerprint
+                        ),
+                    )
+                if disk_rollback_error is not None or runtime_rollback_error is not None:
                     raise SettingsApplicationError(
                         "settings were written but live application failed and rollback "
-                        f"could not be confirmed: {rollback_error}"
+                        "could not be confirmed; external file was preserved when present; "
+                        "restart the controller before saving "
+                        f"(disk={disk_rollback_error}, runtime={runtime_rollback_error})"
+                    ) from error
+                assert restored_fingerprint is not None
+                if not self._target_matches(restored_fingerprint):
+                    raise SettingsApplicationError(
+                        "previous live settings were restored, but the configuration changed "
+                        "during rollback application; external file preserved; restart the "
+                        "controller before saving"
                     ) from error
                 raise SettingsApplicationError(
                     "live application failed; the previous configuration was restored"
                 ) from error
             updated = EffectiveSettings(
                 current.revision + 1,
-                _fingerprint(self._target),
+                persisted.replacement_fingerprint,
                 persisted.config,
             )
             self._effective = updated
+            if not self._target_matches(persisted.replacement_fingerprint):
+                raise SettingsApplicationError(
+                    "live settings were applied, but the configuration changed before "
+                    "acknowledgement; external file preserved; restart the controller "
+                    "before saving"
+                )
             return updated
 
     async def set_power(self, enabled: bool, expected_revision: int) -> None:
@@ -373,13 +406,22 @@ class SettingsService:
             ) from error
         return _PersistedSave(candidate_config, original, replacement_fingerprint)
 
-    def _rollback(self, persisted: _PersistedSave) -> None:
+    def _target_matches(self, expected_fingerprint: str) -> bool:
+        try:
+            return _fingerprint(self._target) == expected_fingerprint
+        except OSError:
+            return False
+
+    def _rollback(self, persisted: _PersistedSave) -> str:
         info = self._target.stat()
         candidate = self._write_temp(persisted.original, info, ".rollback.tmp")
         # _exchange_install keeps a displaced source when recovery is
         # uncertain. Never erase that only remaining recovery artifact.
-        self._exchange_install(candidate, persisted.replacement_fingerprint)
+        restored_fingerprint = self._exchange_install(
+            candidate, persisted.replacement_fingerprint
+        )
         self._finish_exchange(candidate)
+        return restored_fingerprint
 
     def _before_exchange(self) -> None:
         """Deterministic test seam immediately before the atomic commit boundary."""

@@ -16,6 +16,7 @@ from dgx_fan.settings import (
     SettingsConflict,
     SettingsPersistenceError,
     SettingsService,
+    _fingerprint,
     control_socket_path,
 )
 
@@ -32,6 +33,16 @@ def _patch(interval: float, *, colors: dict[str, str] | None = None) -> dict[str
         "collection": {"interval_seconds": interval},
         "dashboard": {"colors": colors or {}},
     }
+
+
+def _external_edit(path: Path, content: bytes, *, replacement: bool) -> None:
+    if replacement:
+        candidate = path.with_name("external-editor.toml")
+        candidate.write_bytes(content)
+        candidate.chmod(0o640)
+        os.replace(candidate, path)
+    else:
+        path.write_bytes(content)
 
 
 def _service(
@@ -182,6 +193,101 @@ def test_application_failure_rolls_back_and_allows_a_later_save(tmp_path: Path) 
         assert result.revision == 1
         assert load_config(path).collection.interval_seconds == 3.0
         assert [item.collection.interval_seconds for item in applied] == [2.5, 2.0, 3.0]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("replacement", [False, True], ids=["in-place", "replacement"])
+def test_external_edit_during_live_apply_is_not_blessed(
+    tmp_path: Path, replacement: bool
+) -> None:
+    async def exercise() -> None:
+        path = _config_path(tmp_path)
+        apply_started = asyncio.Event()
+        release_apply = asyncio.Event()
+
+        async def apply(_config: AppConfig, revision: int) -> None:
+            assert revision == 1
+            apply_started.set()
+            await asyncio.wait_for(release_apply.wait(), 2)
+
+        service = SettingsService(
+            load_config(path), apply, lambda _enabled: None, lambda: True, "controller-one"
+        )
+        save = asyncio.create_task(service.save(_patch(3.0), 0))
+        try:
+            await asyncio.wait_for(apply_started.wait(), 2)
+            installed_fingerprint = _fingerprint(path)
+            external = path.read_bytes() + b"\n# external edit during live apply\n"
+            _external_edit(path, external, replacement=replacement)
+            release_apply.set()
+
+            with pytest.raises(SettingsApplicationError, match="applied.*changed.*restart"):
+                await asyncio.wait_for(save, 2)
+
+            assert path.read_bytes() == external
+            assert service.effective.revision == 1
+            assert service.effective.config.collection.interval_seconds == 3.0
+            assert service.effective.fingerprint == installed_fingerprint
+            assert service.effective.fingerprint != _fingerprint(path)
+            with pytest.raises(SettingsConflict, match="file changed"):
+                await service.save(_patch(3.5), 1)
+        finally:
+            release_apply.set()
+            if not save.done():
+                save.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await save
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("replacement", [False, True], ids=["in-place", "replacement"])
+def test_external_edit_during_rollback_apply_is_not_blessed(
+    tmp_path: Path, replacement: bool
+) -> None:
+    async def exercise() -> None:
+        path = _config_path(tmp_path)
+        rollback_started = asyncio.Event()
+        release_rollback = asyncio.Event()
+
+        async def apply(_config: AppConfig, revision: int) -> None:
+            if revision == 1:
+                raise RuntimeError("candidate application failed")
+            assert revision == 0
+            rollback_started.set()
+            await asyncio.wait_for(release_rollback.wait(), 2)
+
+        service = SettingsService(
+            load_config(path), apply, lambda _enabled: None, lambda: True, "controller-one"
+        )
+        save = asyncio.create_task(service.save(_patch(3.0), 0))
+        try:
+            await asyncio.wait_for(rollback_started.wait(), 2)
+            restored_fingerprint = _fingerprint(path)
+            external = path.read_bytes() + b"\n# external edit during rollback apply\n"
+            _external_edit(path, external, replacement=replacement)
+            release_rollback.set()
+
+            with pytest.raises(
+                SettingsApplicationError,
+                match="restored.*changed.*restart",
+            ):
+                await asyncio.wait_for(save, 2)
+
+            assert path.read_bytes() == external
+            assert service.effective.revision == 0
+            assert service.effective.config.collection.interval_seconds == 2.0
+            assert service.effective.fingerprint == restored_fingerprint
+            assert service.effective.fingerprint != _fingerprint(path)
+            with pytest.raises(SettingsConflict, match="file changed"):
+                await service.save(_patch(3.5), 0)
+        finally:
+            release_rollback.set()
+            if not save.done():
+                save.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await save
 
     asyncio.run(exercise())
 
