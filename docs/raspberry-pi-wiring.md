@@ -39,7 +39,7 @@ pinout
 ./install.sh --reboot
 # After the Pi has rebooted:
 ls -l /sys/class/pwm/pwmchip0 /dev/gpiochip0
-./start.sh
+./scripts/start.sh
 ```
 
 The installer writes this uncommented line. Add it manually only when intentionally not using the installer:
@@ -58,7 +58,7 @@ tach_gpio_bcm = [23, 24]
 shutdown_mode = "off" # optional; clean exit only, default is fail-safe "full"
 ```
 
-The installer adds the login user to `gpio` and installs a narrow root-owned helper to grant access to PWM sysfs and `/dev/gpiochip0`; use `./start.sh`, not `sudo .venv/bin/dgx-fan`, after installation. Do not run analogue audio or another PWM consumer at the same time: PWM channels are shared hardware.
+The installer adds the login user to `gpio` and installs a narrow root-owned helper to grant access to PWM sysfs and `/dev/gpiochip0`; use `./scripts/start.sh`, not `sudo .venv/bin/dgx-fan`, after installation. Do not run analogue audio or another PWM consumer at the same time: PWM channels are shared hardware.
 
 Bring up one fan at a time: inspect unpowered wiring, verify 5 V and common ground, connect Fan 1, then measure approximately 25 kHz non-inverted duty, RPM, and curve response before adding Fan 2. Exercise endpoint loss, disconnected tach/stall, and both clean and fault exits. The default release commands full duty and keeps PWM enabled. With explicit `shutdown_mode = "off"`, a clean TUI exit commands 0% duty and keeps PWM enabled; any PWM, tach, or GPIO cleanup fault falls back to full duty. This repository cannot prove pinmux, waveform, process-kill, boot, or physical speed behavior; measure it before unattended use. To roll back, remove `shutdown_mode = "off"` (or set `"full"`) and restart, or revert the containing commit; no rewiring is required.
 

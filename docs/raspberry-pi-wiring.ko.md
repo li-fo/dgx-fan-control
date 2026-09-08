@@ -39,7 +39,7 @@ pinout
 ./install.sh --reboot
 # Pi가 재부팅된 후:
 ls -l /sys/class/pwm/pwmchip0 /dev/gpiochip0
-./start.sh
+./scripts/start.sh
 ```
 
 설치 스크립트가 이 주석 없는 줄을 기록합니다. 설치 스크립트를 의도적으로 사용하지 않을 때만 수동으로 추가하세요.
@@ -58,7 +58,7 @@ tach_gpio_bcm = [23, 24]
 shutdown_mode = "off" # 선택: 정상 종료에서만, 기본값은 fail-safe "full"
 ```
 
-설치 스크립트는 로그인 사용자를 `gpio` 그룹에 추가하고 PWM sysfs와 `/dev/gpiochip0` 접근만 허용하는 좁은 root 소유 helper를 설치합니다. 설치 후에는 `sudo .venv/bin/dgx-fan` 대신 `./start.sh`를 사용하세요. PWM channel은 공유 자원이므로 analogue audio나 다른 PWM 소비자를 동시에 실행하지 마세요.
+설치 스크립트는 로그인 사용자를 `gpio` 그룹에 추가하고 PWM sysfs와 `/dev/gpiochip0` 접근만 허용하는 좁은 root 소유 helper를 설치합니다. 설치 후에는 `sudo .venv/bin/dgx-fan` 대신 `./scripts/start.sh`를 사용하세요. PWM channel은 공유 자원이므로 analogue audio나 다른 PWM 소비자를 동시에 실행하지 마세요.
 
 팬은 한 개씩 가동하세요. 전원 없는 배선과 5 V/공통 GND를 확인한 뒤 Fan 1을 연결하고 약 25 kHz non-inverted duty, RPM, 곡선 반응을 실측한 다음 Fan 2를 추가하세요. endpoint 손실, tach 분리/stall, 정상/오류 종료를 모두 시험하세요. 기본 release는 full duty를 명령하고 PWM enabled 상태를 유지합니다. 명시적 `shutdown_mode = "off"`에서는 TUI 정상 종료가 0% duty를 명령하고 enabled 상태를 유지하지만, PWM/tach/GPIO 정리 중 오류는 full duty로 되돌립니다. 이 저장소는 pinmux·파형·강제 종료·부팅·물리 속도를 증명하지 않으므로 무인 운용 전 실기 측정이 필요합니다. 롤백은 `shutdown_mode = "off"`를 제거하거나 `"full"`로 바꿔 재시작하거나, 해당 커밋을 되돌리는 방법이며 배선 변경은 필요하지 않습니다.
 

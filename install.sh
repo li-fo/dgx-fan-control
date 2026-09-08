@@ -10,15 +10,19 @@ readonly DISPLAY_TTY_ACQUIRED_NAME='dgx-fan-display-tty-acquired'
 readonly DISPLAY_CLEANUP_NAME='dgx-fan-display-cleanup'
 readonly PROFILE_NAME='dgx-fan-autostart.sh'
 readonly SUDOERS_NAME='dgx-fan'
+readonly INSTALL_RECORD_NAME='dgx-fan-installation'
 
 PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 CONFIG_PATH="$PROJECT_ROOT/config.toml"
 REBOOT=false
 DRY_RUN=false
+NO_LAUNCH=false
+OVERLAY_ADDED=false
 TEST_ROOT=""
 readonly HELPER_MARKER='# Managed by dgx-fan install.sh; do not edit.'
 readonly PROFILE_MARKER='# Managed by dgx-fan install.sh; do not edit.'
 readonly SUDOERS_MARKER='# Managed by dgx-fan install.sh; do not edit.'
+readonly INSTALL_RECORD_MARKER='# Managed by dgx-fan install.sh; do not edit.'
 
 [[ $EUID -ne 0 ]] || { printf '%s\n' 'dgx-fan install: run as the regular login user, not root' >&2; exit 1; }
 [[ "$PROJECT_ROOT" != *$'\n'* && "$PROJECT_ROOT" != *$'\r'* ]] || {
@@ -28,7 +32,7 @@ readonly SUDOERS_MARKER='# Managed by dgx-fan install.sh; do not edit.'
 
 usage() {
     cat <<'EOF'
-Usage: ./install.sh [--reboot] [--dry-run]
+Usage: ./install.sh [--reboot] [--dry-run] [--no-launch]
 
 Installs Raspberry Pi OS tty1 console auto-login integration for this clone.
 The editable configuration is always kept at ./config.toml.
@@ -42,6 +46,7 @@ while (($#)); do
     case "$1" in
         --reboot) REBOOT=true ;;
         --dry-run) DRY_RUN=true ;;
+        --no-launch) NO_LAUNCH=true ;;
         -h|--help) usage; exit 0 ;;
         *) fail "unknown option: $1" ;;
     esac
@@ -197,6 +202,7 @@ install_overlay() {
     backup="${BOOT_CONFIG}.dgx-fan-$(date +%Y%m%d%H%M%S).bak"
     run_root cp -- "$BOOT_CONFIG" "$backup"
     printf '\n[all]\n%s\n' "$OVERLAY" | run_root tee -a "$BOOT_CONFIG" >/dev/null
+    OVERLAY_ADDED=true
     note "added PWM overlay; backup: $backup"
 }
 
@@ -269,7 +275,7 @@ acquired=$acquired_quoted
 tty_active=$tty_active_quoted
 previous_vt=\$(cat "\$tty_active" 2>/dev/null || true)
 case "\$previous_vt" in tty[1-9]|tty[1-9][0-9]*) ;; *) echo "cannot validate active virtual terminal" >&2; exit 1;; esac
-exec "\$openvt" -c 8 -s -w -- "\$acquired" "\$install_user" "\$project_root/start.sh" "\$previous_vt"
+exec "\$openvt" -c 8 -s -w -- "\$acquired" "\$install_user" "\$project_root/scripts/start.sh" "\$previous_vt"
 EOF
     } >"$rendered"
     install_managed_file "$rendered" "$session" "$HELPER_MARKER" 0755
@@ -422,7 +428,7 @@ if [ "${USER:-}" = "$DGX_FAN_INSTALL_USER" ] && [ -z "${SSH_CONNECTION:-}" ] \
     && [ "$(tty 2>/dev/null || true)" = "/dev/tty1" ]; then
     DGX_FAN_AUTOSTART_ATTEMPTED=1
     export DGX_FAN_AUTOSTART_ATTEMPTED
-    "$DGX_FAN_PROJECT_ROOT/display.sh" start || printf '%s\n' 'dgx-fan physical display did not start; see the message above.' >&2
+    "$DGX_FAN_PROJECT_ROOT/scripts/display.sh" start || printf '%s\n' 'dgx-fan physical display did not start; see the message above.' >&2
 fi
 unset DGX_FAN_PROJECT_ROOT DGX_FAN_INSTALL_USER
 EOF
@@ -465,7 +471,7 @@ install_managed_file() {
 }
 
 preflight_managed_destinations() {
-    local helper manager session acquired cleanup sudoers hook
+    local helper manager session acquired cleanup sudoers hook install_record
     helper=$(target_path "/usr/local/libexec/$HELPER_NAME")
     manager=$(target_path "/usr/local/libexec/$DISPLAY_MANAGER_NAME")
     session=$(target_path "/usr/local/libexec/$DISPLAY_SESSION_NAME")
@@ -473,6 +479,7 @@ preflight_managed_destinations() {
     cleanup=$(target_path "/usr/local/libexec/$DISPLAY_CLEANUP_NAME")
     sudoers=$(target_path "/etc/sudoers.d/$SUDOERS_NAME")
     hook=$(target_path "/etc/profile.d/$PROFILE_NAME")
+    install_record=$(target_path "/etc/$INSTALL_RECORD_NAME")
     ensure_destination_parent "$helper"
     ensure_destination_parent "$manager"
     ensure_destination_parent "$session"
@@ -480,6 +487,7 @@ preflight_managed_destinations() {
     ensure_destination_parent "$cleanup"
     ensure_destination_parent "$sudoers"
     ensure_destination_parent "$hook"
+    ensure_destination_parent "$install_record"
     ensure_managed_destination "$helper" "$HELPER_MARKER"
     ensure_managed_destination "$manager" "$HELPER_MARKER"
     ensure_managed_destination "$session" "$HELPER_MARKER"
@@ -487,6 +495,54 @@ preflight_managed_destinations() {
     ensure_managed_destination "$cleanup" "$HELPER_MARKER"
     ensure_managed_destination "$sudoers" "$SUDOERS_MARKER"
     ensure_managed_destination "$hook" "$PROFILE_MARKER"
+    ensure_managed_destination "$install_record" "$INSTALL_RECORD_MARKER"
+}
+
+write_install_record() {
+    local install_record rendered
+    install_record=$(target_path "/etc/$INSTALL_RECORD_NAME")
+    rendered=$(mktemp)
+    trap 'rm -f -- "$rendered"' RETURN
+    {
+        printf '%s\n' "$INSTALL_RECORD_MARKER"
+        printf '%s\n' 'version=1'
+        printf '%s\n' "$PROJECT_ROOT"
+    } >"$rendered"
+    install_managed_file "$rendered" "$install_record" "$INSTALL_RECORD_MARKER" 0644
+    trap - RETURN
+    rm -f -- "$rendered"
+}
+
+interactive_terminal() {
+    [[ -t 0 && -t 1 ]] && return 0
+    [[ -n "$TEST_ROOT" && "${DGX_FAN_TEST_INTERACTIVE:-}" == 1 ]]
+}
+
+handoff_when_ready() {
+    [[ "$NO_LAUNCH" == false && "$DRY_RUN" == false && "$REBOOT" == false ]] || return 0
+    interactive_terminal || return 0
+    if [[ "$OVERLAY_ADDED" == true ]]; then
+        note 'restart required before the launcher can use the newly enabled PWM overlay'
+        return 0
+    fi
+    if [[ -n "$TEST_ROOT" ]]; then
+        if [[ "${DGX_FAN_TEST_GROUP_READY:-}" != 1 ]]; then
+            note 'log in again before launching so the gpio group is active'
+            return 0
+        fi
+        if [[ "${DGX_FAN_TEST_PREREQUISITES_READY:-}" != 1 ]]; then
+            note 'restart required before the PWM and GPIO devices are ready'
+            return 0
+        fi
+    elif ! id -nG | tr ' ' '\n' | grep -Fxq gpio; then
+        note 'log in again before launching so the gpio group is active'
+        return 0
+    elif [[ ! -d /sys/class/pwm/pwmchip0 || ! -e /dev/gpiochip0 ]]; then
+        note 'restart required before the PWM and GPIO devices are ready'
+        return 0
+    fi
+    note 'opening the controller launcher'
+    exec "$PROJECT_ROOT/dgx-fan-control.sh"
 }
 
 ensure_destination_parent() {
@@ -513,8 +569,10 @@ configure_console_autologin() {
 
 main() {
     [[ -f "$PROJECT_ROOT/config.example.toml" ]] || fail 'run this script from a dgx-fan clone'
-    [[ -x "$PROJECT_ROOT/start.sh" ]] || fail 'start.sh must be executable in this clone'
-    [[ -x "$PROJECT_ROOT/display.sh" ]] || fail 'display.sh must be executable in this clone'
+    [[ -x "$PROJECT_ROOT/scripts/start.sh" ]] || fail 'scripts/start.sh must be executable in this clone'
+    [[ -x "$PROJECT_ROOT/scripts/display.sh" ]] || fail 'scripts/display.sh must be executable in this clone'
+    [[ -x "$PROJECT_ROOT/scripts/web.sh" ]] || fail 'scripts/web.sh must be executable in this clone'
+    [[ -x "$PROJECT_ROOT/dgx-fan-control.sh" ]] || fail 'dgx-fan-control.sh must be executable in this clone'
     INSTALL_USER=$(id -un)
     if [[ -n "$TEST_ROOT" && -n "${DGX_FAN_TEST_INSTALL_USER:-}" ]]; then
         INSTALL_USER=$DGX_FAN_TEST_INSTALL_USER
@@ -537,6 +595,7 @@ main() {
     write_display_helpers
     write_sudoers
     write_profile_hook
+    write_install_record
     configure_console_autologin
     note "installed. config remains at $CONFIG_PATH"
     note 'reboot or log in again for the gpio group and tty1 console auto-login to take effect'
@@ -544,6 +603,7 @@ main() {
         note 'rebooting now'
         run_root reboot
     fi
+    handoff_when_ready
 }
 
 main "$@"

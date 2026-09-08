@@ -2,12 +2,12 @@
 # Launch dgx-fan from this clone after the fixed root-owned hardware helper runs.
 set -euo pipefail
 
-PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 CONFIG_PATH="$PROJECT_ROOT/config.toml"
 HELPER=/usr/local/libexec/dgx-fan-prepare-hardware
 
 [[ $EUID -ne 0 ]] || {
-    printf '%s\n' 'dgx-fan: run start.sh as the regular login user, not root' >&2
+    printf '%s\n' 'dgx-fan: run scripts/start.sh as the regular login user, not root' >&2
     exit 1
 }
 

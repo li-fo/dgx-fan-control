@@ -46,7 +46,7 @@ cp config.example.toml config.toml
 ./install.sh --reboot
 ```
 
-Install `uv` first using the [official instructions](https://docs.astral.sh/uv/getting-started/installation/) if needed. The installer runs `uv sync --locked --extra raspberry-pi --no-dev`, validates the clone-local configuration, adds the dual-PWM overlay, and configures Raspberry Pi 4 tty1 console auto-login. If `config.toml` is absent, it creates a copy and stops so you can edit it. Run `./install.sh` without `--reboot` to install first and reboot manually afterward, or use `./install.sh --dry-run` to inspect its action.
+Install `uv` first using the [official instructions](https://docs.astral.sh/uv/getting-started/installation/) if needed. The installer runs `uv sync --locked --extra raspberry-pi --no-dev`, validates the clone-local configuration, adds the dual-PWM overlay, and configures Raspberry Pi 4 tty1 console auto-login. If `config.toml` is absent, it creates a copy and stops so you can edit it. Run `./install.sh` without `--reboot` to install first and reboot manually afterward, or use `./install.sh --dry-run` to inspect its action. A successful interactive install opens the launcher once when the PWM device and active `gpio` group are ready; otherwise it tells you to reboot or log in again. `--no-launch` performs installation only.
 
 The app itself runs as the regular user, never as root. For the usual interactive launch, run:
 
@@ -54,7 +54,7 @@ The app itself runs as the regular user, never as root. For the usual interactiv
 ./dgx-fan-control.sh
 ```
 
-Choose the current terminal or the attached HDMI display, then choose whether to start the optional browser view. It is read-only by default; control is an explicit trusted-LAN opt-in described below. In current-terminal mode the app stays in the foreground; in HDMI mode the tty8 display service continues after SSH disconnects. A normal **Ctrl+Q** exit from the terminal leaves a web monitor selected by the launcher running. If the primary terminal startup fails, the launcher stops only a web monitor that it itself started.
+Choose the current terminal or the attached HDMI display, then choose whether to start the optional browser view. Before starting, the launcher checks whether this clone owns a complete installation. Missing, partial, or another-clone installations require an explicit default-No confirmation before the launcher runs `install.sh --no-launch`, rechecks readiness, and resumes. It is read-only by default; control is an explicit trusted-LAN opt-in described below. In current-terminal mode the app stays in the foreground; in HDMI mode the tty8 display service continues after SSH disconnects. A normal **Ctrl+Q** exit from the terminal leaves a web monitor selected by the launcher running. If the primary terminal startup fails, the launcher stops only a web monitor that it itself started.
 
 To stop the managed HDMI display and optional browser monitor together, without prompts:
 
@@ -67,18 +67,18 @@ It stops the browser monitor first and always then attempts the HDMI display cle
 The direct commands remain available for automation and troubleshooting. Launch in the current terminal with:
 
 ```bash
-./start.sh
+./scripts/start.sh
 ```
 
 To place the TUI on the connected HDMI display from SSH:
 
 ```bash
-./display.sh restart
-./display.sh status
+./scripts/display.sh restart
+./scripts/display.sh status
 sudo journalctl -u dgx-fan-display.service --no-pager
 ```
 
-The transient display process runs on tty8 and continues after SSH disconnects. With `shutdown_mode = "off"`, **Ctrl+Q**, `./display.sh stop`, and the stop phase of `./display.sh restart` use the clean-stop path and command 0% duty. Handled abnormal termination uses the full-duty fail-safe; SIGKILL and power loss cannot run cleanup and may preserve the last duty. Do not start a second foreground `./start.sh` while the display is active; the hardware-owner lock rejects it without stopping the running app. `uv run dgx-fan --config config.toml` and `uvx` remain foreground terminal commands.
+The transient display process runs on tty8 and continues after SSH disconnects. With `shutdown_mode = "off"`, **Ctrl+Q**, `./scripts/display.sh stop`, and the stop phase of `./scripts/display.sh restart` use the clean-stop path and command 0% duty. Handled abnormal termination uses the full-duty fail-safe; SIGKILL and power loss cannot run cleanup and may preserve the last duty. Do not start a second foreground `./scripts/start.sh` while the display is active; the hardware-owner lock rejects it without stopping the running app. `uv run dgx-fan --config config.toml` and `uvx` remain foreground terminal commands.
 
 ## Browser monitor and trusted-LAN control
 
@@ -97,23 +97,25 @@ port = 8000
 Start it independently from the display process:
 
 ```bash
-./web.sh start
-./web.sh status
+./scripts/web.sh start
+./scripts/web.sh status
 # Stop only the browser renderer; the physical controller keeps running.
-./web.sh stop
+./scripts/web.sh stop
 ```
 
-`web.sh` creates a transient `systemd --user` service, so it is not installed or auto-started by `install.sh`. It normally persists after an SSH disconnect while the Raspberry Pi's console auto-login user session remains active. If you operate without that session, enable user lingering once (`sudo loginctl enable-linger "$USER"`) before relying on an SSH-started browser service. The default `web.host = "127.0.0.1"` is local-only and works with an SSH tunnel such as `ssh -L 8000:127.0.0.1:8000 <pi>`.
+`scripts/web.sh` creates a transient `systemd --user` service, so it is not installed or auto-started by `install.sh`. It normally persists after an SSH disconnect while the Raspberry Pi's console auto-login user session remains active. If you operate without that session, enable user lingering once (`sudo loginctl enable-linger "$USER"`) before relying on an SSH-started browser service. The default `web.host = "127.0.0.1"` is local-only and works with an SSH tunnel such as `ssh -L 8000:127.0.0.1:8000 <pi>`.
 
 Setting `web.allow_control = true` enables Save and Apply plus explicit fan On/Off for **every browser visitor, without a login**. Use it only on a trusted private LAN. The controller remains the sole file and hardware owner, rejects stale revisions and external file edits, and preserves safety overrides even when requested power is Off. For LAN access, also set `web.host = "0.0.0.0"`, restart the primary controller and browser renderer, then browse to `http://<current-pi-ip>:8000`. The wildcard follows DHCP/subnet changes but does not authenticate or filter clients. Never port-forward this port or expose it through a WAN firewall; use read-only mode or a separately authenticated network boundary for untrusted access.
 
 Remove only this project's integration while retaining the clone and configuration:
 
 ```bash
-./uninstall.sh --yes
+./uninstall.sh
 ```
 
-Uninstall stops its transient display unit before removing managed helpers, but intentionally keeps the PWM overlay and console auto-login. Disable auto-login with `sudo raspi-config` and remove the exact overlay (or restore its backup) only when required.
+Uninstall asks for a default-No confirmation; use `./uninstall.sh --yes` for deliberate non-interactive removal. It stops the current-user browser service and then attempts the transient display clean-stop even if the browser stop fails. Any real stop or cleanup failure preserves all managed integration files for retry. Configuration, source, `.venv`, the PWM overlay, and console auto-login remain. Disable auto-login with `sudo raspi-config` and remove the exact overlay (or restore its backup) only when required.
+
+Direct operational scripts moved from the repository root to `scripts/`. Existing installations must rerun `./install.sh` after updating so the managed tty/profile paths point to the new locations; no permanent root-level compatibility wrappers are installed.
 
 ## Configuration and safe operation
 

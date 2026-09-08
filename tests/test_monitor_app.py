@@ -209,7 +209,7 @@ def test_writable_browser_controls_require_fresh_compatible_controller_state(
 
 
 def test_web_launcher_is_valid_shell_and_uses_user_transient_service() -> None:
-    script = Path("web.sh")
+    script = Path("scripts/web.sh")
     result = subprocess.run(["bash", "-n", str(script)], text=True, capture_output=True, check=False)
     assert result.returncode == 0, result.stderr
     source = script.read_text()
@@ -221,8 +221,9 @@ def test_web_launcher_is_valid_shell_and_uses_user_transient_service() -> None:
 def test_web_launcher_stop_treats_only_collected_unit_absence_as_success(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    script = project / "web.sh"
-    script.write_text(Path("web.sh").read_text())
+    script = project / "scripts/web.sh"
+    script.parent.mkdir()
+    script.write_text(Path("scripts/web.sh").read_text())
     script.chmod(0o755)
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -288,8 +289,9 @@ def test_web_launcher_prints_configured_access_urls_only_after_service_start(tmp
 
     project = tmp_path / "project"
     project.mkdir()
-    script = project / "web.sh"
-    script.write_text(Path("web.sh").read_text())
+    script = project / "scripts/web.sh"
+    script.parent.mkdir()
+    script.write_text(Path("scripts/web.sh").read_text())
     script.chmod(0o755)
     (project / "config.toml").write_text(
         '[web]\nenabled = true\nhost = "0.0.0.0"\nport = 8123\n'
@@ -342,8 +344,9 @@ def test_web_launcher_prints_configured_access_urls_only_after_service_start(tmp
 def test_web_launcher_formats_loopback_and_wildcard_fallback_urls(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    script = project / "web.sh"
-    script.write_text(Path("web.sh").read_text())
+    script = project / "scripts/web.sh"
+    script.parent.mkdir()
+    script.write_text(Path("scripts/web.sh").read_text())
     script.chmod(0o755)
     (project / "config.toml").write_text('[web]\nenabled = true\nhost = "::1"\nport = 9000\n')
     virtual_bin = project / ".venv" / "bin"

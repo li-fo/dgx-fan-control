@@ -46,7 +46,7 @@ cp config.example.toml config.toml
 ./install.sh --reboot
 ```
 
-필요하면 먼저 [공식 uv 설치 안내](https://docs.astral.sh/uv/getting-started/installation/)를 따르세요. 설치 스크립트는 `uv sync --locked --extra raspberry-pi --no-dev`를 실행하고 clone-local 설정을 검증한 뒤 2채널 PWM overlay와 Raspberry Pi 4 tty1 콘솔 자동 로그인을 구성합니다. `config.toml`이 없으면 예시 파일을 만들고 중지하므로 편집 후 다시 실행하세요. `--reboot` 없이 `./install.sh`를 실행하면 설치 후 직접 재부팅할 수 있고, `./install.sh --dry-run`은 예정 동작만 확인합니다.
+필요하면 먼저 [공식 uv 설치 안내](https://docs.astral.sh/uv/getting-started/installation/)를 따르세요. 설치 스크립트는 `uv sync --locked --extra raspberry-pi --no-dev`를 실행하고 clone-local 설정을 검증한 뒤 2채널 PWM overlay와 Raspberry Pi 4 tty1 콘솔 자동 로그인을 구성합니다. `config.toml`이 없으면 예시 파일을 만들고 중지하므로 편집 후 다시 실행하세요. `--reboot` 없이 `./install.sh`를 실행하면 설치 후 직접 재부팅할 수 있고, `./install.sh --dry-run`은 예정 동작만 확인합니다. 대화형 설치가 성공하고 PWM device와 현재 shell의 `gpio` group이 준비되어 있으면 launcher를 한 번 엽니다. 그렇지 않으면 재부팅 또는 재로그인을 안내합니다. `--no-launch`는 설치만 수행합니다.
 
 앱은 root가 아닌 일반 사용자로 실행합니다. 일반적인 대화형 실행은 다음 명령을 사용합니다.
 
@@ -54,7 +54,7 @@ cp config.example.toml config.toml
 ./dgx-fan-control.sh
 ```
 
-현재 터미널 또는 연결된 HDMI 디스플레이를 선택한 뒤, 선택적 브라우저 화면의 실행 여부를 고릅니다. 기본은 읽기 전용이며 아래 설명처럼 신뢰된 LAN 제어를 명시적으로 활성화할 수 있습니다. 현재 터미널 모드는 foreground로 실행되고 HDMI 모드는 SSH 연결이 끊겨도 tty8 display service가 유지됩니다. 터미널에서 **Ctrl+Q**로 정상 종료하면 launcher가 선택해 시작한 web monitor는 계속 실행됩니다. 반대로 primary terminal 시작이 실패한 경우에는 launcher가 이번 실행에서 시작한 web monitor만 중지합니다.
+현재 터미널 또는 연결된 HDMI 디스플레이를 선택한 뒤, 선택적 브라우저 화면의 실행 여부를 고릅니다. 시작 전에 launcher는 이 clone이 완전한 설치를 소유하는지 확인합니다. 설치가 없거나 일부만 존재하거나 다른 clone을 가리키면 기본값 No인 명시적 확인을 받은 뒤 `install.sh --no-launch`를 실행하고 준비 상태를 다시 확인해 이어갑니다. 기본은 읽기 전용이며 아래 설명처럼 신뢰된 LAN 제어를 명시적으로 활성화할 수 있습니다. 현재 터미널 모드는 foreground로 실행되고 HDMI 모드는 SSH 연결이 끊겨도 tty8 display service가 유지됩니다. 터미널에서 **Ctrl+Q**로 정상 종료하면 launcher가 선택해 시작한 web monitor는 계속 실행됩니다. 반대로 primary terminal 시작이 실패한 경우에는 launcher가 이번 실행에서 시작한 web monitor만 중지합니다.
 
 관리 중인 HDMI display와 선택적 브라우저 모니터를 함께, 질문 없이 중지하려면 다음을 실행합니다.
 
@@ -67,18 +67,18 @@ cp config.example.toml config.toml
 자동화와 문제 해결을 위한 직접 명령도 계속 사용할 수 있습니다. 현재 터미널에서 실행하려면:
 
 ```bash
-./start.sh
+./scripts/start.sh
 ```
 
 SSH에서 연결된 HDMI 디스플레이로 표시하려면:
 
 ```bash
-./display.sh restart
-./display.sh status
+./scripts/display.sh restart
+./scripts/display.sh status
 sudo journalctl -u dgx-fan-display.service --no-pager
 ```
 
-transient display 프로세스는 tty8에서 동작하므로 SSH가 끊겨도 유지됩니다. `shutdown_mode = "off"`에서는 **Ctrl+Q**, `./display.sh stop`, `./display.sh restart`의 stop 단계가 clean-stop 경로를 사용해 0% duty를 명령합니다. 처리 가능한 비정상 종료에는 full-duty fail-safe가 적용되고, SIGKILL과 전원 손실은 cleanup을 실행할 수 없어 마지막 duty가 유지될 수 있습니다. display가 실행 중일 때 두 번째 `./start.sh`를 실행하지 마세요. hardware-owner lock이 기존 앱을 멈추지 않고 두 번째 실행을 거부합니다. `uv run dgx-fan --config config.toml`과 `uvx`는 현재 터미널의 foreground 명령입니다.
+transient display 프로세스는 tty8에서 동작하므로 SSH가 끊겨도 유지됩니다. `shutdown_mode = "off"`에서는 **Ctrl+Q**, `./scripts/display.sh stop`, `./scripts/display.sh restart`의 stop 단계가 clean-stop 경로를 사용해 0% duty를 명령합니다. 처리 가능한 비정상 종료에는 full-duty fail-safe가 적용되고, SIGKILL과 전원 손실은 cleanup을 실행할 수 없어 마지막 duty가 유지될 수 있습니다. display가 실행 중일 때 두 번째 `./scripts/start.sh`를 실행하지 마세요. hardware-owner lock이 기존 앱을 멈추지 않고 두 번째 실행을 거부합니다. `uv run dgx-fan --config config.toml`과 `uvx`는 현재 터미널의 foreground 명령입니다.
 
 ## 브라우저 모니터와 신뢰된 LAN 제어
 
@@ -97,23 +97,25 @@ port = 8000
 display 프로세스와 독립적으로 실행합니다.
 
 ```bash
-./web.sh start
-./web.sh status
+./scripts/web.sh start
+./scripts/web.sh status
 # 브라우저 renderer만 중단하며 물리 controller는 계속 동작합니다.
-./web.sh stop
+./scripts/web.sh stop
 ```
 
-`web.sh`는 transient `systemd --user` 서비스를 만들며, `install.sh`가 설치 또는 자동 시작하지 않습니다. Raspberry Pi의 console auto-login 사용자 세션이 활성 상태라면 일반적으로 SSH 연결이 끊겨도 계속 실행됩니다. 해당 세션 없이 SSH에서 시작해 지속 실행하려면 먼저 한 번 `sudo loginctl enable-linger "$USER"`를 실행하세요. 기본 `web.host = "127.0.0.1"`은 local-only이며 `ssh -L 8000:127.0.0.1:8000 <pi>` 같은 SSH tunnel과 함께 사용할 수 있습니다.
+`scripts/web.sh`는 transient `systemd --user` 서비스를 만들며, `install.sh`가 설치 또는 자동 시작하지 않습니다. Raspberry Pi의 console auto-login 사용자 세션이 활성 상태라면 일반적으로 SSH 연결이 끊겨도 계속 실행됩니다. 해당 세션 없이 SSH에서 시작해 지속 실행하려면 먼저 한 번 `sudo loginctl enable-linger "$USER"`를 실행하세요. 기본 `web.host = "127.0.0.1"`은 local-only이며 `ssh -L 8000:127.0.0.1:8000 <pi>` 같은 SSH tunnel과 함께 사용할 수 있습니다.
 
 `web.allow_control = true`이면 **로그인 없이 모든 브라우저 방문자**가 Save and Apply와 명시적인 fan On/Off를 사용할 수 있습니다. 신뢰된 사설 LAN에서만 사용하세요. Controller가 계속 유일한 설정 파일·하드웨어 소유자이며 stale revision과 외부 파일 수정을 거부하고, 요청 전원이 Off여도 safety override를 보존합니다. LAN 접속에는 `web.host = "0.0.0.0"`도 설정하고 primary controller와 browser renderer를 재시작하세요. 이 port를 port-forward하거나 WAN firewall로 열지 말고, 신뢰할 수 없는 접근에는 읽기 전용 모드 또는 별도의 인증된 network boundary를 사용하세요.
 
 clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 
 ```bash
-./uninstall.sh --yes
+./uninstall.sh
 ```
 
-제거는 transient display unit을 중지한 뒤 관리된 helper를 지우지만 PWM overlay와 콘솔 자동 로그인은 의도적으로 유지합니다. 필요하면 `sudo raspi-config`로 자동 로그인을 끄고, 정확한 overlay 줄을 제거하거나 backup을 복원하세요.
+제거 스크립트는 기본값 No인 확인을 요청합니다. 의도적인 비대화형 제거에는 `./uninstall.sh --yes`를 사용하세요. 현재 사용자의 browser service를 먼저 중지하고, 실패하더라도 transient display clean-stop을 이어서 시도합니다. 실제 stop 또는 cleanup이 실패하면 재시도를 위해 모든 관리 통합 파일을 보존합니다. 설정, source, `.venv`, PWM overlay와 콘솔 자동 로그인은 유지됩니다. 필요하면 `sudo raspi-config`로 자동 로그인을 끄고, 정확한 overlay 줄을 제거하거나 backup을 복원하세요.
+
+직접 실행하는 운영 스크립트는 저장소 root에서 `scripts/`로 이동했습니다. 기존 설치는 업데이트 후 `./install.sh`를 다시 실행해 관리 중인 tty/profile 경로를 새 위치로 갱신해야 합니다. 영구적인 root-level 호환 wrapper는 설치하지 않습니다.
 
 ## 설정과 안전 동작
 

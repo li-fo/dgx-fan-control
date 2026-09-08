@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -11,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def _clone(tmp_path: Path, *, config: bool = True, name: str = "clone with spaces") -> Path:
     clone = tmp_path / name
     clone.mkdir()
-    for file_name in ("install.sh", "start.sh", "display.sh", "uninstall.sh", "config.example.toml"):
+    for file_name in ("install.sh", "uninstall.sh", "dgx-fan-control.sh", "config.example.toml"):
         source = ROOT / file_name
         target = clone / file_name
         shutil.copy2(source, target)
@@ -19,7 +21,21 @@ def _clone(tmp_path: Path, *, config: bool = True, name: str = "clone with space
         (clone / "config.toml").write_text(
             (ROOT / "config.example.toml").read_text().replace('backend = "fake"', 'backend = "raspberry-pi"')
         )
-    (clone / ".venv").symlink_to(ROOT / ".venv", target_is_directory=True)
+    scripts = clone / "scripts"
+    scripts.mkdir()
+    for file_name in ("start.sh", "display.sh", "web.sh"):
+        shutil.copy2(ROOT / "scripts" / file_name, scripts / file_name)
+    virtual_bin = clone / ".venv/bin"
+    virtual_bin.mkdir(parents=True)
+    python = virtual_bin / "python"
+    python.write_text(
+        "#!/bin/sh\n"
+        f"PYTHONPATH={shlex.quote(str(ROOT / 'src'))} exec {shlex.quote(sys.executable)} \"$@\"\n"
+    )
+    python.chmod(0o755)
+    controller = virtual_bin / "dgx-fan"
+    controller.write_text("#!/bin/sh\nexit 0\n")
+    controller.chmod(0o755)
     return clone
 
 
@@ -33,18 +49,27 @@ def _environment(sandbox: Path) -> dict[str, str]:
             "DGX_FAN_TEST_INSTALL_USER": "operator",
             "SUDO_USER": "operator",
             "USER": "operator",
+            "PATH": f"{sandbox / 'usr/bin'}:{os.environ['PATH']}",
         }
     )
     return environment
 
 
 def _run(
-    script: Path, *args: str, sandbox: Path, cwd: Path | None = None
+    script: Path,
+    *args: str,
+    sandbox: Path,
+    cwd: Path | None = None,
+    input_text: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    environment = _environment(sandbox)
+    environment.update(extra_env or {})
     return subprocess.run(
         ["bash", str(script), *args],
         cwd=cwd or script.parent,
-        env=_environment(sandbox),
+        env=environment,
+        input=input_text,
         text=True,
         capture_output=True,
         check=False,
@@ -52,23 +77,52 @@ def _run(
 
 
 def _launcher_clone(tmp_path: Path) -> tuple[Path, Path]:
-    clone = tmp_path / "launcher-clone"
-    clone.mkdir()
+    clone = _clone(tmp_path, name="launcher-clone")
     launcher = clone / "dgx-fan-control.sh"
-    shutil.copy2(ROOT / "dgx-fan-control.sh", launcher)
     command_log = tmp_path / "launcher-command.log"
+    scripts = clone / "scripts"
     for name, status_variable in {
         "start.sh": "DGX_FAN_FAKE_START_STATUS",
         "display.sh": "DGX_FAN_FAKE_DISPLAY_STATUS",
         "web.sh": "DGX_FAN_FAKE_WEB_STATUS",
     }.items():
-        script = clone / name
+        script = scripts / name
         script.write_text(
             "#!/bin/sh\n"
             "printf '%s %s\\n' \"$(basename \"$0\")\" \"$*\" >> \"$DGX_FAN_LAUNCHER_LOG\"\n"
             f"exit \"${{{status_variable}:-0}}\"\n"
         )
         script.chmod(0o755)
+    controller = clone / ".venv/bin/dgx-fan"
+    controller.parent.mkdir(parents=True, exist_ok=True)
+    controller.write_text("#!/bin/sh\nexit 0\n")
+    controller.chmod(0o755)
+    sandbox = _sandbox(tmp_path)
+    marker = "# Managed by dgx-fan install.sh; do not edit.\n"
+    for relative in (
+        "usr/local/libexec/dgx-fan-prepare-hardware",
+        "usr/local/libexec/dgx-fan-display-manager",
+        "usr/local/libexec/dgx-fan-display-session",
+        "usr/local/libexec/dgx-fan-display-tty-acquired",
+        "usr/local/libexec/dgx-fan-display-cleanup",
+        "etc/profile.d/dgx-fan-autostart.sh",
+        "etc/sudoers.d/dgx-fan",
+    ):
+        managed = sandbox / relative
+        managed.parent.mkdir(parents=True, exist_ok=True)
+        managed.write_text("#!/bin/sh\n" + marker)
+        managed.chmod(0o755)
+    record = sandbox / "etc/dgx-fan-installation"
+    record.write_text(marker + "version=1\n" + str(clone) + "\n")
+    for directory in (
+        sandbox / "etc",
+        sandbox / "etc/profile.d",
+        sandbox / "etc/sudoers.d",
+        sandbox / "usr",
+        sandbox / "usr/local",
+        sandbox / "usr/local/libexec",
+    ):
+        directory.chmod(0o755)
     return launcher, command_log
 
 
@@ -76,7 +130,17 @@ def _run_launcher(
     launcher: Path, command_log: Path, responses: str, *arguments: str, **statuses: str
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
-    environment.update({"DGX_FAN_LAUNCHER_LOG": str(command_log), **statuses})
+    environment.update(
+        {
+            "DGX_FAN_LAUNCHER_LOG": str(command_log),
+            "DGX_FAN_INSTALL_TESTING": "1",
+            "DGX_FAN_TEST_ROOT": str(command_log.parent / "system-root"),
+            "DGX_FAN_TEST_PREREQUISITES_READY": "1",
+            "DGX_FAN_TEST_UV": str(command_log.parent / "system-root/fake-uv"),
+            "DGX_FAN_TEST_INSTALL_USER": "operator",
+            **statuses,
+        }
+    )
     return subprocess.run(
         ["bash", str(launcher), *arguments],
         cwd=launcher.parent,
@@ -113,7 +177,7 @@ def test_interactive_launcher_terminal_failure_stops_only_its_web_service(tmp_pa
 
 def test_interactive_launcher_stop_is_non_interactive_and_orders_web_before_display(tmp_path: Path) -> None:
     launcher, command_log = _launcher_clone(tmp_path)
-    (launcher.parent / "start.sh").unlink()
+    (launcher.parent / "scripts/start.sh").unlink()
 
     result = _run_launcher(launcher, command_log, "", "stop")
 
@@ -169,8 +233,8 @@ def test_interactive_launcher_stop_attempts_available_helper_when_other_is_missi
     tmp_path: Path,
 ) -> None:
     launcher, command_log = _launcher_clone(tmp_path)
-    web_script = launcher.parent / "web.sh"
-    display_script = launcher.parent / "display.sh"
+    web_script = launcher.parent / "scripts/web.sh"
+    display_script = launcher.parent / "scripts/display.sh"
 
     web_script.unlink()
     missing_web = _run_launcher(launcher, command_log, "", "stop")
@@ -295,6 +359,122 @@ def test_interactive_launcher_help_requires_exactly_one_argument(tmp_path: Path)
         assert not command_log.exists()
 
 
+def _remove_launcher_installation(command_log: Path) -> None:
+    sandbox = command_log.parent / "system-root"
+    for relative in (
+        "etc/dgx-fan-installation",
+        "etc/profile.d/dgx-fan-autostart.sh",
+        "etc/sudoers.d/dgx-fan",
+        "usr/local/libexec/dgx-fan-prepare-hardware",
+        "usr/local/libexec/dgx-fan-display-manager",
+        "usr/local/libexec/dgx-fan-display-session",
+        "usr/local/libexec/dgx-fan-display-tty-acquired",
+        "usr/local/libexec/dgx-fan-display-cleanup",
+    ):
+        (sandbox / relative).unlink(missing_ok=True)
+
+
+def test_launcher_missing_install_defaults_no_and_yes_repairs_without_recursion(tmp_path: Path) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+    _remove_launcher_installation(command_log)
+    sandbox = command_log.parent / "system-root"
+    before = (sandbox / "command.log").read_text() if (sandbox / "command.log").exists() else ""
+
+    declined = _run_launcher(launcher, command_log, "\n")
+
+    assert declined.returncode == 1
+    assert "no installation changes were made" in declined.stdout
+    assert ((sandbox / "command.log").read_text() if (sandbox / "command.log").exists() else "") == before
+    assert not command_log.exists()
+
+    boot = sandbox / "boot/firmware/config.txt"
+    boot.write_text("[all]\ndtoverlay=pwm-2chan,pin=18,pin2=19,func=2,func2=2\n")
+    repaired = _run_launcher(launcher, command_log, "yes\nq\n")
+
+    assert repaired.returncode == 0, repaired.stderr
+    assert "opening the controller launcher" not in repaired.stdout
+    assert repaired.stdout.count("Choose the primary TUI display") == 1
+    assert (sandbox / "etc/dgx-fan-installation").read_text().splitlines()[-1] == str(launcher.parent)
+
+
+def test_launcher_partial_and_other_clone_installations_require_explicit_confirmation(tmp_path: Path) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+    sandbox = command_log.parent / "system-root"
+    manager = sandbox / "usr/local/libexec/dgx-fan-display-manager"
+    manager.unlink()
+
+    partial = _run_launcher(launcher, command_log, "no\n")
+
+    assert partial.returncode == 1
+    assert "no installation changes were made" in partial.stdout
+    assert not manager.exists()
+
+    manager.write_text("#!/bin/sh\n# Managed by dgx-fan install.sh; do not edit.\n")
+    manager.chmod(0o755)
+    record = sandbox / "etc/dgx-fan-installation"
+    record.write_text("# Managed by dgx-fan install.sh; do not edit.\nversion=1\n/opt/another clone\n")
+    other = _run_launcher(launcher, command_log, "\n")
+
+    assert other.returncode == 1
+    assert "no installation changes were made" in other.stdout
+    assert record.read_text().splitlines()[-1] == "/opt/another clone"
+
+    boot = sandbox / "boot/firmware/config.txt"
+    boot.write_text("[all]\ndtoverlay=pwm-2chan,pin=18,pin2=19,func=2,func2=2\n")
+    switched = _run_launcher(launcher, command_log, "yes\nq\n")
+    assert switched.returncode == 0, switched.stderr
+    assert switched.stdout.count("Choose the primary TUI display") == 1
+    assert record.read_text().splitlines()[-1] == str(launcher.parent)
+
+
+def test_launcher_rechecks_pending_prerequisites_after_install(tmp_path: Path) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+    _remove_launcher_installation(command_log)
+
+    result = _run_launcher(
+        launcher,
+        command_log,
+        "yes\n",
+        DGX_FAN_TEST_PREREQUISITES_READY="0",
+    )
+
+    assert result.returncode == 1
+    assert "installation completed but is not ready" in result.stderr
+    assert "Choose the primary TUI display" not in result.stdout
+    assert not command_log.exists()
+
+
+def test_launcher_treats_install_record_path_as_data_only(tmp_path: Path) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+    sandbox = command_log.parent / "system-root"
+    injected = tmp_path / "record-was-executed"
+    record = sandbox / "etc/dgx-fan-installation"
+    record.write_text(
+        "# Managed by dgx-fan install.sh; do not edit.\n"
+        "version=1\n"
+        f"/opt/$(touch {injected})\n"
+    )
+
+    result = _run_launcher(launcher, command_log, "no\n")
+
+    assert result.returncode == 1
+    assert not injected.exists()
+    assert record.read_text().splitlines()[-1].startswith("/opt/$(touch ")
+
+
+def test_launcher_stop_and_help_never_probe_or_prompt_for_installation(tmp_path: Path) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+    _remove_launcher_installation(command_log)
+
+    stopped = _run_launcher(launcher, command_log, "", "stop")
+    helped = _run_launcher(launcher, command_log, "", "--help")
+
+    assert stopped.returncode == 0
+    assert command_log.read_text().splitlines() == ["web.sh stop", "display.sh stop"]
+    assert helped.returncode == 0
+    assert "Install this clone" not in helped.stdout
+
+
 def _sandbox(tmp_path: Path) -> Path:
     sandbox = tmp_path / "system-root"
     (sandbox / "boot/firmware").mkdir(parents=True)
@@ -348,7 +528,14 @@ def test_temp_root_install_is_idempotent_and_keeps_config_in_clone(tmp_path: Pat
     session = sandbox / "usr/local/libexec/dgx-fan-display-session"
     sudoers = sandbox / "etc/sudoers.d/dgx-fan"
     hook = sandbox / "etc/profile.d/dgx-fan-autostart.sh"
+    install_record = sandbox / "etc/dgx-fan-installation"
     assert helper.exists() and manager.exists() and session.exists() and sudoers.exists() and hook.exists()
+    assert install_record.read_text().splitlines() == [
+        "# Managed by dgx-fan install.sh; do not edit.",
+        "version=1",
+        str(clone),
+    ]
+    assert "source" not in install_record.read_text()
     assert "accepts no arguments" in helper.read_text()
     assert "/usr/local/libexec/dgx-fan-prepare-hardware" in sudoers.read_text()
     assert "/usr/local/libexec/dgx-fan-display-manager *" in sudoers.read_text()
@@ -364,7 +551,7 @@ def test_temp_root_install_is_idempotent_and_keeps_config_in_clone(tmp_path: Pat
     assert '"/dev/tty1"' in hook_text
     assert "SSH_CONNECTION" in hook_text
     assert "DGX_FAN_AUTOSTART_ATTEMPTED" in hook_text
-    assert '"$DGX_FAN_PROJECT_ROOT/display.sh" start' in hook_text
+    assert '"$DGX_FAN_PROJECT_ROOT/scripts/display.sh" start' in hook_text
     assert "raspi-config nonint do_boot_behaviour B2" in (sandbox / "command.log").read_text()
     assert f"uv cwd={clone}" in (sandbox / "command.log").read_text()
     assert f"--project {clone} --locked --extra raspberry-pi --no-dev" in (
@@ -372,11 +559,66 @@ def test_temp_root_install_is_idempotent_and_keeps_config_in_clone(tmp_path: Pat
     ).read_text()
 
 
+def test_interactive_install_hands_off_once_and_no_launch_returns_success(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    overlay = "dtoverlay=pwm-2chan,pin=18,pin2=19,func=2,func2=2"
+    (sandbox / "boot/firmware/config.txt").write_text(f"[all]\n{overlay}\n")
+    test_flags = {
+        "DGX_FAN_TEST_INTERACTIVE": "1",
+        "DGX_FAN_TEST_GROUP_READY": "1",
+        "DGX_FAN_TEST_PREREQUISITES_READY": "1",
+    }
+
+    handed_off = _run(
+        clone / "install.sh",
+        sandbox=sandbox,
+        input_text="q\n",
+        extra_env=test_flags,
+    )
+
+    assert handed_off.returncode == 0, handed_off.stderr
+    assert handed_off.stdout.count("opening the controller launcher") == 1
+    assert handed_off.stdout.count("Choose the primary TUI display") == 1
+
+    no_launch = _run(
+        clone / "install.sh",
+        "--no-launch",
+        sandbox=sandbox,
+        input_text="q\n",
+        extra_env=test_flags,
+    )
+
+    assert no_launch.returncode == 0, no_launch.stderr
+    assert "opening the controller launcher" not in no_launch.stdout
+    assert "Choose the primary TUI display" not in no_launch.stdout
+
+
+def test_noninteractive_or_new_overlay_install_does_not_open_launcher(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    noninteractive = _run(clone / "install.sh", sandbox=sandbox)
+    assert noninteractive.returncode == 0, noninteractive.stderr
+    assert "opening the controller launcher" not in noninteractive.stdout
+
+    second_clone = _clone(tmp_path, name="second clone")
+    second_sandbox = _sandbox(tmp_path / "second sandbox")
+    new_overlay = _run(
+        second_clone / "install.sh",
+        sandbox=second_sandbox,
+        extra_env={"DGX_FAN_TEST_INTERACTIVE": "1", "DGX_FAN_TEST_GROUP_READY": "1"},
+    )
+    assert new_overlay.returncode == 0, new_overlay.stderr
+    assert "opening the controller launcher" not in new_overlay.stdout
+    assert "restart required" in new_overlay.stdout
+
+
 def test_existing_system_parent_directory_mode_is_preserved(tmp_path: Path) -> None:
     clone = _clone(tmp_path)
     sandbox = _sandbox(tmp_path)
     sudoers_directory = sandbox / "etc/sudoers.d"
     sudoers_directory.mkdir(parents=True)
+    (sandbox / "etc").chmod(0o755)
     sudoers_directory.chmod(0o711)
 
     result = _run(clone / "install.sh", sandbox=sandbox)
@@ -595,6 +837,76 @@ def test_uv_project_argument_is_independent_of_invocation_directory(tmp_path: Pa
     assert f"--project {clone} --locked --extra raspberry-pi --no-dev" in command_log
 
 
+def _managed_artifacts(sandbox: Path) -> tuple[Path, ...]:
+    return tuple(
+        sandbox / relative
+        for relative in (
+            "etc/profile.d/dgx-fan-autostart.sh",
+            "etc/sudoers.d/dgx-fan",
+            "etc/dgx-fan-installation",
+            "usr/local/libexec/dgx-fan-prepare-hardware",
+            "usr/local/libexec/dgx-fan-display-manager",
+            "usr/local/libexec/dgx-fan-display-session",
+            "usr/local/libexec/dgx-fan-display-tty-acquired",
+            "usr/local/libexec/dgx-fan-display-cleanup",
+        )
+    )
+
+
+def test_uninstall_confirmation_defaults_no_handles_invalid_and_yes_proceeds(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+
+    for response in ("\n", ""):
+        cancelled = _run(clone / "uninstall.sh", sandbox=sandbox, input_text=response)
+        assert cancelled.returncode == 0
+        assert "cancelled; no files were changed" in cancelled.stdout
+        assert all(path.exists() for path in _managed_artifacts(sandbox))
+
+    removed = _run(clone / "uninstall.sh", sandbox=sandbox, input_text="maybe\nyes\n")
+    assert removed.returncode == 0, removed.stderr
+    assert "Invalid choice" in removed.stderr
+    assert all(not path.exists() for path in _managed_artifacts(sandbox))
+
+
+def test_uninstall_stops_web_then_display_and_preserves_everything_on_web_failure(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    systemctl = sandbox / "usr/bin/systemctl"
+    systemctl.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$DGX_FAN_TEST_ROOT/stop-order.log\"\n"
+        "if [ \"$1\" = --user ] && [ \"$2\" = show ]; then exit 7; fi\n"
+        "case \"$1\" in show) printf 'not-found\\n';; esac\n"
+    )
+    systemctl.chmod(0o755)
+
+    result = _run(clone / "uninstall.sh", "--yes", sandbox=sandbox)
+
+    assert result.returncode == 1
+    entries = (sandbox / "stop-order.log").read_text().splitlines()
+    assert entries[0].startswith("--user show")
+    assert "stop dgx-fan-display.service" in entries[1]
+    assert all(path.exists() for path in _managed_artifacts(sandbox))
+
+
+def test_uninstall_partial_display_integration_fails_closed_without_deleting(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    (sandbox / "usr/local/libexec/dgx-fan-display-cleanup").unlink()
+
+    result = _run(clone / "uninstall.sh", "--yes", sandbox=sandbox)
+
+    assert result.returncode == 1
+    assert "partial or untrusted" in result.stderr
+    for path in _managed_artifacts(sandbox):
+        if path.name != "dgx-fan-display-cleanup":
+            assert path.exists()
+
+
 def test_reboot_is_deferred_until_success_and_uninstall_preserves_config_and_overlay(
     tmp_path: Path,
 ) -> None:
@@ -692,7 +1004,7 @@ def test_uninstall_uses_root_marker_inspection_for_production_sudoers() -> None:
 
 def test_start_dry_run_uses_fixed_helper_and_clone_local_configuration() -> None:
     result = subprocess.run(
-        ["bash", str(ROOT / "start.sh"), "--dry-run"],
+        ["bash", str(ROOT / "scripts/start.sh"), "--dry-run"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -705,12 +1017,34 @@ def test_start_dry_run_uses_fixed_helper_and_clone_local_configuration() -> None
     assert f"{ROOT}/.venv/bin/dgx-fan --config {ROOT}/config.toml" in result.stdout
 
 
+def test_direct_runtime_scripts_live_only_under_scripts_and_resolve_clone_from_any_cwd(
+    tmp_path: Path,
+) -> None:
+    for name in ("start.sh", "display.sh", "web.sh"):
+        assert not (ROOT / name).exists()
+        assert os.access(ROOT / "scripts" / name, os.X_OK)
+
+    clone = _clone(tmp_path)
+    elsewhere = tmp_path / "other cwd"
+    elsewhere.mkdir()
+    result = subprocess.run(
+        ["bash", str(clone / "scripts/start.sh"), "--dry-run"],
+        cwd=elsewhere,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    escaped_clone = str(clone).replace(" ", "\\ ")
+    assert f"{escaped_clone}/.venv/bin/dgx-fan --config {escaped_clone}/config.toml" in result.stdout
+
+
 def test_display_launcher_has_closed_actions_and_fixed_bridge() -> None:
-    source = (ROOT / "display.sh").read_text()
+    source = (ROOT / "scripts/display.sh").read_text()
     assert "start|restart|stop|status" in source
     assert "sudo -n \"$MANAGER\" \"$1\"" in source
     assert "systemd-run" not in source
-    result = subprocess.run(["bash", str(ROOT / "display.sh"), "unknown"], text=True, capture_output=True, check=False)
+    result = subprocess.run(["bash", str(ROOT / "scripts/display.sh"), "unknown"], text=True, capture_output=True, check=False)
     assert result.returncode == 64
 
 
@@ -770,8 +1104,8 @@ def test_fake_vt_lifecycle_runs_cleanup_only_after_tty_marker(tmp_path: Path) ->
     assert cleaned.returncode == 0, cleaned.stderr
     assert not marker.exists()
     assert log.read_text().splitlines() == [
-        "openvt -c 8 -s -w -- " + str(sandbox / "usr/local/libexec/dgx-fan-display-tty-acquired") + " operator " + str(clone / "start.sh") + " tty3",
-        "runuser -u operator -- " + str(clone / "start.sh"),
+        "openvt -c 8 -s -w -- " + str(sandbox / "usr/local/libexec/dgx-fan-display-tty-acquired") + " operator " + str(clone / "scripts/start.sh") + " tty3",
+        "runuser -u operator -- " + str(clone / "scripts/start.sh"),
         "chvt 3",
         "deallocvt 8",
     ]

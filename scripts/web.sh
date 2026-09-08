@@ -3,14 +3,14 @@
 set -euo pipefail
 
 readonly UNIT='dgx-fan-web'
-PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 CONFIG_PATH="$PROJECT_ROOT/config.toml"
 PYTHON_BIN="$PROJECT_ROOT/.venv/bin/python"
 MONITOR_BIN="$PROJECT_ROOT/.venv/bin/dgx-fan-monitor"
 
 usage() {
     cat <<'EOF'
-Usage: ./web.sh {start|restart|stop|status}
+Usage: ./scripts/web.sh {start|restart|stop|status}
 
 Starts the optional browser monitor as a transient systemd user service. It is
 read-only unless web.allow_control=true. It never starts, stops, or owns the
@@ -20,7 +20,7 @@ EOF
 
 fail() { printf 'dgx-fan web: %s\n' "$*" >&2; exit 1; }
 
-[[ $EUID -ne 0 ]] || fail 'run web.sh as the regular login user, not root'
+[[ $EUID -ne 0 ]] || fail 'run scripts/web.sh as the regular login user, not root'
 [[ $# -eq 1 ]] || { usage >&2; exit 64; }
 case "$1" in
     start|restart|stop|status) ;;
@@ -32,8 +32,6 @@ command -v systemctl >/dev/null 2>&1 || fail 'systemctl is required'
 if [[ "$1" == stop ]]; then
     load_state=$(systemctl --user show --property=LoadState --value "$UNIT.service") ||
         fail 'could not determine browser monitor service state'
-    # --collect removes a stopped transient unit.  Treat that expected absent
-    # state as an already-complete stop, but retain errors from real units.
     [[ "$load_state" == not-found ]] && exit 0
     exec systemctl --user stop "$UNIT.service"
 fi
@@ -70,9 +68,6 @@ ALLOW_CONTROL=${WEB_VALUES[2]:-false}
 print_browser_urls() {
     case "$HOST" in
         0.0.0.0)
-            # A wildcard listener is reachable through each non-loopback IPv4
-            # address assigned to this Pi.  Keep discovery best-effort so a
-            # minimal image without iproute2 still starts the monitor.
             local -a addresses=()
             if command -v ip >/dev/null 2>&1; then
                 mapfile -t addresses < <(
@@ -89,12 +84,8 @@ print_browser_urls() {
                 printf 'Browser monitor: http://%s:%s/\n' "$address" "$PORT"
             done
             ;;
-        ::1)
-            printf 'Browser monitor: http://[::1]:%s/\n' "$PORT"
-            ;;
-        *)
-            printf 'Browser monitor: http://%s:%s/\n' "$HOST" "$PORT"
-            ;;
+        ::1) printf 'Browser monitor: http://[::1]:%s/\n' "$PORT" ;;
+        *) printf 'Browser monitor: http://%s:%s/\n' "$HOST" "$PORT" ;;
     esac
 }
 
@@ -106,10 +97,6 @@ if systemctl --user is-active --quiet "$UNIT.service"; then
 fi
 command -v systemd-run >/dev/null 2>&1 || fail 'systemd-run is required'
 
-# textual-serve accepts a single command string. Build it with shell quoting so
-# a clone path containing spaces cannot alter monitor arguments. Version 1.1.3
-# exposes its Server API rather than a console-script command. The local
-# adapter keeps the bind address separate from browser-visible request URLs.
 printf -v MONITOR_COMMAND '%q ' "$MONITOR_BIN" --config "$CONFIG_PATH"
 readonly SERVER_PROGRAM='from dgx_fan.web_server import RequestOriginServer; import sys; RequestOriginServer(sys.argv[1], host=sys.argv[2], port=int(sys.argv[3]), allow_control=sys.argv[4] == "true").serve()'
 systemd-run --user --collect --service-type=exec --unit="$UNIT" \

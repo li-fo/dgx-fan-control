@@ -26,7 +26,7 @@ utilization = "cyan"
 temperature = "red"
 
 [web]
-# The browser companion is opt-in and read-only by default. `./web.sh start` serves the
+# The browser companion is opt-in and read-only by default. `./scripts/web.sh start` serves the
 # current physical TUI state at this numeric address and port. Keep the
 # loopback default, or explicitly use 0.0.0.0 for a trusted private LAN.
 # Never use the wildcard with router port forwarding or WAN firewall exposure.
