@@ -82,15 +82,34 @@ installation_prerequisites_ready() {
     local helper=$1 manager=$2 session=$3 acquired=$4 cleanup=$5 profile=$6 sudoers=$7
     [[ -f "$PROJECT_ROOT/config.toml" && -x "$PROJECT_ROOT/.venv/bin/dgx-fan" \
         && -x "$START_SCRIPT" && -x "$DISPLAY_SCRIPT" && -x "$WEB_SCRIPT" \
-        && -x "$helper" && -x "$manager" && -x "$session" && -x "$acquired" && -x "$cleanup" \
-        && -f "$sudoers" && ! -L "$sudoers" ]] \
+        && -x "$helper" && -x "$manager" && -x "$session" && -x "$acquired" && -x "$cleanup" ]] \
         && managed_file_ready "$helper" \
         && managed_file_ready "$manager" \
         && managed_file_ready "$session" \
         && managed_file_ready "$acquired" \
         && managed_file_ready "$cleanup" \
         && managed_file_ready "$profile" \
+        && sudoers_metadata_ready "$sudoers" \
+        && sudo_authorizations_ready "$helper" "$manager" \
         && operator_prerequisites_ready
+}
+
+sudoers_metadata_ready() {
+    local path=$1 owner group mode links expected_owner=0 expected_group=0
+    [[ -f "$path" && ! -L "$path" ]] || return 1
+    if [[ -n "$TEST_ROOT" ]]; then
+        expected_owner=$EUID
+        expected_group=$(id -g)
+    fi
+    read -r owner group mode links < <(stat -c '%u %g %a %h' -- "$path") || return 1
+    [[ "$owner" == "$expected_owner" && "$group" == "$expected_group" \
+        && "$mode" == 440 && "$links" == 1 ]]
+}
+
+sudo_authorizations_ready() {
+    local helper=$1 manager=$2
+    sudo -n -l -- "$helper" >/dev/null 2>&1 \
+        && sudo -n -l -- "$manager" start >/dev/null 2>&1
 }
 
 operator_prerequisites_ready() {

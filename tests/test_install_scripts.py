@@ -114,6 +114,7 @@ def _launcher_clone(tmp_path: Path) -> tuple[Path, Path]:
         managed.chmod(0o755)
     record = sandbox / "etc/dgx-fan-installation"
     record.write_text(marker + "version=1\n" + str(clone) + "\n")
+    (sandbox / "etc/sudoers.d/dgx-fan").chmod(0o440)
     for directory in (
         sandbox / "etc",
         sandbox / "etc/profile.d",
@@ -138,6 +139,7 @@ def _run_launcher(
             "DGX_FAN_TEST_PREREQUISITES_READY": "1",
             "DGX_FAN_TEST_UV": str(command_log.parent / "system-root/fake-uv"),
             "DGX_FAN_TEST_INSTALL_USER": "operator",
+            "PATH": f"{command_log.parent / 'system-root/usr/bin'}:{os.environ['PATH']}",
             **statuses,
         }
     )
@@ -462,6 +464,78 @@ def test_launcher_treats_install_record_path_as_data_only(tmp_path: Path) -> Non
     assert record.read_text().splitlines()[-1].startswith("/opt/$(touch ")
 
 
+def test_launcher_requires_safe_sudoers_metadata_before_entering_primary_menu(tmp_path: Path) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+    sudoers = command_log.parent / "system-root/etc/sudoers.d/dgx-fan"
+    sudoers.chmod(0o640)
+    sudo_log = tmp_path / "sudo-list.log"
+
+    result = _run_launcher(
+        launcher,
+        command_log,
+        "no\n",
+        DGX_FAN_FAKE_SUDO_LOG=str(sudo_log),
+    )
+
+    assert result.returncode == 1
+    assert "Choose the primary TUI display" not in result.stdout
+    assert not sudo_log.exists()
+    assert not command_log.exists()
+
+
+def test_launcher_requires_both_exact_noninteractive_sudo_authorizations(tmp_path: Path) -> None:
+    for denied_status in ("DGX_FAN_FAKE_SUDO_HELPER_STATUS", "DGX_FAN_FAKE_SUDO_MANAGER_STATUS"):
+        case = tmp_path / denied_status
+        case.mkdir()
+        launcher, command_log = _launcher_clone(case)
+        sudo_log = case / "sudo-list.log"
+
+        result = _run_launcher(
+            launcher,
+            command_log,
+            "no\n",
+            DGX_FAN_FAKE_SUDO_LOG=str(sudo_log),
+            **{denied_status: "1"},
+        )
+
+        assert result.returncode == 1
+        assert "Choose the primary TUI display" not in result.stdout
+        listings = sudo_log.read_text().splitlines()
+        assert listings[0].startswith("-n -l -- ")
+        assert listings[0].endswith("/usr/local/libexec/dgx-fan-prepare-hardware")
+        if denied_status == "DGX_FAN_FAKE_SUDO_MANAGER_STATUS":
+            assert len(listings) == 2
+            assert listings[1].endswith("/usr/local/libexec/dgx-fan-display-manager start")
+        else:
+            assert len(listings) == 1
+        assert not command_log.exists()
+
+
+def test_launcher_does_not_read_root_only_sudoers_marker_when_authorization_is_valid(
+    tmp_path: Path,
+) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+    sudoers = command_log.parent / "system-root/etc/sudoers.d/dgx-fan"
+    sudoers.chmod(0o600)
+    sudoers.write_text("content deliberately unavailable to the operator\n")
+    sudoers.chmod(0o440)
+    sudo_log = tmp_path / "sudo-list.log"
+
+    result = _run_launcher(
+        launcher,
+        command_log,
+        "q\n",
+        DGX_FAN_FAKE_SUDO_LOG=str(sudo_log),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("Choose the primary TUI display") == 1
+    assert [line.split()[-1] for line in sudo_log.read_text().splitlines()] == [
+        str(command_log.parent / "system-root/usr/local/libexec/dgx-fan-prepare-hardware"),
+        "start",
+    ]
+
+
 def test_launcher_stop_and_help_never_probe_or_prompt_for_installation(tmp_path: Path) -> None:
     launcher, command_log = _launcher_clone(tmp_path)
     _remove_launcher_installation(command_log)
@@ -487,6 +561,11 @@ def _sandbox(tmp_path: Path) -> Path:
     for command, body in {
         "systemctl": 'case "$1" in show) printf "not-found\\n";; esac\n',
         "systemd-run": "exit 0\n",
+        "sudo": (
+            'if [ -n "${DGX_FAN_FAKE_SUDO_LOG:-}" ]; then printf "%s\\n" "$*" >> "$DGX_FAN_FAKE_SUDO_LOG"; fi\n'
+            'case "$*" in *dgx-fan-prepare-hardware*) exit "${DGX_FAN_FAKE_SUDO_HELPER_STATUS:-0}";; '
+            '*dgx-fan-display-manager*) exit "${DGX_FAN_FAKE_SUDO_MANAGER_STATUS:-0}";; *) exit 64;; esac\n'
+        ),
     }.items():
         tool = sandbox / "usr/bin" / command
         tool.parent.mkdir(parents=True, exist_ok=True)
