@@ -117,7 +117,7 @@ clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 
 ## 설정과 안전 동작
 
-`config.example.toml`은 schema v2의 시작점입니다. 이를 `config.toml`로 복사하세요. Fan Control 탭의 **Setting**에서 공통 editor를 열면 section selector로 Collection, Fan control, Hardware, Dashboard colors 사이를 이동하고 Save/Cancel action은 고정된 위치에 유지됩니다. **Save and Apply**를 누르면 전체 설정을 검증하고 comment와 관련 없는 항목을 보존하며 ignored `*.toml.bak`을 만든 뒤 승인된 revision을 적용합니다. 안전한 compare-and-swap 교체에는 Linux kernel과 설정 filesystem의 `renameat2(RENAME_EXCHANGE)` 지원이 필요하며, 지원하지 않는 filesystem에서는 overwrite fallback 없이 save를 거부합니다. **Cancel**은 disk와 runtime을 바꾸지 않습니다. 실패하거나 stale인 save에서는 열린 editor의 draft가 그대로 보입니다. 필요한 값을 복사한 뒤 cancel하고 현재 controller 설정을 다시 여세요. 느리지만 승인된 browser save는 같은 request identity로 재시도합니다. 제한된 client 확인 시간 안에 결과를 확정할 수 없으면 실패라고 단정하지 않고 outcome이 uncertain임을 표시하며, 가능하면 authoritative revision을 새로 읽고 확인을 위해 draft를 유지합니다. 외부에서 파일을 직접 수정한 경우에는 controller를 재시작하기 전까지 UI save가 거부됩니다. Startup enablement는 다음 실행, shutdown mode는 다음 clean exit, startup boost 시간은 이후 boost event부터 적용됩니다. Endpoint URL, 저수준 배선/backend, web listener/access는 파일 수정 후 재시작해야 합니다.
+`config.example.toml`은 schema v2의 시작점입니다. 이를 `config.toml`로 복사하세요. Fan Control 탭의 **Setting**에서 공통 editor를 열면 Collection, Fan Speed, Fan Control, Hardware, Colors 다섯 탭이 한 section씩 표시되고 Save/Cancel action은 고정된 위치에 유지됩니다. Fan Speed 탭은 네 threshold/speed 쌍을 compact row로 표시합니다. **Save and Apply**를 누르면 전체 설정을 검증하고 comment와 관련 없는 항목을 보존하며 ignored `*.toml.bak`을 만든 뒤 승인된 revision을 적용합니다. 안전한 compare-and-swap 교체에는 Linux kernel과 설정 filesystem의 `renameat2(RENAME_EXCHANGE)` 지원이 필요하며, 지원하지 않는 filesystem에서는 overwrite fallback 없이 save를 거부합니다. **Cancel**은 disk와 runtime을 바꾸지 않습니다. 실패하거나 stale인 save에서는 열린 editor의 draft가 그대로 보입니다. 필요한 값을 복사한 뒤 cancel하고 현재 controller 설정을 다시 여세요. 느리지만 승인된 browser save는 같은 request identity로 재시도합니다. 제한된 client 확인 시간 안에 결과를 확정할 수 없으면 실패라고 단정하지 않고 outcome이 uncertain임을 표시하며, 가능하면 authoritative revision을 새로 읽고 확인을 위해 draft를 유지합니다. 외부에서 파일을 직접 수정한 경우에는 controller를 재시작하기 전까지 UI save가 거부됩니다. Startup enablement는 다음 실행, shutdown mode는 다음 clean exit, startup boost 시간은 이후 boost event부터 적용됩니다. Endpoint URL, 저수준 배선/backend, web listener/access는 파일 수정 후 재시작해야 합니다.
 
 ### Schema와 DGX endpoint
 
@@ -130,7 +130,7 @@ clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 
 ### Dashboard 색상
 
-`[dashboard.colors]`는 선택 사항입니다. `memory`, `utilization`, `temperature`는 각 차트의 전경색을 개별 지정합니다. Rich가 지원하는 색 이름(예: 8색 터미널의 `"ansi_yellow"`) 또는 정확한 `#RRGGBB`를 사용하세요. 항목을 생략하면 터미널 기본색을 사용하며, `"default"` 값은 허용되지 않습니다.
+`[dashboard.colors]`는 선택 사항입니다. `memory`, `utilization`, `temperature`는 각 차트의 전경색을 개별 지정합니다. Colors 탭은 Default와 Rich의 표준 ANSI 16색(`black`~`white`, `bright_black`~`bright_white`)을 색상 sample과 함께 제공합니다. Default를 선택하면 해당 항목을 생략합니다. 기존의 유효한 custom 색 이름이나 `#RRGGBB` 값은 **Current custom**으로 표시되어 명시적으로 바꾸기 전까지 그대로 유지됩니다. 설정 파일에서는 Rich가 지원하는 다른 전경색 이름이나 정확한 `#RRGGBB`도 계속 사용할 수 있지만 저장값 `"default"`는 허용되지 않습니다. 8색 터미널에서는 bright preset이 해당 기본색과 같게 표시될 수 있습니다.
 
 ### 브라우저 모니터
 
