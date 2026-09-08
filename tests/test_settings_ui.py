@@ -5,6 +5,7 @@ from typing import Any, cast
 import pytest
 from rich.color import Color
 from textual.app import App, ComposeResult
+from textual.content import Content
 from textual.screen import Screen
 from textual.widgets import Button, Input, Select, Static, Tab, TabbedContent, TabPane, Tabs
 
@@ -206,6 +207,7 @@ def test_settings_tabs_switch_by_mouse_and_keyboard_with_fixed_actions(
             content = screen.query_one("#settings-tabs", TabbedContent)
             actions = screen.query_one("#settings-actions")
             panes = list(screen.query(TabPane))
+            assert str(screen.query_one("#settings-title", Static).render()) == "Setting"
             assert [tab.label_text for tab in screen.query(Tab)] == [
                 "Collection",
                 "Fan Speed",
@@ -237,6 +239,26 @@ def test_settings_tabs_switch_by_mouse_and_keyboard_with_fixed_actions(
             threshold.value = "46"
             assert threshold.region.height > 0
             assert screen.query_one("#setting-stage-4-speed", Input).region.height > 0
+            rows = [screen.query_one(f"#setting-stage-row-{index}") for index in range(1, 5)]
+            for child_index in range(1, 5):
+                assert (
+                    len(
+                        {
+                            (
+                                row.children[child_index].region.x,
+                                row.children[child_index].region.width,
+                            )
+                            for row in rows
+                        }
+                    )
+                    == 1
+                )
+            placeholder = screen.query_one("#setting-stage-4-threshold", Static)
+            assert str(placeholder.render()) == "Above stage 3"
+            assert (placeholder.region.x, placeholder.region.width) == (
+                rows[0].children[2].region.x,
+                rows[0].children[2].region.width,
+            )
 
             tabs = screen.query_one(Tabs)
             tabs.focus()
@@ -292,9 +314,44 @@ def test_color_presets_have_named_rich_swatches_and_canonical_values() -> None:
     assert [value for _label, value in options] == ["", *ANSI_COLOR_PRESETS]
     assert len(ANSI_COLOR_PRESETS) == 16
     for label, value in options[1:]:
-        assert value in label.plain
+        assert label.plain.strip() == value.replace("_", " ").title()
+        assert "\n" not in label.plain
         assert any(span.style == f"on {value}" for span in label.spans)
         assert Color.parse(value).name == value
+
+
+@pytest.mark.parametrize("size", [(80, 24), (128, 37)])
+def test_collapsed_color_prompts_are_single_line_visible_swatches(
+    size: tuple[int, int],
+) -> None:
+    async def save(*_args: Any) -> dict[str, Any]:
+        return _initial()
+
+    app = _ModalApp(SettingsScreen(_initial(), save), [])
+
+    async def exercise() -> None:
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            screen = _editor(app)
+            screen.query_one("#settings-tabs", TabbedContent).active = "settings-tab-colors"
+            select = screen.query_one("#setting-color-memory", Select)
+            current = select.query_one("SelectCurrent")
+            current_label = current.query_one("#label", Static)
+            for color_index, preset in enumerate(ANSI_COLOR_PRESETS):
+                select.value = preset
+                await pilot.pause()
+                prompt = current_label.render()
+                assert isinstance(prompt, Content)
+                assert "\n" not in prompt.plain
+                assert prompt.plain.strip() == preset.replace("_", " ").title()
+                assert prompt.cell_length <= current_label.content_region.width
+                assert len(prompt.spans) == 1
+                style = prompt.spans[0].style
+                assert not isinstance(style, str)
+                assert style.background is not None
+                assert style.background.ansi == color_index
+
+    asyncio.run(exercise())
 
 
 def test_existing_custom_colors_are_preserved_until_explicitly_replaced() -> None:

@@ -59,7 +59,7 @@ class SettingsScreen(ModalScreen[bool]):
     .speed-stage { width: 9; content-align: left middle; }
     .speed-label { width: 8; content-align: right middle; margin-right: 1; }
     .speed-input { width: 1fr; min-width: 8; }
-    .speed-open { width: 1fr; content-align: left middle; }
+    .speed-open { width: 1fr; content-align: left middle; padding: 0 2; }
     .setting-note { color: $text-muted; height: auto; margin-bottom: 1; }
     #settings-error { color: $error; height: auto; max-height: 3; margin: 0 1; }
     #settings-actions { height: 3; align: right middle; padding: 0 1; }
@@ -122,9 +122,11 @@ class SettingsScreen(ModalScreen[bool]):
         if index == 4:
             return Horizontal(
                 Label(f"Stage {index}", classes="speed-stage"),
-                Static("Above stage 3", classes="speed-open"),
+                Label("", classes="speed-label"),
+                Static("Above stage 3", id="setting-stage-4-threshold", classes="speed-open"),
                 Label("Speed %", classes="speed-label"),
                 speed,
+                id=f"setting-stage-row-{index}",
                 classes="speed-row",
             )
         threshold = self._input(
@@ -139,6 +141,7 @@ class SettingsScreen(ModalScreen[bool]):
             threshold,
             Label("Speed %", classes="speed-label"),
             speed,
+            id=f"setting-stage-row-{index}",
             classes="speed-row",
         )
 
@@ -147,9 +150,9 @@ class SettingsScreen(ModalScreen[bool]):
         selected = current if isinstance(current, str) and current else ""
         options = [(Text("Default (terminal theme)"), "")]
         for name in ANSI_COLOR_PRESETS:
-            label = Text(f"{name.replace('_', ' ').title():<16} ")
+            label = Text()
             label.append("    ", style=f"on {name}")
-            label.append(f"  {name}")
+            label.append(f" {name.replace('_', ' ').title()}")
             options.append((label, name))
         if selected and selected not in ANSI_COLOR_PRESETS:
             options.append((Text(f"Current custom: {selected}"), selected))
@@ -178,7 +181,7 @@ class SettingsScreen(ModalScreen[bool]):
             if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]
         ]
         with Vertical(id="settings-dialog"):
-            yield Static("Fan settings", id="settings-title")
+            yield Static("Setting", id="settings-title")
             with TabbedContent(initial="settings-tab-collection", id="settings-tabs"):
                 with (
                     TabPane("Collection", id="settings-tab-collection"),
