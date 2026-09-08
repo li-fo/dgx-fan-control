@@ -50,8 +50,13 @@ retry_delay_seconds = 10.0
 [control]
 # Fan 1 and Fan 2 are explicitly mapped. For one DGX, use the same ID twice.
 fan_endpoint_ids = ["dgx-1", "dgx-1"]
-# independent uses each mapped endpoint's own curve demand; linked applies the
-# higher mapped demand to both fans. Safety and startup/tach boost stay shared.
+# Allowed values: "independent" (default) or "linked".
+# independent uses each fan's own mapped-DGX demand (for example 25%, 100% ->
+# 25%, 100%). linked applies the higher mapped demand to both (25%, 100% ->
+# 100%, 100%), within the normal maximum cap. Normal targets keep hysteresis
+# and max-speed behavior; safety is shared in both modes, while startup/tach
+# boost is shared only in linked mode. To run both fans together, set
+# fan_mode = "linked".
 fan_mode = "independent"
 enabled_at_startup = true
 max_speed_percent = 100
