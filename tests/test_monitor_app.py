@@ -53,8 +53,10 @@ def test_monitor_app_hydrates_read_only_ui_without_hardware(tmp_path: Path) -> N
         app = DGXFanMonitorApp(config)
         try:
             async with app.run_test(size=(100, 30)) as pilot:
-                await pilot.pause(delay=0.4)
                 ui = app.query_one(FanAppUI)
+                async with asyncio.timeout(2):
+                    while ui.snapshot is None:
+                        await pilot.pause(delay=0.05)
                 assert ui.read_only is True
                 assert app.query_one("#read-only-indicator", Static).render().plain == "READ ONLY"
                 assert app.query_one("#power-toggle", Button).disabled is True
@@ -137,6 +139,71 @@ def test_monitor_watchdog_preserves_disconnected_phase(tmp_path: Path) -> None:
             assert ui.monitor_transport_status == "Monitor stream: DISCONNECTED"
             assert app._accept_state(ui, _state(), received_at=101.0)
             assert ui.monitor_transport_status is None
+
+    asyncio.run(exercise())
+
+
+def test_writable_browser_controls_require_fresh_compatible_controller_state(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        config = load_config(Path("config.example.toml"))
+        config = replace(
+            config,
+            web=WebConfig(
+                enabled=True,
+                host="127.0.0.1",
+                port=8000,
+                socket_path=tmp_path / "monitor.sock",
+                allow_control=True,
+            ),
+        )
+        app = DGXFanMonitorApp(config)
+        async with app.run_test(size=(100, 30)):
+            ui = app.query_one(FanAppUI)
+            power = app.query_one("#power-toggle", Button)
+            settings = app.query_one("#fan-settings", Button)
+            assert power.disabled and settings.disabled
+
+            # A legacy frame has telemetry but no compatible control metadata.
+            assert app._accept_state(ui, _state(), received_at=10.0)
+            assert power.disabled and settings.disabled
+
+            compatible = replace(
+                _state(2),
+                settings_source_id="settings-one",
+                settings_revision=4,
+                power_enabled=True,
+                control_available=True,
+            )
+            assert app._accept_state(ui, compatible, received_at=11.0)
+            assert not power.disabled and not settings.disabled
+
+            app._set_phase(ui, "DISCONNECTED")
+            assert power.disabled and settings.disabled
+
+            reconnected = replace(
+                compatible,
+                source_id="monitor-two",
+                revision=1,
+                settings_source_id="settings-two",
+                settings_revision=0,
+            )
+            assert app._accept_state(ui, reconnected, received_at=12.0)
+            assert not power.disabled and not settings.disabled
+
+            app._watchdog(now=20.0)
+            assert power.disabled and settings.disabled
+
+            missing = replace(
+                reconnected,
+                revision=2,
+                settings_source_id=None,
+                settings_revision=None,
+                power_enabled=None,
+            )
+            assert app._accept_state(ui, missing, received_at=21.0)
+            assert power.disabled and settings.disabled
 
     asyncio.run(exercise())
 

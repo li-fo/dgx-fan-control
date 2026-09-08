@@ -7,6 +7,7 @@ from typing import Any
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select, Static, Switch
 
@@ -18,6 +19,7 @@ class SettingsScreen(ModalScreen[bool]):
     SettingsScreen { align: center middle; }
     #settings-dialog { width: 78; max-width: 100%; height: 1fr; max-height: 100%; border: round $primary; }
     #settings-title { height: 1; content-align: center middle; }
+    #settings-navigation { height: 3; margin: 0 1; }
     #settings-body { height: 1fr; padding: 0 1; }
     .settings-section { height: auto; margin: 1 0; border-top: solid $primary-background; }
     .setting-row { height: 3; }
@@ -94,8 +96,19 @@ class SettingsScreen(ModalScreen[bool]):
         ]
         with Vertical(id="settings-dialog"):
             yield Static("Fan settings", id="settings-title")
+            yield Select(
+                [
+                    ("Collection", "collection"),
+                    ("Fan control", "control"),
+                    ("Hardware", "hardware"),
+                    ("Dashboard colors", "dashboard"),
+                ],
+                value="collection",
+                allow_blank=False,
+                id="settings-navigation",
+            )
             with VerticalScroll(id="settings-body"):
-                with Vertical(classes="settings-section"):
+                with Vertical(id="settings-section-collection", classes="settings-section"):
                     yield Static("Collection")
                     for key, label in (
                         ("interval_seconds", "Poll interval (seconds)"),
@@ -105,7 +118,7 @@ class SettingsScreen(ModalScreen[bool]):
                         ("retry_delay_seconds", "Retry delay (seconds)"),
                     ):
                         yield self._row(label, self._input(f"collection-{key}", collection.get(key), label))
-                with Vertical(classes="settings-section"):
+                with Vertical(id="settings-section-control", classes="settings-section"):
                     yield Static("Fan control")
                     fan_ids = control.get("fan_endpoint_ids", ["", ""])
                     if not isinstance(fan_ids, list) or len(fan_ids) != 2:
@@ -128,13 +141,13 @@ class SettingsScreen(ModalScreen[bool]):
                         else:
                             yield Static("Stage 4 has no maximum temperature: it applies above stage 3.", classes="setting-note")
                         yield self._row(f"Stage {index} speed (%)", self._input(f"stage-{index}-speed", stage.get("speed_percent"), f"Stage {index} speed"))
-                with Vertical(classes="settings-section"):
+                with Vertical(id="settings-section-hardware", classes="settings-section"):
                     yield Static("Hardware")
                     yield self._row("Startup boost (seconds)", self._input("hardware-startup-boost-seconds", hardware.get("startup_boost_seconds"), "Startup boost"))
                     yield self._row("Stall timeout (seconds)", self._input("hardware-stall-timeout-seconds", hardware.get("stall_timeout_seconds"), "Stall timeout"))
                     yield self._row("Shutdown policy", Select([("Full speed (safe)", "full"), ("Off", "off")], value=hardware.get("shutdown_mode", "full"), id="setting-hardware-shutdown-mode", classes="setting-input"))
                     yield Static("Startup boost applies to later startup events; the shutdown policy applies at the next clean exit.", classes="setting-note")
-                with Vertical(classes="settings-section"):
+                with Vertical(id="settings-section-dashboard", classes="settings-section"):
                     yield Static("Dashboard colors")
                     for key, label in (("memory", "Memory color"), ("utilization", "Utilization color"), ("temperature", "Temperature color")):
                         yield self._row(f"{label} (blank = default)", self._input(f"color-{key}", colors.get(key), label))
@@ -206,6 +219,17 @@ class SettingsScreen(ModalScreen[bool]):
 
     def _show_error(self, message: str) -> None:
         self.query_one("#settings-error", Static).update(message)
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id != "settings-navigation" or not isinstance(event.value, str):
+            return
+        try:
+            section = self.query_one(f"#settings-section-{event.value}", Vertical)
+            self.query_one("#settings-body", VerticalScroll).scroll_to_widget(
+                section, animate=False, top=True, force=True
+            )
+        except NoMatches:
+            return
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "setting-cancel":

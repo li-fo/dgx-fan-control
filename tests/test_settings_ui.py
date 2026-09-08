@@ -2,8 +2,9 @@ import asyncio
 from typing import Any, cast
 
 from textual.app import App, ComposeResult
+from textual.containers import VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, Input, Select, Static
 
 from dgx_fan.settings_ui import SettingsScreen
 
@@ -120,7 +121,7 @@ def test_settings_ignores_duplicate_save_while_request_is_pending() -> None:
         nonlocal calls
         calls += 1
         started.set()
-        await release.wait()
+        await asyncio.wait_for(release.wait(), 2)
         return _initial()
 
     result: list[bool] = []
@@ -131,11 +132,34 @@ def test_settings_ignores_duplicate_save_while_request_is_pending() -> None:
             await pilot.pause()
             save_button = _editor(app).query_one("#setting-save", Button)
             save_button.press()
-            await started.wait()
+            await asyncio.wait_for(started.wait(), 2)
             save_button.press()
             assert calls == 1 and save_button.disabled
             release.set()
             await pilot.pause()
             assert result == [True]
+
+    asyncio.run(exercise())
+
+
+def test_settings_section_navigation_jumps_without_moving_fixed_actions() -> None:
+    async def save(*_args: Any) -> dict[str, Any]:
+        return _initial()
+
+    app = _ModalApp(SettingsScreen(_initial(), save), [])
+
+    async def exercise() -> None:
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            screen = _editor(app)
+            body = screen.query_one("#settings-body", VerticalScroll)
+            navigation = screen.query_one("#settings-navigation", Select)
+            actions = screen.query_one("#settings-actions")
+            assert body.scroll_y == 0
+            assert actions.region.bottom <= app.size.height
+            navigation.value = "hardware"
+            await pilot.pause()
+            assert body.scroll_y > 0
+            assert screen.query_one("#setting-save", Button).region.bottom <= app.size.height
 
     asyncio.run(exercise())

@@ -50,6 +50,7 @@ class MonitorState:
     emergency_temperature_celsius: float | None = None
     dashboard_colors: DashboardColors | None = None
     power_enabled: bool | None = None
+    control_available: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -294,6 +295,7 @@ def encode_state(state: MonitorState) -> bytes:
             }
         ),
         "power_enabled": state.power_enabled,
+        "control_available": state.control_available,
     }
     encoded = (json.dumps(payload, separators=(",", ":"), allow_nan=False) + "\n").encode()
     if len(encoded) > MAX_MESSAGE_BYTES:
@@ -352,6 +354,12 @@ def decode_state(encoded: bytes, collection_interval_seconds: float) -> MonitorS
     )
     power_raw = mapping.get("power_enabled")
     power = None if power_raw is None else _bool(power_raw, "power_enabled")
+    control_available_raw = mapping.get("control_available")
+    control_available = (
+        None
+        if control_available_raw is None
+        else _bool(control_available_raw, "control_available")
+    )
     return MonitorState(
         _string(mapping.get("source_id"), "source_id"),
         _integer(mapping.get("revision"), "revision"),
@@ -365,6 +373,7 @@ def decode_state(encoded: bytes, collection_interval_seconds: float) -> MonitorS
         emergency,
         colors,
         power,
+        control_available,
     )
 
 
@@ -393,6 +402,7 @@ class MonitorPublisher:
         self._emergency_temperature_celsius: float | None = None
         self._dashboard_colors: DashboardColors | None = None
         self._power_enabled: bool | None = None
+        self._control_available: bool | None = None
 
     def reconfigure(
         self,
@@ -400,6 +410,7 @@ class MonitorPublisher:
         settings_source_id: str,
         settings_revision: int,
         power_enabled: bool,
+        control_available: bool,
     ) -> None:
         """Apply controller-authoritative presentation and cadence metadata."""
         interval = config.collection.interval_seconds
@@ -410,6 +421,7 @@ class MonitorPublisher:
         self._emergency_temperature_celsius = config.control.emergency_temperature_celsius
         self._dashboard_colors = config.dashboard_colors
         self._power_enabled = power_enabled
+        self._control_available = control_available
         # Make the accepted effective state observable without waiting out the
         # previous cadence. The next control tick still supplies fan telemetry.
         self._next_publish_at = float("-inf")
@@ -443,6 +455,16 @@ class MonitorPublisher:
             item = self._pending
             self._pending = None
             if item is None:
+                continue
+            if (
+                item.generation <= self._processed_generation
+                and self._frame is not None
+                and self._frame.generation >= item.generation
+            ):
+                # A reconnect may request hydration while this same
+                # generation is encoding. Once a frame exists, do not let
+                # that queued duplicate advance the public revision again.
+                # A history-only generation still needs its first hydration.
                 continue
             # Revisions belong to the event loop.  The worker receives the
             # proposed revision as immutable input and cannot advance it.
@@ -491,6 +513,7 @@ class MonitorPublisher:
                     emergency_temperature_celsius=self._emergency_temperature_celsius,
                     dashboard_colors=self._dashboard_colors,
                     power_enabled=self._power_enabled,
+                    control_available=self._control_available,
                 )
             )
         except (MonitorProtocolError, ValueError) as error:

@@ -59,6 +59,12 @@ def _service(
     )
 
 
+async def _wait_for_revision(service: SettingsService, revision: int) -> None:
+    async with asyncio.timeout(2):
+        while service.effective.revision != revision:
+            await asyncio.sleep(0)
+
+
 def test_persists_comment_preserving_patch_backup_and_consecutive_saves(
     tmp_path: Path,
 ) -> None:
@@ -104,6 +110,58 @@ def test_external_edit_and_symlink_retarget_are_conflicts(tmp_path: Path) -> Non
         assert link.is_symlink()
         assert load_config(target).collection.interval_seconds == 2.0
         assert load_config(alternate).collection.interval_seconds == 2.0
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("replacement", [False, True], ids=["in-place", "replacement"])
+def test_external_edit_at_atomic_commit_boundary_is_restored_as_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement: bool
+) -> None:
+    async def exercise() -> None:
+        path = _config_path(tmp_path)
+        applied: list[AppConfig] = []
+        service, _power = _service(path, applied)
+        external = path.read_bytes() + b"\n# final-boundary external edit\n"
+
+        def edit_after_last_check() -> None:
+            if replacement:
+                candidate = tmp_path / "external-editor.toml"
+                candidate.write_bytes(external)
+                candidate.chmod(0o640)
+                os.replace(candidate, path)
+            else:
+                path.write_bytes(external)
+
+        monkeypatch.setattr(service, "_before_exchange", edit_after_last_check)
+        with pytest.raises(SettingsConflict, match="save boundary"):
+            await service.save(_patch(3.0), 0)
+
+        assert path.read_bytes() == external
+        assert service.effective.revision == 0
+        assert applied == []
+
+    asyncio.run(exercise())
+
+
+def test_unsupported_atomic_exchange_fails_without_replacing_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise() -> None:
+        path = _config_path(tmp_path)
+        original = path.read_bytes()
+        service, _power = _service(path, [])
+
+        def unsupported(_first: Path, _second: Path) -> None:
+            raise SettingsPersistenceError(
+                "atomic settings replacement is unsupported by this filesystem"
+            )
+
+        monkeypatch.setattr(service, "_exchange_paths", unsupported)
+        with pytest.raises(SettingsPersistenceError, match="unsupported"):
+            await service.save(_patch(3.0), 0)
+        assert path.read_bytes() == original
+        assert service.effective.revision == 0
 
     asyncio.run(exercise())
 
@@ -223,6 +281,111 @@ def test_command_socket_end_to_end_opt_in_power_save_and_duplicate_scope(
         assert not socket_path.exists()
 
     asyncio.run(exercise())
+
+
+def test_slow_accepted_save_returns_pending_then_same_request_gets_final_result(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        path = _config_path(tmp_path)
+        started = asyncio.Event()
+        release = asyncio.Event()
+        applied = 0
+
+        async def apply(_config: AppConfig, _revision: int) -> None:
+            nonlocal applied
+            applied += 1
+            started.set()
+            await asyncio.wait_for(release.wait(), 2)
+
+        power = True
+        service = SettingsService(
+            load_config(path), apply, lambda _enabled: None, lambda: power, "controller-one"
+        )
+        socket_path = tmp_path / "control.sock"
+        server = SettingsCommandServer(socket_path, service, True)
+        server.ACK_TIMEOUT = 0.01
+        await server.start()
+        request = {
+            "version": 1,
+            "operation": "save-settings",
+            "request_id": "slow-save",
+            "source_id": "controller-one",
+            "revision": 0,
+            "patch": _patch(3.0),
+        }
+        try:
+            pending = await _request(socket_path, request)
+            assert pending["ok"] is False
+            assert pending["pending"] is True
+            assert pending["error"] == "SettingsPending"
+            await asyncio.wait_for(started.wait(), 2)
+            release.set()
+            await _wait_for_revision(service, 1)
+            final = await _request(socket_path, request)
+            assert final["ok"] is True and final["revision"] == 1
+            assert applied == 1
+            assert load_config(path).collection.interval_seconds == 3.0
+        finally:
+            release.set()
+            await server.close()
+
+    asyncio.run(exercise())
+
+
+def test_disconnected_slow_save_reconciles_and_duplicate_hydrates_final_result(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        path = _config_path(tmp_path)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def apply(_config: AppConfig, _revision: int) -> None:
+            started.set()
+            await asyncio.wait_for(release.wait(), 2)
+
+        service = SettingsService(
+            load_config(path), apply, lambda _enabled: None, lambda: True, "controller-one"
+        )
+        socket_path = tmp_path / "control.sock"
+        server = SettingsCommandServer(socket_path, service, True)
+        server.ACK_TIMEOUT = 0.01
+        await server.start()
+        request = {
+            "version": 1,
+            "operation": "save-settings",
+            "request_id": "disconnected-save",
+            "source_id": "controller-one",
+            "revision": 0,
+            "patch": _patch(3.5),
+        }
+        try:
+            _reader, writer = await asyncio.open_unix_connection(str(socket_path))
+            writer.write((json.dumps(request) + "\n").encode())
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+            await asyncio.wait_for(started.wait(), 2)
+            release.set()
+            await _wait_for_revision(service, 1)
+            final = await _request(socket_path, request)
+            assert final["ok"] is True and final["revision"] == 1
+            assert load_config(path).collection.interval_seconds == 3.5
+        finally:
+            release.set()
+            await server.close()
+
+    asyncio.run(exercise())
+
+
+def test_command_response_is_bounded() -> None:
+    path = Path("config.example.toml")
+    service, _power = _service(path, [])
+    server = SettingsCommandServer(Path("unused.sock"), service, True)
+    encoded = server._encode_response({"ok": True, "settings": "x" * server.MAX_BYTES})
+    assert len(encoded) <= server.MAX_BYTES
+    assert json.loads(encoded)["error"] == "SettingsError"
 
 
 def test_command_socket_rejects_mutations_when_control_is_disabled(tmp_path: Path) -> None:

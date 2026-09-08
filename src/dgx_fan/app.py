@@ -134,6 +134,7 @@ class DGXFanApp(App[None]):
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True)
     ]
     CONTROL_TICK_SECONDS = 0.25
+    SHUTDOWN_RECONCILE_SECONDS = 2.0
     # Textual normally maps Rich ANSI names through its Monokai/Alabaster
     # palettes.  On an 8-color Linux console that remapping changes the
     # intended ANSI slots (for example red can become magenta).  Use Rich's
@@ -176,6 +177,7 @@ class DGXFanApp(App[None]):
         self._node_poll_tasks: tuple[Task[None], ...] = ()
         self._control_timer: Any | None = None
         self._shutting_down = False
+        self._settings_reconciled_on_close = True
         self.monitor_publisher: MonitorPublisher | None = (
             MonitorPublisher(config.web.socket_path, config.collection.interval_seconds)
             if config.web.enabled and config.web.socket_path
@@ -200,7 +202,7 @@ class DGXFanApp(App[None]):
         )
         if self.monitor_publisher is not None:
             self.monitor_publisher.reconfigure(
-                config, self._settings_source_id, 0, self.controller.power
+                config, self._settings_source_id, 0, self.controller.power, False
             )
 
     async def apply_settings(self, config: AppConfig, revision: int) -> None:
@@ -234,20 +236,25 @@ class DGXFanApp(App[None]):
         self.node_collector.stale_after = config.collection.stale_after_seconds
         self.node_collector.retry_count = config.collection.retry_count
         self.node_collector.retry_delay_seconds = config.collection.retry_delay_seconds
-        try:
-            ui = self.query_one(FanAppUI)
-        except NoMatches:
-            ui = None
-        if ui is not None:
-            ui.reconfigure_display(
-                config.control.emergency_temperature_celsius,
-                config.collection.interval_seconds,
-                config.dashboard_colors,
-            )
-        if self.monitor_publisher is not None:
-            self.monitor_publisher.reconfigure(
-                config, self._settings_source_id, revision, self.controller.power
-            )
+        if not self._shutting_down:
+            try:
+                ui = self.query_one(FanAppUI)
+            except NoMatches:
+                ui = None
+            if ui is not None:
+                ui.reconfigure_display(
+                    config.control.emergency_temperature_celsius,
+                    config.collection.interval_seconds,
+                    config.dashboard_colors,
+                )
+            if self.monitor_publisher is not None:
+                self.monitor_publisher.reconfigure(
+                    config,
+                    self._settings_source_id,
+                    revision,
+                    self.controller.power,
+                    self.command_server is not None and self.command_server.allow_control,
+                )
         if collection_changed and not self._shutting_down:
             self._poll_tasks = tuple(
                 create_task(self._poll_loop(endpoint)) for endpoint in config.endpoints
@@ -255,7 +262,7 @@ class DGXFanApp(App[None]):
             self._node_poll_tasks = tuple(
                 create_task(self._node_poll_loop(endpoint)) for endpoint in self.node_endpoints
             )
-        if self.hardware is not None:
+        if self.hardware is not None and not self._shutting_down:
             self.control_tick()
 
     def compose(self) -> ComposeResult:
@@ -289,18 +296,25 @@ class DGXFanApp(App[None]):
         self._node_poll_tasks = tuple(
             create_task(self._node_poll_loop(endpoint)) for endpoint in self.node_endpoints
         )
+        if self.command_server is not None:
+            try:
+                await self.command_server.start()
+            except (OSError, RuntimeError):
+                self.command_server = None
         if self.monitor_publisher is not None:
+            self.monitor_publisher.reconfigure(
+                self.config,
+                self._settings_source_id,
+                self.settings.effective.revision,
+                self.controller.power,
+                self.command_server is not None and self.command_server.allow_control,
+            )
             try:
                 await self.monitor_publisher.start()
             except (OSError, RuntimeError):
                 # Browser publication is optional display output. It must not
                 # prevent or alter the fan controller's safety lifecycle.
                 self.monitor_publisher = None
-        if self.command_server is not None:
-            try:
-                await self.command_server.start()
-            except (OSError, RuntimeError):
-                self.command_server = None
         self.control_tick()
 
     async def _poll_loop(self, endpoint: EndpointConfig) -> None:
@@ -331,7 +345,7 @@ class DGXFanApp(App[None]):
 
     def control_tick(self, now: float | None = None) -> None:
         current = time.monotonic() if now is None else now
-        if self.hardware is None:
+        if self.hardware is None or self._shutting_down:
             return
         memory_by_endpoint = {
             snapshot.endpoint_id: snapshot for snapshot in self.node_collector.snapshots(current)
@@ -343,7 +357,12 @@ class DGXFanApp(App[None]):
         fans = self.hardware.readings(current)
         self.latest = self.controller.update(self.endpoints, fans, current)
         self.hardware.set_duties(self.latest.duty_percents)
-        ui = self.query_one(FanAppUI)
+        try:
+            ui = self.query_one(FanAppUI)
+        except NoMatches:
+            # Textual may detach child widgets just before delivering the app
+            # Unmount event that raises the explicit shutdown gate.
+            return
         # App mount can precede the nested widget tree's first refresh.  Keep
         # the controller/snapshot immediate, but defer only the paint when
         # that tree is not ready yet.
@@ -389,6 +408,8 @@ class DGXFanApp(App[None]):
 
     def _set_power(self, enabled: bool) -> None:
         """Set requested power explicitly and publish that request authoritatively."""
+        if self._shutting_down:
+            return
         self.controller.set_power(enabled)
         if self.monitor_publisher is not None:
             self.monitor_publisher.reconfigure(
@@ -396,20 +417,28 @@ class DGXFanApp(App[None]):
                 self._settings_source_id,
                 self.settings.effective.revision,
                 enabled,
+                self.command_server is not None and self.command_server.allow_control,
             )
         if self.hardware is not None:
             self.control_tick()
 
     async def on_unmount(self) -> None:
         self._shutting_down = True
+        safe_duty_error: BaseException | None = None
         if self._control_timer is not None:
             self._control_timer.stop()
             self._control_timer = None
+        # First close listener/mutation gates. Then command fail-safe duty
+        # directly, before any potentially slow persistence reconciliation.
         if self.command_server is not None:
-            await self.command_server.close()
-            self.command_server = None
+            self.command_server.begin_close()
         else:
-            await self.settings.close()
+            self.settings.begin_close()
+        if self.hardware is not None:
+            try:
+                self.hardware.set_duties((100, 100))
+            except BaseException as error:  # noqa: BLE001 - finish teardown before surfacing fail-safe failure.
+                safe_duty_error = error
         for task in (*self._poll_tasks, *self._node_poll_tasks):
             task.cancel()
         for task in (*self._poll_tasks, *self._node_poll_tasks):
@@ -419,9 +448,20 @@ class DGXFanApp(App[None]):
                 pass
         self._poll_tasks = ()
         self._node_poll_tasks = ()
+        if self.command_server is not None:
+            self._settings_reconciled_on_close = await self.command_server.close(
+                self.SHUTDOWN_RECONCILE_SECONDS
+            )
+            self.command_server = None
+        else:
+            self._settings_reconciled_on_close = await self.settings.close(
+                self.SHUTDOWN_RECONCILE_SECONDS
+            )
         if self.monitor_publisher is not None:
             await self.monitor_publisher.close()
             self.monitor_publisher = None
+        if safe_duty_error is not None:
+            raise RuntimeError("failed to command safe-full duty during shutdown") from safe_duty_error
 
 
 def build_parser() -> argparse.ArgumentParser:

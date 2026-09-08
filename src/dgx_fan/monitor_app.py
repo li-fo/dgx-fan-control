@@ -13,6 +13,7 @@ from typing import Any, ClassVar
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
+from textual.css.query import NoMatches
 
 from .config import AppConfig, ConfigError, load_config, resolve_config_path
 from .monitor import (
@@ -22,7 +23,7 @@ from .monitor import (
     MonitorState,
     decode_state,
 )
-from .settings import control_socket_path
+from .settings import MAX_CONTROL_MESSAGE_BYTES, control_socket_path
 from .settings_ui import SettingsScreen
 from .ui import FanAppUI
 
@@ -36,6 +37,10 @@ class DGXFanMonitorApp(App[None]):
     ]
     RECONNECT_SECONDS = 1.0
     WATCHDOG_SECONDS = 0.25
+    COMMAND_CONNECT_TIMEOUT = 3.0
+    COMMAND_RESPONSE_TIMEOUT = 4.0
+    COMMAND_RECONCILE_TIMEOUT = 20.0
+    COMMAND_RETRY_SECONDS = 0.1
 
     def __init__(self, config: AppConfig) -> None:
         super().__init__()
@@ -49,8 +54,10 @@ class DGXFanMonitorApp(App[None]):
         self._phase = "DISCONNECTED"
         self._shutting_down = False
         self._settings_source_id: str | None = None
+        self._stream_settings_source_id: str | None = None
         self._settings_revision: int | None = None
         self._requested_power: bool | None = None
+        self._control_stream_fresh = False
         if config.web.allow_control:
             self.title = "DGX Fan Controller · Control Enabled"
 
@@ -62,7 +69,9 @@ class DGXFanMonitorApp(App[None]):
             self.config.collection.interval_seconds,
             self.config.dashboard_colors,
             self.open_settings,
-            read_only=not self.config.web.allow_control,
+            # Opt-in alone is insufficient: a compatible, fresh controller
+            # frame must prove that the command endpoint is authoritative.
+            read_only=True,
         )
 
     def on_mount(self) -> None:
@@ -124,6 +133,7 @@ class DGXFanMonitorApp(App[None]):
         # Keep the socket loop narrow while making source-reset and watchdog
         # semantics directly testable without a real browser connection.
         if state.source_id != self._source_id:
+            self._clear_control_state(ui)
             self._source_id = state.source_id
             self._last_revision = -1
         if state.revision <= self._last_revision:
@@ -133,15 +143,25 @@ class DGXFanMonitorApp(App[None]):
         self._last_fresh_received_at = time.monotonic() if received_at is None else received_at
         self._last_captured_at = state.captured_at
         if state.transport_error is not None:
+            self._clear_control_state(ui)
             ui.set_monitor_transport_status(f"Monitor stream: {state.transport_error}")
             return True
         assert state.snapshot is not None and state.history is not None
-        if state.settings_source_id is not None:
+        if (
+            isinstance(state.settings_source_id, str)
+            and bool(state.settings_source_id)
+            and isinstance(state.settings_revision, int)
+            and not isinstance(state.settings_revision, bool)
+            and isinstance(state.power_enabled, bool)
+            and state.control_available is True
+        ):
             self._settings_source_id = state.settings_source_id
-        if state.settings_revision is not None:
+            self._stream_settings_source_id = state.settings_source_id
             self._settings_revision = state.settings_revision
-        if state.power_enabled is not None:
             self._requested_power = state.power_enabled
+            self._control_stream_fresh = True
+        else:
+            self._clear_control_state(ui)
         interval = state.collection_interval_seconds
         emergency = state.emergency_temperature_celsius
         colors = state.dashboard_colors
@@ -167,18 +187,23 @@ class DGXFanMonitorApp(App[None]):
         )
         ui.set_monitor_transport_status(None)
         ui.update_monitor_snapshot(state.snapshot, state.captured_at, state.history)
+        self._sync_control_availability(ui)
         return True
 
     def toggle_power(self) -> None:
         """Browser action; never imports or owns controller/hardware."""
-        if self.config.web.allow_control:
+        if self._control_available:
             create_task(self._set_requested_power())
 
     def open_settings(self) -> None:
-        if not self.config.web.allow_control:
+        if not self._control_available:
             return
 
         async def save(patch: dict[str, object], revision: int, source_id: str) -> dict[str, object]:
+            if not self._control_available:
+                raise RuntimeError("controller connection was lost; draft retained")
+            if source_id != self._settings_source_id:
+                raise RuntimeError("controller identity changed; copy the draft and reopen settings")
             response = await self._command(
                 "save-settings",
                 {"patch": patch, "revision": revision, "source_id": source_id},
@@ -232,35 +257,82 @@ class DGXFanMonitorApp(App[None]):
         self._settings_source_id = source_id
         self._settings_revision = revision
         self._requested_power = power
+        self._sync_control_availability()
 
     async def _command(self, operation: str, payload: dict[str, object]) -> dict[str, object]:
         if not self.config.web.allow_control:
             raise RuntimeError("browser control is disabled by web.allow_control")
+        request_id = uuid.uuid4().hex
         request = {
             "version": 1,
             "source_id": self._settings_source_id or "",
-            "request_id": uuid.uuid4().hex,
+            "request_id": request_id,
             "operation": operation,
             **payload,
         }
+        mutation = operation in {"save-settings", "set-power"}
+        deadline = asyncio.get_running_loop().time() + self.COMMAND_RECONCILE_TIMEOUT
+        last_error: BaseException | None = None
+        while True:
+            try:
+                response = await self._send_request(request)
+            except (ConnectionError, OSError, TimeoutError, RuntimeError, TypeError, ValueError) as error:
+                last_error = error
+                if not mutation or asyncio.get_running_loop().time() >= deadline:
+                    break
+            else:
+                if response.get("pending") is not True:
+                    if not response.get("ok"):
+                        raise RuntimeError(
+                            str(response.get("message", "control command rejected"))
+                        )
+                    return response
+                if not mutation or asyncio.get_running_loop().time() >= deadline:
+                    last_error = RuntimeError(
+                        str(response.get("message", "control command is still pending"))
+                    )
+                    break
+            await asyncio.sleep(self.COMMAND_RETRY_SECONDS)
+
+        if mutation:
+            recovered = await self._recover_authoritative_state()
+            if recovered is not None:
+                raise RuntimeError(
+                    f"{operation} outcome is still uncertain; controller state was refreshed "
+                    f"at revision {recovered['revision']}. Keep this draft and verify before retrying"
+                ) from last_error
+            self._clear_control_state()
+            raise RuntimeError(
+                f"{operation} outcome is uncertain and the controller disconnected; "
+                "keep this draft and reconnect before retrying"
+            ) from last_error
+        self._clear_control_state()
+        raise RuntimeError(f"controller command failed: {last_error}") from last_error
+
+    async def _send_request(self, request: dict[str, object]) -> dict[str, object]:
         socket_path = self.config.web.socket_path
         assert socket_path is not None
         reader, writer = await asyncio.wait_for(
-            open_unix_connection(str(control_socket_path(socket_path))), 3
+            open_unix_connection(
+                str(control_socket_path(socket_path)), limit=MAX_CONTROL_MESSAGE_BYTES + 1
+            ),
+            self.COMMAND_CONNECT_TIMEOUT,
         )
         try:
             writer.write(
                 (json.dumps(request, separators=(",", ":"), allow_nan=False) + "\n").encode()
             )
             await writer.drain()
-            raw = await asyncio.wait_for(reader.readline(), 3)
+            raw = await asyncio.wait_for(
+                reader.readline(), self.COMMAND_RESPONSE_TIMEOUT
+            )
             if not raw:
                 raise RuntimeError("controller closed the command connection")
+            if len(raw) > MAX_CONTROL_MESSAGE_BYTES or not raw.endswith(b"\n"):
+                raise RuntimeError("controller returned an invalid response size")
             response = json.loads(raw)
             if not isinstance(response, dict):
                 raise TypeError("controller returned an invalid response")
-            if not response.get("ok"):
-                raise RuntimeError(str(response.get("message", "control command rejected")))
             return response
         finally:
             writer.close()
@@ -269,10 +341,58 @@ class DGXFanMonitorApp(App[None]):
             except ConnectionError:
                 pass
 
+    async def _recover_authoritative_state(self) -> dict[str, object] | None:
+        request = {
+            "version": 1,
+            "source_id": self._settings_source_id or "",
+            "request_id": uuid.uuid4().hex,
+            "operation": "read-settings",
+        }
+        try:
+            response = await self._send_request(request)
+            if not response.get("ok"):
+                return None
+            self._accept_settings_response(response)
+            return response
+        except (ConnectionError, OSError, TimeoutError, RuntimeError, TypeError, ValueError):
+            return None
+
+    @property
+    def _control_available(self) -> bool:
+        return (
+            self.config.web.allow_control
+            and self._phase == "CONNECTED"
+            and self._control_stream_fresh
+            and self._settings_source_id is not None
+            and self._settings_source_id == self._stream_settings_source_id
+            and self._settings_revision is not None
+            and self._requested_power is not None
+        )
+
+    def _sync_control_availability(self, ui: FanAppUI | None = None) -> None:
+        if ui is None:
+            if not self.is_running:
+                return
+            try:
+                ui = self.query_one(FanAppUI)
+            except NoMatches:  # Textual tree may not be mounted yet.
+                return
+        ui.set_control_available(self._control_available)
+
+    def _clear_control_state(self, ui: FanAppUI | None = None) -> None:
+        self._settings_source_id = None
+        self._stream_settings_source_id = None
+        self._settings_revision = None
+        self._requested_power = None
+        self._control_stream_fresh = False
+        self._sync_control_availability(ui)
+
     def _set_phase(self, ui: FanAppUI, phase: str) -> None:
         if self._shutting_down:
             return
         self._phase = phase
+        if phase != "CONNECTED":
+            self._clear_control_state(ui)
         ui.set_monitor_transport_status(f"Monitor stream: {phase}")
 
     def _watchdog(self, now: float | None = None) -> None:
@@ -290,7 +410,9 @@ class DGXFanMonitorApp(App[None]):
             and 0 <= current - self._last_captured_at > timeout
         )
         if receive_stale or captured_stale:
-            self.query_one(FanAppUI).set_monitor_transport_status("Monitor stream: STALE")
+            ui = self.query_one(FanAppUI)
+            self._clear_control_state(ui)
+            ui.set_monitor_transport_status("Monitor stream: STALE")
 
 
 def build_parser() -> argparse.ArgumentParser:

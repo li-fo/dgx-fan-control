@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -20,6 +22,8 @@ import tomlkit
 
 from .config import AppConfig, ConfigError, load_config
 
+MAX_CONTROL_MESSAGE_BYTES = 64 * 1024
+
 
 class SettingsError(RuntimeError):
     """Base class for actionable settings failures."""
@@ -32,9 +36,16 @@ class SettingsConflict(SettingsError):
 class SettingsPersistenceError(SettingsError):
     """The configuration could not be made durable."""
 
-    def __init__(self, message: str, *, recovered_fingerprint: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        recovered_fingerprint: str | None = None,
+        retained_path: Path | None = None,
+    ) -> None:
         super().__init__(message)
         self.recovered_fingerprint = recovered_fingerprint
+        self.retained_path = retained_path
 
 
 class SettingsApplicationError(SettingsError):
@@ -141,6 +152,12 @@ class _PersistedSave:
     replacement_fingerprint: str
 
 
+@dataclass(frozen=True)
+class _CommandOperation:
+    body_hash: str
+    task: asyncio.Task[dict[str, object]]
+
+
 class SettingsService:
     """Serialize validated saves and apply them on the controller event loop."""
 
@@ -162,6 +179,7 @@ class SettingsService:
         self.source_id = source_id
         self._mutation_lock = asyncio.Lock()
         self._save_tasks: set[asyncio.Task[EffectiveSettings]] = set()
+        self._closing = False
 
     @property
     def effective(self) -> EffectiveSettings:
@@ -187,6 +205,8 @@ class SettingsService:
         """Complete an accepted transaction even if its client disconnects."""
         if not isinstance(expected_revision, int) or isinstance(expected_revision, bool):
             raise ConfigError("revision must be an integer")
+        if self._closing:
+            raise SettingsError("controller is shutting down; settings were not accepted")
         task = asyncio.create_task(self._save(patch, expected_revision))
         self._save_tasks.add(task)
         try:
@@ -203,6 +223,8 @@ class SettingsService:
         self, patch: dict[str, Any], expected_revision: int
     ) -> EffectiveSettings:
         async with self._mutation_lock:
+            if self._closing and asyncio.current_task() not in self._save_tasks:
+                raise SettingsError("controller is shutting down; settings were not accepted")
             current = self._effective
             if expected_revision != current.revision:
                 raise SettingsConflict("settings changed; reload before saving")
@@ -247,15 +269,28 @@ class SettingsService:
     async def set_power(self, enabled: bool, expected_revision: int) -> None:
         if not isinstance(enabled, bool):
             raise ConfigError("power must be true or false")
+        if self._closing:
+            raise SettingsError("controller is shutting down; power command was not accepted")
         async with self._mutation_lock:
+            if self._closing:
+                raise SettingsError("controller is shutting down; power command was not accepted")
             if expected_revision != self._effective.revision:
                 raise SettingsConflict("settings changed; reload before setting power")
             self._set_power(enabled)
 
-    async def close(self) -> None:
-        """Drain transactions whose clients disappeared during persistence."""
-        if self._save_tasks:
-            await asyncio.gather(*tuple(self._save_tasks), return_exceptions=True)
+    def begin_close(self) -> None:
+        """Reject new mutations while already-accepted saves reconcile."""
+        self._closing = True
+
+    async def close(self, grace_seconds: float = 2.0) -> bool:
+        """Wait a bounded grace period for accepted saves; never abandon them."""
+        self.begin_close()
+        if not self._save_tasks:
+            return True
+        _done, pending = await asyncio.wait(
+            tuple(self._save_tasks), timeout=max(0.0, grace_seconds)
+        )
+        return not pending
 
     def _check_source(self, expected_fingerprint: str) -> os.stat_result:
         if _link_identity(self._config_path) != self._link:
@@ -286,53 +321,145 @@ class SettingsService:
             raise ConfigError(f"invalid settings patch: {error}") from error
 
         candidate = self._write_temp(rendered, info, ".tmp")
-        replaced = False
         try:
             candidate_config = replace(load_config(candidate), path=self._config_path)
             # Close the external-edit window as late as possible.
             self._check_source(expected_fingerprint)
-            backup = self._target.with_name(f"{self._target.name}.bak")
-            self._replace_bytes(backup, original, info)
-            self._check_source(expected_fingerprint)
-            os.replace(candidate, self._target)
-            replaced = True
-            replacement_fingerprint = _fingerprint(self._target)
-            self._fsync_directory()
+            self._before_exchange()
+            replacement_fingerprint = self._exchange_install(
+                candidate, expected_fingerprint
+            )
         except (ConfigError, SettingsConflict):
             candidate.unlink(missing_ok=True)
             raise
+        except SettingsPersistenceError as error:
+            if error.retained_path is None:
+                candidate.unlink(missing_ok=True)
+            raise
         except BaseException as error:
             candidate.unlink(missing_ok=True)
-            if not replaced:
-                raise SettingsPersistenceError(
-                    f"settings were not written: {str(error) or type(error).__name__}"
-                ) from error
+            raise SettingsPersistenceError(
+                f"settings were not written: {str(error) or type(error).__name__}"
+            ) from error
+
+        try:
+            backup = self._target.with_name(f"{self._target.name}.bak")
+            # The exchanged-away source remains at candidate until the backup
+            # and target directory are durable.
+            self._replace_bytes(backup, candidate.read_bytes(), candidate.stat())
+            self._finish_exchange(candidate)
+        except BaseException as error:
             rollback_error: BaseException | None = None
             try:
-                persisted = _PersistedSave(
-                    candidate_config, original, replacement_fingerprint
+                rollback_candidate = (
+                    candidate
+                    if candidate.exists()
+                    else self._write_temp(original, self._target.stat(), ".rollback.tmp")
                 )
-                self._rollback(persisted)
-            except BaseException as candidate_error:  # noqa: BLE001 - report uncertain durability.
+                self._exchange_install(rollback_candidate, replacement_fingerprint)
+                self._finish_exchange(rollback_candidate)
+            except BaseException as candidate_error:  # noqa: BLE001 - preserve displaced recovery data.
                 rollback_error = candidate_error
             if rollback_error is not None:
+                retained = candidate if candidate.exists() else None
                 raise SettingsPersistenceError(
-                    "configuration was replaced but directory durability failed; "
-                    f"rollback could not be confirmed: {rollback_error}"
+                    "configuration was replaced but durability/backup failed; rollback "
+                    f"could not be confirmed: {rollback_error}",
+                    retained_path=retained,
                 ) from error
             raise SettingsPersistenceError(
-                "configuration durability failed after replace; the previous file was restored",
+                "configuration durability failed after exchange; the previous file was restored",
                 recovered_fingerprint=_fingerprint(self._target),
             ) from error
         return _PersistedSave(candidate_config, original, replacement_fingerprint)
 
     def _rollback(self, persisted: _PersistedSave) -> None:
-        if _fingerprint(self._target) != persisted.replacement_fingerprint:
-            raise SettingsConflict(
-                "configuration changed again after persistence; refusing unsafe rollback"
-            )
         info = self._target.stat()
-        self._replace_bytes(self._target, persisted.original, info)
+        candidate = self._write_temp(persisted.original, info, ".rollback.tmp")
+        # _exchange_install keeps a displaced source when recovery is
+        # uncertain. Never erase that only remaining recovery artifact.
+        self._exchange_install(candidate, persisted.replacement_fingerprint)
+        self._finish_exchange(candidate)
+
+    def _before_exchange(self) -> None:
+        """Deterministic test seam immediately before the atomic commit boundary."""
+
+    @staticmethod
+    def _exchange_paths(first: Path, second: Path) -> None:
+        """Atomically exchange two Linux directory entries without overwrite fallback."""
+        libc = ctypes.CDLL(None, use_errno=True)
+        try:
+            renameat2 = libc.renameat2
+        except AttributeError as error:
+            raise SettingsPersistenceError(
+                "atomic settings replacement is unsupported by this Linux runtime"
+            ) from error
+        result = renameat2(
+            ctypes.c_int(-100),
+            ctypes.c_char_p(os.fsencode(first)),
+            ctypes.c_int(-100),
+            ctypes.c_char_p(os.fsencode(second)),
+            ctypes.c_uint(2),
+        )
+        if result == 0:
+            return
+        error_number = ctypes.get_errno()
+        if error_number in {
+            errno.ENOSYS,
+            errno.EINVAL,
+            errno.EOPNOTSUPP,
+            getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+        }:
+            raise SettingsPersistenceError(
+                "atomic settings replacement is unsupported by this filesystem"
+            )
+        raise OSError(error_number, os.strerror(error_number), str(second))
+
+    def _exchange_install(self, candidate: Path, expected_fingerprint: str) -> str:
+        """Install candidate and verify the atomically displaced source."""
+        self._exchange_paths(candidate, self._target)
+        replacement_fingerprint = _fingerprint(self._target)
+        try:
+            if _link_identity(self._config_path) != self._link:
+                raise SettingsConflict(
+                    "configuration path changed at the save boundary; external file preserved"
+                )
+            if self._config_path.resolve(strict=True) != self._target:
+                raise SettingsConflict(
+                    "configuration symlink target changed at the save boundary; external file preserved"
+                )
+            if _fingerprint(candidate) != expected_fingerprint:
+                raise SettingsConflict(
+                    "configuration file changed at the save boundary; external file preserved"
+                )
+            self._fsync_directory()
+        except BaseException as error:
+            try:
+                if _fingerprint(self._target) != replacement_fingerprint:
+                    raise SettingsConflict(
+                        "configuration changed again after atomic exchange"
+                    )
+                self._exchange_paths(candidate, self._target)
+                self._fsync_directory()
+            except BaseException as restore_error:  # noqa: BLE001 - preserve the displaced source.
+                raise SettingsPersistenceError(
+                    "atomic settings exchange could not be restored; displaced source "
+                    f"retained at {candidate}: {restore_error}",
+                    retained_path=candidate,
+                ) from error
+            candidate.unlink(missing_ok=True)
+            self._fsync_directory()
+            if isinstance(error, SettingsConflict):
+                raise
+            raise SettingsPersistenceError(
+                "configuration exchange durability failed; the previous file was restored",
+                recovered_fingerprint=_fingerprint(self._target),
+            ) from error
+        return replacement_fingerprint
+
+    def _finish_exchange(self, displaced: Path) -> None:
+        displaced.unlink()
+        self._fsync_directory()
 
     def _replace_bytes(self, destination: Path, content: bytes, info: os.stat_result) -> None:
         candidate = self._write_temp(content, info, f".{destination.name}.tmp")
@@ -450,24 +577,26 @@ class SettingsService:
 class SettingsCommandServer:
     """Bounded owner-only NDJSON command socket, separate from telemetry."""
 
-    MAX_BYTES = 64 * 1024
+    MAX_BYTES = MAX_CONTROL_MESSAGE_BYTES
     MAX_CLIENTS = 16
     MAX_CACHE = 256
     REQUEST_TIMEOUT = 3.0
-    MUTATION_TIMEOUT = 15.0
+    ACK_TIMEOUT = 2.5
 
     def __init__(self, path: Path, service: SettingsService, allow_control: bool) -> None:
         self.path = path
         self.service = service
         self.allow_control = allow_control
         self.server: asyncio.AbstractServer | None = None
-        self._seen: OrderedDict[str, tuple[str, dict[str, object]]] = OrderedDict()
+        self._seen: OrderedDict[str, _CommandOperation] = OrderedDict()
         self._seen_lock = asyncio.Lock()
         self._clients: set[asyncio.Task[None]] = set()
         self._writers: set[asyncio.StreamWriter] = set()
         self._bound_identity: tuple[int, int] | None = None
+        self._closing = False
 
     async def start(self) -> None:
+        self._closing = False
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._remove_owned_stale_socket()
         self.server = await asyncio.start_unix_server(
@@ -477,9 +606,16 @@ class SettingsCommandServer:
         info = self.path.lstat()
         self._bound_identity = (info.st_dev, info.st_ino)
 
-    async def close(self) -> None:
+    def begin_close(self) -> None:
+        """Close mutation/listener gates before hardware enters safe shutdown."""
+        self._closing = True
+        self.service.begin_close()
         if self.server is not None:
             self.server.close()
+
+    async def close(self, grace_seconds: float = 2.0) -> bool:
+        self.begin_close()
+        if self.server is not None:
             await self.server.wait_closed()
             self.server = None
         for writer in tuple(self._writers):
@@ -487,18 +623,19 @@ class SettingsCommandServer:
         current = asyncio.current_task()
         pending = tuple(task for task in self._clients if task is not current)
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        await self.service.close()
+            await asyncio.wait(pending, timeout=max(0.0, grace_seconds))
+        reconciled = await self.service.close(grace_seconds)
         try:
             info = self.path.lstat()
         except FileNotFoundError:
-            return
+            return reconciled
         if (
             self._bound_identity == (info.st_dev, info.st_ino)
             and stat.S_ISSOCK(info.st_mode)
             and info.st_uid == os.geteuid()
         ):
             self.path.unlink()
+        return reconciled
 
     def _remove_owned_stale_socket(self) -> None:
         try:
@@ -556,20 +693,34 @@ class SettingsCommandServer:
             async with self._seen_lock:
                 cached = self._seen.get(request_id)
                 if cached is not None:
-                    if cached[0] != body_hash:
+                    if cached.body_hash != body_hash:
                         raise SettingsConflict("request_id was already used for a different command")
-                    response = cached[1]
                     self._seen.move_to_end(request_id)
                 else:
-                    try:
-                        response = await asyncio.wait_for(
-                            self._dispatch(request), self.MUTATION_TIMEOUT
-                        )
-                    except TimeoutError as error:
-                        raise SettingsError("control command timed out") from error
-                    self._seen[request_id] = (body_hash, response)
-                    while len(self._seen) > self.MAX_CACHE:
-                        self._seen.popitem(last=False)
+                    if self._closing:
+                        raise SettingsError("controller is shutting down; command was not accepted")
+                    self._prune_seen()
+                    if len(self._seen) >= self.MAX_CACHE:
+                        raise SettingsError("too many control operations are still pending")
+                    cached = _CommandOperation(
+                        body_hash, asyncio.create_task(self._run_dispatch(request))
+                    )
+                    self._seen[request_id] = cached
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.shield(cached.task), self.ACK_TIMEOUT
+                )
+            except TimeoutError:
+                current = self.service.effective
+                response = {
+                    "ok": False,
+                    "error": "SettingsPending",
+                    "message": "control command is accepted and still pending",
+                    "pending": True,
+                    "request_id": request_id,
+                    "source_id": self.service.source_id,
+                    "revision": current.revision,
+                }
         except (
             ConfigError,
             SettingsError,
@@ -590,7 +741,7 @@ class SettingsCommandServer:
                 "message": f"control command failed: {type(error).__name__}",
             }
         try:
-            encoded = (json.dumps(response, separators=(",", ":"), allow_nan=False) + "\n").encode()
+            encoded = self._encode_response(response)
             writer.write(encoded)
             await asyncio.wait_for(writer.drain(), self.REQUEST_TIMEOUT)
         except (ConnectionError, TimeoutError):
@@ -603,6 +754,52 @@ class SettingsCommandServer:
                 await writer.wait_closed()
             except ConnectionError:
                 pass
+
+    def _prune_seen(self) -> None:
+        for request_id, operation in tuple(self._seen.items()):
+            if len(self._seen) < self.MAX_CACHE:
+                break
+            if operation.task.done():
+                del self._seen[request_id]
+
+    def _encode_response(self, response: dict[str, object]) -> bytes:
+        encoded = (json.dumps(response, separators=(",", ":"), allow_nan=False) + "\n").encode()
+        if len(encoded) <= self.MAX_BYTES:
+            return encoded
+        return (
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": "SettingsError",
+                    "message": "control response exceeds the bounded transport limit",
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode()
+
+    async def _run_dispatch(self, request: dict[str, Any]) -> dict[str, object]:
+        try:
+            return await self._dispatch(request)
+        except (
+            ConfigError,
+            SettingsError,
+            PermissionError,
+            ValueError,
+            json.JSONDecodeError,
+            TimeoutError,
+        ) as error:
+            return {
+                "ok": False,
+                "error": type(error).__name__,
+                "message": str(error) or "control command failed",
+            }
+        except Exception as error:  # noqa: BLE001 - isolate controller operation failures.
+            return {
+                "ok": False,
+                "error": "SettingsError",
+                "message": f"control command failed: {type(error).__name__}",
+            }
 
     async def _dispatch(self, request: dict[str, Any]) -> dict[str, object]:
         if request.get("version") != 1:

@@ -154,6 +154,48 @@ def test_monitor_publisher_replaces_encode_fault_with_observable_error_and_retri
     asyncio.run(exercise())
 
 
+def test_monitor_reconnect_hydration_does_not_reprocess_generation_in_flight(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise() -> None:
+        path = tmp_path / "monitor.sock"
+        publisher = MonitorPublisher(path)
+        started = threading.Event()
+        release = threading.Event()
+        real_build = publisher._build_frame
+
+        def blocked_build(item, revision, encode):
+            if item.generation == 1 and encode:
+                started.set()
+                assert release.wait(2), "blocked monitor encode was not released"
+            return real_build(item, revision, encode)
+
+        monkeypatch.setattr(publisher, "_build_frame", blocked_build)
+        await publisher.start()
+        try:
+            assert publisher.publish(_state().snapshot, 100) is True
+            reader, writer = await asyncio.open_unix_connection(str(path))
+            assert await asyncio.to_thread(started.wait, 2)
+            # Deterministically reproduce a reconnect hydration request while
+            # generation 1 is already off-loop and not yet marked processed.
+            publisher._request_hydration()
+            release.set()
+            frame = decode_state(await asyncio.wait_for(reader.readline(), 2), 2)
+            assert frame.revision == 1
+            async with asyncio.timeout(2):
+                while publisher._pending is not None:
+                    await asyncio.sleep(0)
+            assert publisher._processed_generation == 1
+            assert publisher._next_revision == 1
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            release.set()
+            await publisher.close()
+
+    asyncio.run(exercise())
+
+
 def test_monitor_publisher_rejects_non_socket_path(tmp_path) -> None:
     path = tmp_path / "monitor.sock"
     path.write_text("not a socket")

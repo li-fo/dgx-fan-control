@@ -11,6 +11,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
+from textual.widget import WidgetError
 from textual.widgets import Button, Footer, Header, Static, TabbedContent, TabPane
 
 from .config import DashboardColors
@@ -433,7 +434,7 @@ class FanAppUI(Static):
         self.last_signature = None
         try:
             self.update_snapshot(snapshot, now, append_history=False)
-        except NoMatches:
+        except (NoMatches, WidgetError):
             # Ignore a final frame after renderer child widgets start unmounting.
             pass
 
@@ -451,7 +452,7 @@ class FanAppUI(Static):
         if self.snapshot is not None and self.last_render_time is not None:
             try:
                 self.update_snapshot(self.snapshot, self.last_render_time, append_history=False)
-            except NoMatches:
+            except (NoMatches, WidgetError):
                 # A monitor frame may race the renderer's child teardown.
                 pass
 
@@ -461,7 +462,7 @@ class FanAppUI(Static):
         if self.snapshot is not None and self.last_render_time is not None:
             try:
                 self.update_snapshot(self.snapshot, self.last_render_time, append_history=False)
-            except NoMatches:
+            except (NoMatches, WidgetError):
                 # Renderer shutdown must not turn a final socket event into an app error.
                 pass
         elif status is not None:
@@ -471,6 +472,17 @@ class FanAppUI(Static):
                 )
             except NoMatches:
                 pass
+
+    def set_control_available(self, available: bool) -> None:
+        """Enable browser mutations only while a compatible controller is fresh."""
+        self.read_only = not available
+        try:
+            self.query_one("#power-toggle", Button).disabled = not available
+            self.query_one("#fan-settings", Button).disabled = not available
+            indicator = self.query_one("#read-only-indicator", Static)
+            indicator.display = not available
+        except NoMatches:
+            pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button = event.button
