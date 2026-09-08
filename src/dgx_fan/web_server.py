@@ -19,6 +19,10 @@ class RequestOriginServer(Server):
     used: this project does not configure or trust a proxy boundary.
     """
 
+    def __init__(self, *args: Any, allow_control: bool = False, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.allow_control = allow_control
+
     @aiohttp_jinja2.template("app_index.html")
     async def handle_index(self, request: web.Request) -> dict[str, Any]:
         return self._index_context(request)
@@ -44,3 +48,12 @@ class RequestOriginServer(Server):
             "config": {"static": {"url": get_url("static", filename="/").rstrip("/") + "/"}},
             "application": {"name": self.title},
         }
+
+    async def handle_websocket(self, request: web.Request) -> web.WebSocketResponse:
+        """Reject a supplied cross-origin browser session before spawning Textual."""
+        origin = request.headers.get("Origin")
+        if self.allow_control and origin is None:
+            raise web.HTTPForbidden(text="Origin is required when browser control is enabled")
+        if origin is not None and origin != f"{request.scheme}://{request.host}":
+            raise web.HTTPForbidden(text="cross-origin WebSocket rejected")
+        return await super().handle_websocket(request)

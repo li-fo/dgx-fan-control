@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import replace
 from errno import EADDRINUSE, EBUSY
 from pathlib import Path
 from socket import AF_UNIX, SOCK_STREAM, socket
@@ -15,6 +16,7 @@ class FanHardware(Protocol):
     def set_duties(self, percents: tuple[int, int]) -> None: ...
     def readings(self, now: float) -> tuple[FanReading, FanReading]: ...
     def release(self, *, normal_shutdown: bool = False) -> None: ...
+    def set_shutdown_mode(self, mode: str) -> None: ...
 
 
 class FakeHardware:
@@ -42,6 +44,9 @@ class FakeHardware:
     def release(self, *, normal_shutdown: bool = False) -> None:
         self.released = True
         self.duties = (0, 0) if normal_shutdown and self.shutdown_mode == "off" else (100, 100)
+
+    def set_shutdown_mode(self, mode: str) -> None:
+        self.shutdown_mode = mode
 
 
 class RaspberryPiHardware:
@@ -182,6 +187,9 @@ class RaspberryPiHardware:
 
     def _safe_full_speed(self) -> list[Exception]:
         return self._write_all_duties(100)
+
+    def set_shutdown_mode(self, mode: str) -> None:
+        self.config = replace(self.config, shutdown_mode=mode)
 
     def set_duties(self, percents: tuple[int, int]) -> None:
         failures: list[Exception] = []

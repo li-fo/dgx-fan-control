@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the optional read-only browser renderer in the regular user's systemd session.
+# Run the optional browser renderer in the regular user's systemd session.
 set -euo pipefail
 
 readonly UNIT='dgx-fan-web'
@@ -12,8 +12,9 @@ usage() {
     cat <<'EOF'
 Usage: ./web.sh {start|restart|stop|status}
 
-Starts the optional read-only browser monitor as a transient systemd user
-service. It never starts, stops, or owns the fan controller or tty8 display.
+Starts the optional browser monitor as a transient systemd user service. It is
+read-only unless web.allow_control=true. It never starts, stops, or owns the
+fan controller or tty8 display.
 EOF
 }
 
@@ -57,11 +58,14 @@ if not config.web.enabled:
     raise SystemExit("set web.enabled = true in config.toml before starting the browser monitor")
 print(config.web.host)
 print(config.web.port)
+print(str(config.web.allow_control).lower())
 PY
 ) || fail 'cannot load enabled [web] configuration'
-[[ ${#WEB_VALUES[@]} -eq 2 ]] || fail 'invalid [web] configuration output'
+[[ ${#WEB_VALUES[@]} -eq 2 || ${#WEB_VALUES[@]} -eq 3 ]] ||
+    fail 'invalid [web] configuration output'
 HOST=${WEB_VALUES[0]}
 PORT=${WEB_VALUES[1]}
+ALLOW_CONTROL=${WEB_VALUES[2]:-false}
 
 print_browser_urls() {
     case "$HOST" in
@@ -107,7 +111,7 @@ command -v systemd-run >/dev/null 2>&1 || fail 'systemd-run is required'
 # exposes its Server API rather than a console-script command. The local
 # adapter keeps the bind address separate from browser-visible request URLs.
 printf -v MONITOR_COMMAND '%q ' "$MONITOR_BIN" --config "$CONFIG_PATH"
-readonly SERVER_PROGRAM='from dgx_fan.web_server import RequestOriginServer; import sys; RequestOriginServer(sys.argv[1], host=sys.argv[2], port=int(sys.argv[3])).serve()'
+readonly SERVER_PROGRAM='from dgx_fan.web_server import RequestOriginServer; import sys; RequestOriginServer(sys.argv[1], host=sys.argv[2], port=int(sys.argv[3]), allow_control=sys.argv[4] == "true").serve()'
 systemd-run --user --collect --service-type=exec --unit="$UNIT" \
-    --property=Restart=no "$PYTHON_BIN" -c "$SERVER_PROGRAM" "$MONITOR_COMMAND" "$HOST" "$PORT"
+    --property=Restart=no "$PYTHON_BIN" -c "$SERVER_PROGRAM" "$MONITOR_COMMAND" "$HOST" "$PORT" "$ALLOW_CONTROL"
 print_browser_urls

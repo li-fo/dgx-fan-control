@@ -73,6 +73,7 @@ def test_load_valid_config(tmp_path: Path) -> None:
     assert config.web.enabled is False
     assert config.web.host == "127.0.0.1"
     assert config.web.port == 8000
+    assert config.web.allow_control is False
     assert config.web.socket_path == (path.parent / ".dgx-fan-monitor.sock").resolve()
 
 
@@ -86,12 +87,14 @@ enabled = true
 host = "::1"
 port = 8123
 socket_path = "/tmp/dgx-fan-monitor.sock"
+allow_control = true
 """
     )
     web = load_config(path).web
     assert web.enabled is True
     assert web.host == "::1"
     assert web.port == 8123
+    assert web.allow_control is True
     assert str(web.socket_path) == "/tmp/dgx-fan-monitor.sock"
 
 
@@ -113,6 +116,7 @@ def test_loads_explicit_trusted_lan_wildcard_web_monitor_setting(tmp_path: Path)
         ('host = "127.0.0.1"\nport = 0', r"web\.port"),
         ('socket_path = "relative.sock"', r"web\.socket_path"),
         ('unknown = true', r"web contains unknown key"),
+        ('allow_control = "yes"', r"web\.allow_control"),
     ],
 )
 def test_rejects_unsafe_web_monitor_settings(tmp_path: Path, extra: str, match: str) -> None:

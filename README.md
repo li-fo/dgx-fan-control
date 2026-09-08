@@ -32,7 +32,7 @@ Alternatively, run through uv without activation:
 uv run dgx-fan --config config.toml
 ```
 
-Do not substitute `/usr/bin/python`: it does not see this repository's `src/` package unless the project is installed there. Configuration lookup is `--config`, then `DGX_FAN_CONFIG`, then `./config.toml`; restart after edits because there is no settings UI or hot reload. Begin on a development machine with `hardware.backend = "fake"`.
+Do not substitute `/usr/bin/python`: it does not see this repository's `src/` package unless the project is installed there. Configuration lookup is `--config`, then `DGX_FAN_CONFIG`, then `./config.toml`. The Fan Control settings screen can persist and apply its supported runtime fields; endpoint, wiring, and web-listener edits still require a restart. Begin on a development machine with `hardware.backend = "fake"`.
 
 ## Raspberry Pi installation and display
 
@@ -54,7 +54,7 @@ The app itself runs as the regular user, never as root. For the usual interactiv
 ./dgx-fan-control.sh
 ```
 
-Choose the current terminal or the attached HDMI display, then choose whether to start the optional read-only browser monitor. In current-terminal mode the app stays in the foreground; in HDMI mode the tty8 display service continues after SSH disconnects. A normal **Ctrl+Q** exit from the terminal leaves a web monitor selected by the launcher running. If the primary terminal startup fails, the launcher stops only a web monitor that it itself started.
+Choose the current terminal or the attached HDMI display, then choose whether to start the optional browser view. It is read-only by default; control is an explicit trusted-LAN opt-in described below. In current-terminal mode the app stays in the foreground; in HDMI mode the tty8 display service continues after SSH disconnects. A normal **Ctrl+Q** exit from the terminal leaves a web monitor selected by the launcher running. If the primary terminal startup fails, the launcher stops only a web monitor that it itself started.
 
 To stop the managed HDMI display and optional browser monitor together, without prompts:
 
@@ -80,15 +80,16 @@ sudo journalctl -u dgx-fan-display.service --no-pager
 
 The transient display process runs on tty8 and continues after SSH disconnects. With `shutdown_mode = "off"`, **Ctrl+Q**, `./display.sh stop`, and the stop phase of `./display.sh restart` use the clean-stop path and command 0% duty. Handled abnormal termination uses the full-duty fail-safe; SIGKILL and power loss cannot run cleanup and may preserve the last duty. Do not start a second foreground `./start.sh` while the display is active; the hardware-owner lock rejects it without stopping the running app. `uv run dgx-fan --config config.toml` and `uvx` remain foreground terminal commands.
 
-## Read-only browser monitor
+## Browser monitor and trusted-LAN control
 
-The optional browser view renders the same Textual `DGX Dashboard` and `Fan Control` tabs, including RPM, charts, and gauges. It is deliberately **READ ONLY**: browser visitors cannot toggle fans, change configuration, acquire GPIO/PWM ownership, or alter fallback behavior.
+The optional browser view renders the same Textual `DGX Dashboard` and `Fan Control` tabs, including RPM, charts, gauges, and controller-authoritative settings. It is **READ ONLY by default**: browser visitors cannot toggle fans or change configuration, and the renderer never acquires GPIO/PWM ownership.
 
 Enable it in `config.toml`, then restart the primary controller so it creates the local monitor socket:
 
 ```toml
 [web]
 enabled = true
+allow_control = false # Default; read the warning below before changing this.
 host = "0.0.0.0" # Trusted private LAN; keep 127.0.0.1 for local-only access.
 port = 8000
 ```
@@ -102,7 +103,9 @@ Start it independently from the display process:
 ./web.sh stop
 ```
 
-`web.sh` creates a transient `systemd --user` service, so it is not installed or auto-started by `install.sh`. It normally persists after an SSH disconnect while the Raspberry Pi's console auto-login user session remains active. If you operate without that session, enable user lingering once (`sudo loginctl enable-linger "$USER"`) before relying on an SSH-started browser service. The default `web.host = "127.0.0.1"` is local-only and works with an SSH tunnel such as `ssh -L 8000:127.0.0.1:8000 <pi>`. For a trusted internal LAN, explicitly set `web.host = "0.0.0.0"`, restart the primary controller, then browse to `http://<current-pi-ip>:8000` (for example `http://192.168.1.7:8000`). The wildcard follows the Pi across DHCP and `192.168.0.0/24`/`192.168.1.0/24` subnet changes; it does not authenticate users or filter client addresses. Do not port-forward this port or open it through a WAN firewall. Use loopback plus an SSH tunnel or an authenticated reverse proxy for an untrusted network or Internet access.
+`web.sh` creates a transient `systemd --user` service, so it is not installed or auto-started by `install.sh`. It normally persists after an SSH disconnect while the Raspberry Pi's console auto-login user session remains active. If you operate without that session, enable user lingering once (`sudo loginctl enable-linger "$USER"`) before relying on an SSH-started browser service. The default `web.host = "127.0.0.1"` is local-only and works with an SSH tunnel such as `ssh -L 8000:127.0.0.1:8000 <pi>`.
+
+Setting `web.allow_control = true` enables Save and Apply plus explicit fan On/Off for **every browser visitor, without a login**. Use it only on a trusted private LAN. The controller remains the sole file and hardware owner, rejects stale revisions and external file edits, and preserves safety overrides even when requested power is Off. For LAN access, also set `web.host = "0.0.0.0"`, restart the primary controller and browser renderer, then browse to `http://<current-pi-ip>:8000`. The wildcard follows DHCP/subnet changes but does not authenticate or filter clients. Never port-forward this port or expose it through a WAN firewall; use read-only mode or a separately authenticated network boundary for untrusted access.
 
 Remove only this project's integration while retaining the clone and configuration:
 
@@ -114,7 +117,7 @@ Uninstall stops its transient display unit before removing managed helpers, but 
 
 ## Configuration and safe operation
 
-`config.example.toml` is a schema-v2 starting point. Copy it to `config.toml`, then edit it; all changes require an application restart. The reference below covers the complete supported configuration surface, including the two optional advanced hardware paths that are not shown in the example.
+`config.example.toml` is a schema-v2 starting point. Copy it to `config.toml`. In the Fan Control tab, **Setting** opens the shared editor; **Save and Apply** validates the complete configuration, preserves comments and unrelated fields, writes an ignored `*.toml.bak`, then applies the acknowledged revision. **Cancel** never changes disk or runtime state. A failed or stale save leaves the draft visible in the open editor; copy any values you need before cancelling and reopening the current controller settings. An external manual file edit is rejected until the controller is restarted. Startup enablement affects the next launch, shutdown mode affects the next clean exit, and startup boost duration affects subsequent boost events. Endpoint URLs, low-level wiring/backend values, and web listener/access settings remain file-and-restart changes.
 
 ### Schema and DGX endpoints
 
@@ -133,12 +136,13 @@ Uninstall stops its transient display unit before removing managed helpers, but 
 
 | Field | Meaning and validation |
 | --- | --- |
-| `web.enabled` | Optional boolean; defaults to `false`. When true, the primary controller publishes its bounded read-only monitor state. Restart the primary app after changing it. |
+| `web.enabled` | Optional boolean; defaults to `false`. When true, the primary controller publishes its bounded monitor state. Restart the primary app after changing it. |
+| `web.allow_control` | Optional boolean; defaults to `false`. When true, every visitor can edit all fields exposed by the settings screen and request explicit fan On/Off without login. Trusted private LAN only; restart the primary app and browser renderer after changing it. |
 | `web.host` | Optional numeric loopback address; defaults to `127.0.0.1`. Exactly `0.0.0.0` is also allowed as an explicit, unauthenticated trusted-LAN bind; browse `http://<current-pi-ip>:8000`. CIDR strings, hostnames, IPv6 wildcard, and unicast/multicast/link-local/reserved addresses are rejected. Do not port-forward or open this listener to WAN. |
 | `web.port` | Optional integer `1..65535`; defaults to `8000`. |
-| `web.socket_path` | Optional absolute Unix-socket path. Defaults to `.dgx-fan-monitor.sock` beside the configuration file. The socket is same-user mode `0600`, command-free, and removed when the primary app exits. |
+| `web.socket_path` | Optional absolute Unix-socket path. Defaults to `.dgx-fan-monitor.sock` beside the configuration file. The monitor socket and sibling control socket are same-user mode `0600` and removed when the primary app exits. Browser processes never access hardware directly. |
 
-Browser clients receive a complete versioned replacement snapshot containing the current 120-second chart history. Older revisions are ignored; malformed, publish-error, disconnected, or stalled monitor data is shown as a monitor-stream state rather than being treated as healthy telemetry. Starting, stopping, or reconnecting browser clients never changes fan duty or the primary app's lifetime. Open the served URL without `?delay`; textual-serve connects automatically and replaces its launch page as soon as the monitor stream starts.
+Browser clients receive a complete versioned replacement snapshot containing the current 120-second chart history, effective colors/cadence, settings revision, and requested power. Older revisions are ignored; malformed, publish-error, disconnected, or stalled monitor data is shown as a monitor-stream state rather than being treated as healthy telemetry. Starting, stopping, reconnecting, or pressing browser **Ctrl+Q** affects only that renderer and never stops the primary controller. Open the served URL without `?delay`; textual-serve connects automatically and replaces its launch page as soon as the monitor stream starts.
 
 ### Collection
 
@@ -196,4 +200,4 @@ Before selecting `hardware.backend = "raspberry-pi"`, power off and follow the d
 
 ## MVP limitations
 
-There is no persistent restart daemon, configuration editor, meatball menu, GPU process table, native touch support, `uvx` release package, or live hardware verification. The optional tty1 integration uses a transient systemd unit, and all boot, PWM waveform, RPM, fan fail-safe, and physical-display behavior must be validated on the target Pi.
+There is no persistent restart daemon, endpoint/wiring editor, meatball menu, GPU process table, physical-console software keyboard, `uvx` release package, or live hardware verification. The optional tty1 integration uses a transient systemd unit, and all boot, PWM waveform, RPM, fan fail-safe, and physical-display behavior must be validated on the target Pi.

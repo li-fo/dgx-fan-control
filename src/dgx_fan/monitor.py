@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from socket import AF_UNIX, SOCK_STREAM, socket
 
+from .config import AppConfig, DashboardColors
 from .models import ControlSnapshot, EndpointSnapshot, FanReading, GPUStat, MemoryStat
 from .ui import DashboardHistory, HistoryPoint
 
@@ -43,6 +44,12 @@ class MonitorState:
     snapshot: ControlSnapshot | None
     history: DashboardHistory | None
     transport_error: str | None = None
+    settings_source_id: str | None = None
+    settings_revision: int | None = None
+    collection_interval_seconds: float | None = None
+    emergency_temperature_celsius: float | None = None
+    dashboard_colors: DashboardColors | None = None
+    power_enabled: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -273,6 +280,20 @@ def encode_state(state: MonitorState) -> bytes:
         "snapshot": None if state.snapshot is None else _snapshot_to_wire(state.snapshot),
         "history": None if state.history is None else _history_to_wire(state.history),
         "transport_error": state.transport_error,
+        "settings_source_id": state.settings_source_id,
+        "settings_revision": state.settings_revision,
+        "collection_interval_seconds": state.collection_interval_seconds,
+        "emergency_temperature_celsius": state.emergency_temperature_celsius,
+        "dashboard_colors": (
+            None
+            if state.dashboard_colors is None
+            else {
+                "memory": state.dashboard_colors.memory,
+                "utilization": state.dashboard_colors.utilization,
+                "temperature": state.dashboard_colors.temperature,
+            }
+        ),
+        "power_enabled": state.power_enabled,
     }
     encoded = (json.dumps(payload, separators=(",", ":"), allow_nan=False) + "\n").encode()
     if len(encoded) > MAX_MESSAGE_BYTES:
@@ -302,6 +323,35 @@ def decode_state(encoded: bytes, collection_interval_seconds: float) -> MonitorS
         raise MonitorProtocolError("healthy monitor message requires snapshot and history")
     if transport_error is not None and (snapshot_raw is not None or history_raw is not None):
         raise MonitorProtocolError("monitor error message cannot include snapshot or history")
+    colors_raw = mapping.get("dashboard_colors")
+    colors: DashboardColors | None = None
+    if colors_raw is not None:
+        colors_mapping = _mapping(colors_raw, "dashboard_colors")
+        colors = DashboardColors(
+            _optional_string(colors_mapping.get("memory"), "dashboard_colors.memory"),
+            _optional_string(colors_mapping.get("utilization"), "dashboard_colors.utilization"),
+            _optional_string(colors_mapping.get("temperature"), "dashboard_colors.temperature"),
+        )
+    settings_revision_raw = mapping.get("settings_revision")
+    settings_revision = (
+        None
+        if settings_revision_raw is None
+        else _integer(settings_revision_raw, "settings_revision")
+    )
+    effective_interval_raw = mapping.get("collection_interval_seconds")
+    effective_interval = (
+        None
+        if effective_interval_raw is None
+        else _number(effective_interval_raw, "collection_interval_seconds")
+    )
+    emergency_raw = mapping.get("emergency_temperature_celsius")
+    emergency = (
+        None
+        if emergency_raw is None
+        else _number(emergency_raw, "emergency_temperature_celsius")
+    )
+    power_raw = mapping.get("power_enabled")
+    power = None if power_raw is None else _bool(power_raw, "power_enabled")
     return MonitorState(
         _string(mapping.get("source_id"), "source_id"),
         _integer(mapping.get("revision"), "revision"),
@@ -309,6 +359,12 @@ def decode_state(encoded: bytes, collection_interval_seconds: float) -> MonitorS
         None if snapshot_raw is None else _snapshot_from_wire(snapshot_raw),
         None if history_raw is None else _history_from_wire(history_raw, collection_interval_seconds),
         transport_error,
+        _optional_string(mapping.get("settings_source_id"), "settings_source_id"),
+        settings_revision,
+        effective_interval,
+        emergency,
+        colors,
+        power,
     )
 
 
@@ -332,6 +388,31 @@ class MonitorPublisher:
         self._work_event = asyncio.Event()
         self._worker: asyncio.Task[None] | None = None
         self._closing = False
+        self._settings_source_id: str | None = None
+        self._settings_revision: int | None = None
+        self._emergency_temperature_celsius: float | None = None
+        self._dashboard_colors: DashboardColors | None = None
+        self._power_enabled: bool | None = None
+
+    def reconfigure(
+        self,
+        config: AppConfig,
+        settings_source_id: str,
+        settings_revision: int,
+        power_enabled: bool,
+    ) -> None:
+        """Apply controller-authoritative presentation and cadence metadata."""
+        interval = config.collection.interval_seconds
+        self._publish_interval_seconds = max(MIN_PUBLISH_INTERVAL_SECONDS, interval)
+        self._history.collection_interval_seconds = interval
+        self._settings_source_id = settings_source_id
+        self._settings_revision = settings_revision
+        self._emergency_temperature_celsius = config.control.emergency_temperature_celsius
+        self._dashboard_colors = config.dashboard_colors
+        self._power_enabled = power_enabled
+        # Make the accepted effective state observable without waiting out the
+        # previous cadence. The next control tick still supplies fan telemetry.
+        self._next_publish_at = float("-inf")
 
     async def start(self) -> None:
         self.socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -398,7 +479,19 @@ class MonitorPublisher:
             return None
         try:
             encoded = encode_state(
-                MonitorState(self._source_id, revision, item.captured_at, item.snapshot, self._history)
+                MonitorState(
+                    self._source_id,
+                    revision,
+                    item.captured_at,
+                    item.snapshot,
+                    self._history,
+                    settings_source_id=self._settings_source_id,
+                    settings_revision=self._settings_revision,
+                    collection_interval_seconds=self._history.collection_interval_seconds,
+                    emergency_temperature_celsius=self._emergency_temperature_celsius,
+                    dashboard_colors=self._dashboard_colors,
+                    power_enabled=self._power_enabled,
+                )
             )
         except (MonitorProtocolError, ValueError) as error:
             encoded = encode_state(

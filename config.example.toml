@@ -26,11 +26,14 @@ utilization = "cyan"
 temperature = "red"
 
 [web]
-# The browser companion is opt-in and read-only. `./web.sh start` serves the
+# The browser companion is opt-in and read-only by default. `./web.sh start` serves the
 # current physical TUI state at this numeric address and port. Keep the
 # loopback default, or explicitly use 0.0.0.0 for a trusted private LAN.
 # Never use the wildcard with router port forwarding or WAN firewall exposure.
 enabled = false
+# WARNING: true lets every browser visitor on this trusted LAN edit settings
+# and turn fans on/off without login. Do not expose this service to the WAN.
+allow_control = false
 host = "127.0.0.1"
 port = 8000
 # socket_path = "/absolute/path/to/.dgx-fan-monitor.sock"

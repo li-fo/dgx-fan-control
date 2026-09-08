@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Guide an operator through choosing the existing primary display and optional web monitor.
+# Guide an operator through choosing the primary display and optional web monitor.
 set -euo pipefail
 
 PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -14,7 +14,8 @@ Usage: ./dgx-fan-control.sh
        ./dgx-fan-control.sh stop
 
 Interactively starts the DGX Fan Controller in the current terminal or on the
-HDMI display, with an optional read-only browser monitor. Existing start.sh,
+HDMI display, with an optional browser monitor (read-only unless control is
+enabled in config.toml). Existing start.sh,
 display.sh, and web.sh commands remain available for direct operation.
 
 The stop command non-interactively stops the optional browser monitor first,
@@ -45,12 +46,12 @@ choose_primary() {
 
 choose_web() {
     while true; do
-        read -r -p 'Start the optional read-only web monitor? [y/N] ' choice || return 1
+        read -r -p 'Start the optional web monitor? [y/N] ' choice || return 1
         case "${choice,,}" in
             ''|n|no) WEB_REQUESTED=false; return 0 ;;
             y|yes) WEB_REQUESTED=true; return 0 ;;
             h|help)
-                printf 'The web monitor is independent and remains running after a normal primary TUI exit.\n'
+                printf 'The web monitor is independent, read-only by default, and remains running after a normal primary TUI exit.\n'
                 ;;
             q|quit|cancel) return 1 ;;
             *) printf 'Invalid choice. Enter y, n, h, or q.\n' >&2 ;;

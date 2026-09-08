@@ -32,7 +32,7 @@ python -m dgx_fan --config config.toml
 uv run dgx-fan --config config.toml
 ```
 
-시스템 `/usr/bin/python`은 이 저장소의 `src/` 패키지를 보지 못할 수 있으므로 대체하지 마세요. 설정 탐색 순서는 `--config`, `DGX_FAN_CONFIG`, `./config.toml`이며, 설정을 수정하면 재시작해야 합니다. 설정 UI와 hot reload는 없습니다. 개발 PC에서는 먼저 `hardware.backend = "fake"`를 사용하세요.
+시스템 `/usr/bin/python`은 이 저장소의 `src/` 패키지를 보지 못할 수 있으므로 대체하지 마세요. 설정 탐색 순서는 `--config`, `DGX_FAN_CONFIG`, `./config.toml`입니다. Fan Control 설정 화면에서 지원하는 runtime 항목은 저장 즉시 적용되며, endpoint·배선·web listener 변경은 여전히 재시작해야 합니다. 개발 PC에서는 먼저 `hardware.backend = "fake"`를 사용하세요.
 
 ## Raspberry Pi 설치와 디스플레이
 
@@ -54,7 +54,7 @@ cp config.example.toml config.toml
 ./dgx-fan-control.sh
 ```
 
-현재 터미널 또는 연결된 HDMI 디스플레이를 선택한 뒤, 선택적으로 읽기 전용 브라우저 모니터의 실행 여부를 고릅니다. 현재 터미널 모드는 foreground로 실행되고 HDMI 모드는 SSH 연결이 끊겨도 tty8 display service가 유지됩니다. 터미널에서 **Ctrl+Q**로 정상 종료하면 launcher가 선택해 시작한 web monitor는 계속 실행됩니다. 반대로 primary terminal 시작이 실패한 경우에는 launcher가 이번 실행에서 시작한 web monitor만 중지합니다.
+현재 터미널 또는 연결된 HDMI 디스플레이를 선택한 뒤, 선택적 브라우저 화면의 실행 여부를 고릅니다. 기본은 읽기 전용이며 아래 설명처럼 신뢰된 LAN 제어를 명시적으로 활성화할 수 있습니다. 현재 터미널 모드는 foreground로 실행되고 HDMI 모드는 SSH 연결이 끊겨도 tty8 display service가 유지됩니다. 터미널에서 **Ctrl+Q**로 정상 종료하면 launcher가 선택해 시작한 web monitor는 계속 실행됩니다. 반대로 primary terminal 시작이 실패한 경우에는 launcher가 이번 실행에서 시작한 web monitor만 중지합니다.
 
 관리 중인 HDMI display와 선택적 브라우저 모니터를 함께, 질문 없이 중지하려면 다음을 실행합니다.
 
@@ -80,15 +80,16 @@ sudo journalctl -u dgx-fan-display.service --no-pager
 
 transient display 프로세스는 tty8에서 동작하므로 SSH가 끊겨도 유지됩니다. `shutdown_mode = "off"`에서는 **Ctrl+Q**, `./display.sh stop`, `./display.sh restart`의 stop 단계가 clean-stop 경로를 사용해 0% duty를 명령합니다. 처리 가능한 비정상 종료에는 full-duty fail-safe가 적용되고, SIGKILL과 전원 손실은 cleanup을 실행할 수 없어 마지막 duty가 유지될 수 있습니다. display가 실행 중일 때 두 번째 `./start.sh`를 실행하지 마세요. hardware-owner lock이 기존 앱을 멈추지 않고 두 번째 실행을 거부합니다. `uv run dgx-fan --config config.toml`과 `uvx`는 현재 터미널의 foreground 명령입니다.
 
-## 읽기 전용 브라우저 모니터
+## 브라우저 모니터와 신뢰된 LAN 제어
 
-선택적 브라우저 화면은 RPM, 그래프, 게이지를 포함한 같은 Textual `DGX Dashboard`, `Fan Control` 탭을 표시합니다. 이 화면은 의도적으로 **READ ONLY**입니다. 브라우저 방문자는 팬을 토글하거나 설정을 수정할 수 없고, GPIO/PWM 소유권이나 fallback 동작에도 영향을 줄 수 없습니다.
+선택적 브라우저 화면은 RPM, 그래프, 게이지와 controller 기준 설정을 포함한 같은 Textual `DGX Dashboard`, `Fan Control` 탭을 표시합니다. 기본은 **READ ONLY**입니다. 브라우저 renderer는 어떤 모드에서도 GPIO/PWM 소유권을 얻지 않습니다.
 
 `config.toml`에서 활성화한 뒤, primary controller를 재시작하여 local monitor socket을 생성합니다.
 
 ```toml
 [web]
 enabled = true
+allow_control = false # 기본값이며, true로 바꾸기 전에 아래 경고를 읽으세요.
 host = "0.0.0.0" # 신뢰된 내부 LAN; local-only면 127.0.0.1을 유지합니다.
 port = 8000
 ```
@@ -102,7 +103,9 @@ display 프로세스와 독립적으로 실행합니다.
 ./web.sh stop
 ```
 
-`web.sh`는 transient `systemd --user` 서비스를 만들며, `install.sh`가 설치 또는 자동 시작하지 않습니다. Raspberry Pi의 console auto-login 사용자 세션이 활성 상태라면 일반적으로 SSH 연결이 끊겨도 계속 실행됩니다. 해당 세션 없이 SSH에서 시작해 지속 실행하려면 먼저 한 번 `sudo loginctl enable-linger "$USER"`를 실행하세요. 기본 `web.host = "127.0.0.1"`은 local-only이며 `ssh -L 8000:127.0.0.1:8000 <pi>` 같은 SSH tunnel과 함께 사용할 수 있습니다. 신뢰된 내부 LAN에서 직접 접속하려면 `web.host = "0.0.0.0"`으로 명시한 뒤 primary controller를 재시작하고 `http://<현재-Pi-IP>:8000`(예: `http://192.168.1.7:8000`)으로 여세요. wildcard bind는 DHCP 및 `192.168.0.0/24`/`192.168.1.0/24` subnet 변경에도 그대로 동작하지만, 사용자 인증이나 client IP 필터를 제공하지 않습니다. 이 port를 port-forward하거나 WAN firewall로 열지 마세요. 신뢰할 수 없는 네트워크나 인터넷 접근에는 loopback+SSH tunnel 또는 인증된 reverse proxy를 사용하세요.
+`web.sh`는 transient `systemd --user` 서비스를 만들며, `install.sh`가 설치 또는 자동 시작하지 않습니다. Raspberry Pi의 console auto-login 사용자 세션이 활성 상태라면 일반적으로 SSH 연결이 끊겨도 계속 실행됩니다. 해당 세션 없이 SSH에서 시작해 지속 실행하려면 먼저 한 번 `sudo loginctl enable-linger "$USER"`를 실행하세요. 기본 `web.host = "127.0.0.1"`은 local-only이며 `ssh -L 8000:127.0.0.1:8000 <pi>` 같은 SSH tunnel과 함께 사용할 수 있습니다.
+
+`web.allow_control = true`이면 **로그인 없이 모든 브라우저 방문자**가 Save and Apply와 명시적인 fan On/Off를 사용할 수 있습니다. 신뢰된 사설 LAN에서만 사용하세요. Controller가 계속 유일한 설정 파일·하드웨어 소유자이며 stale revision과 외부 파일 수정을 거부하고, 요청 전원이 Off여도 safety override를 보존합니다. LAN 접속에는 `web.host = "0.0.0.0"`도 설정하고 primary controller와 browser renderer를 재시작하세요. 이 port를 port-forward하거나 WAN firewall로 열지 말고, 신뢰할 수 없는 접근에는 읽기 전용 모드 또는 별도의 인증된 network boundary를 사용하세요.
 
 clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 
@@ -114,7 +117,7 @@ clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 
 ## 설정과 안전 동작
 
-`config.example.toml`은 schema v2의 시작점입니다. 이를 `config.toml`로 복사해 편집하고, 수정 후에는 반드시 앱을 재시작하세요. 아래 참조에는 예시 파일에 없는 고급 하드웨어 경로 두 항목까지 포함한 전체 지원 설정을 정리했습니다.
+`config.example.toml`은 schema v2의 시작점입니다. 이를 `config.toml`로 복사하세요. Fan Control 탭의 **Setting**에서 공통 editor를 열고 **Save and Apply**를 누르면 전체 설정을 검증하고 comment와 관련 없는 항목을 보존하며 ignored `*.toml.bak`을 만든 뒤 승인된 revision을 적용합니다. **Cancel**은 disk와 runtime을 바꾸지 않습니다. 실패하거나 stale인 save에서는 열린 editor의 draft가 그대로 보입니다. 필요한 값을 복사한 뒤 cancel하고 현재 controller 설정을 다시 여세요. 외부에서 파일을 직접 수정한 경우에는 controller를 재시작하기 전까지 UI save가 거부됩니다. Startup enablement는 다음 실행, shutdown mode는 다음 clean exit, startup boost 시간은 이후 boost event부터 적용됩니다. Endpoint URL, 저수준 배선/backend, web listener/access는 파일 수정 후 재시작해야 합니다.
 
 ### Schema와 DGX endpoint
 
@@ -133,12 +136,13 @@ clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 
 | 항목 | 의미와 검증 조건 |
 | --- | --- |
-| `web.enabled` | 선택 boolean이며 기본값은 `false`입니다. `true`이면 primary controller가 제한된 읽기 전용 monitor state를 발행합니다. 변경 후 primary 앱을 재시작하세요. |
+| `web.enabled` | 선택 boolean이며 기본값은 `false`입니다. `true`이면 primary controller가 제한된 monitor state를 발행합니다. 변경 후 primary 앱을 재시작하세요. |
+| `web.allow_control` | 선택 boolean이며 기본값은 `false`입니다. `true`이면 모든 방문자가 로그인 없이 설정 화면의 전체 항목을 편집하고 명시적 fan On/Off를 요청할 수 있습니다. 신뢰된 사설 LAN 전용이며 변경 후 primary 앱과 browser renderer를 재시작하세요. |
 | `web.host` | 선택 숫자 loopback 주소이며 기본값은 `127.0.0.1`입니다. 정확히 `0.0.0.0`만 인증 없는 신뢰된 LAN bind로 추가 허용되며 `http://<현재-Pi-IP>:8000`으로 접속합니다. CIDR 문자열, hostname, IPv6 wildcard, unicast/multicast/link-local/reserved 주소는 거부됩니다. 이 listener를 port-forward하거나 WAN에 열지 마세요. |
 | `web.port` | 선택 정수 `1..65535`이며 기본값은 `8000`입니다. |
-| `web.socket_path` | 선택 absolute Unix socket 경로입니다. 기본값은 설정 파일 옆의 `.dgx-fan-monitor.sock`입니다. socket은 같은 사용자만 접근할 수 있도록 mode `0600`이며, command를 받지 않고 primary 앱 종료 시 제거됩니다. |
+| `web.socket_path` | 선택 absolute Unix socket 경로입니다. 기본값은 설정 파일 옆의 `.dgx-fan-monitor.sock`입니다. Monitor socket과 sibling control socket은 같은 사용자만 접근하는 mode `0600`이며 primary 앱 종료 시 제거됩니다. Browser process는 hardware에 직접 접근하지 않습니다. |
 
-브라우저 client는 현재 120초 그래프 이력이 포함된 완전한 versioned replacement snapshot을 받습니다. 오래된 revision은 무시하며 malformed, publish error, 연결 끊김 또는 publisher stall 데이터는 정상 telemetry로 취급하지 않고 monitor-stream 상태로 표시합니다. browser client의 시작·중지·재연결은 fan duty나 primary 앱의 수명에 영향을 주지 않습니다. textual-serve의 launch page를 건너뛰려면 `?delay` 없이 served URL을 여세요. monitor stream이 시작되면 자동으로 연결되어 화면이 바뀝니다.
+브라우저 client는 현재 120초 그래프 이력, 적용된 색상·주기, settings revision, 요청 전원이 포함된 완전한 versioned replacement snapshot을 받습니다. 오래된 revision은 무시하며 malformed, publish error, 연결 끊김 또는 publisher stall 데이터는 정상 telemetry로 취급하지 않고 monitor-stream 상태로 표시합니다. Browser의 시작·중지·재연결 또는 **Ctrl+Q**는 해당 renderer에만 영향을 주며 primary controller를 중지하지 않습니다. textual-serve의 launch page를 건너뛰려면 `?delay` 없이 served URL을 여세요.
 
 ### Collection
 
@@ -196,4 +200,4 @@ DCGM endpoint unavailable/stale, 매핑된 GPU 온도 누락, fan stall, 비상 
 
 ## MVP 한계
 
-영구 restart daemon, 설정 편집기, meatball 메뉴, GPU process table, native touch 지원, `uvx` 릴리스 패키지, 실제 하드웨어 검증은 아직 없습니다. 선택적 tty1 통합은 transient systemd unit을 사용하며, boot, PWM 파형, RPM, fan fail-safe, 물리 디스플레이 동작은 대상 Pi에서 검증해야 합니다.
+영구 restart daemon, endpoint/배선 editor, meatball 메뉴, GPU process table, 물리 console software keyboard, `uvx` 릴리스 패키지, 실제 하드웨어 검증은 아직 없습니다. 선택적 tty1 통합은 transient systemd unit을 사용하며, boot, PWM 파형, RPM, fan fail-safe, 물리 디스플레이 동작은 대상 Pi에서 검증해야 합니다.

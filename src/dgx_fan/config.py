@@ -80,6 +80,7 @@ class WebConfig:
     host: str = "127.0.0.1"
     port: int = 8000
     socket_path: Path | None = None
+    allow_control: bool = False
 
 
 @dataclass(frozen=True)
@@ -169,7 +170,7 @@ def _web_config(raw: dict[str, object], config_path: Path) -> WebConfig:
     if web_raw is None:
         return WebConfig(socket_path=default_socket)
     web = _mapping(web_raw, "web")
-    _reject_unknown_keys(web, "web", {"enabled", "host", "port", "socket_path"})
+    _reject_unknown_keys(web, "web", {"enabled", "host", "port", "socket_path", "allow_control"})
     enabled = web.get("enabled", False)
     if not isinstance(enabled, bool):
         raise ConfigError("web.enabled must be true or false")
@@ -192,7 +193,10 @@ def _web_config(raw: dict[str, object], config_path: Path) -> WebConfig:
         raise ConfigError("web.socket_path must be an absolute non-empty path")
     else:
         socket_path = Path(socket_raw)
-    return WebConfig(enabled, host, port, socket_path)
+    allow_control = web.get("allow_control", False)
+    if not isinstance(allow_control, bool):
+        raise ConfigError("web.allow_control must be true or false")
+    return WebConfig(enabled, host, port, socket_path, allow_control)
 
 
 def load_config(path: Path) -> AppConfig:

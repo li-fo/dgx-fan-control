@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "DCGM-driven Raspberry Pi fan controller TUI"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["httpx>=0.27", "prometheus-client>=0.20", "textual>=0.70", "textual-serve>=1.1.3,<2"]
+dependencies = ["httpx>=0.27", "prometheus-client>=0.20", "textual>=0.70", "textual-serve>=1.1.3,<2", "tomlkit>=0.13,<1"]
 
 [project.optional-dependencies]
 raspberry-pi = ["gpiod>=2.0.2,<3"]

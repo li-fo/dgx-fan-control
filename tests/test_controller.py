@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from dgx_fan.config import ControlConfig, HardwareConfig
 from dgx_fan.controller import FanController
 from dgx_fan.models import EndpointSnapshot, FanReading, GPUStat, Stage
@@ -134,3 +136,36 @@ def test_zero_percent_stage_resets_non_latched_tach_timeout_before_restart() -> 
     controller.update(_endpoints(40, 40), no_tach, 1)
     assert controller.update(_endpoints(60, 40), no_tach, 6).state == "STARTUP BOOST"
     assert controller.update(_endpoints(60, 40), no_tach, 7).fans[0].state != "STALLED"
+
+
+def test_reconfigure_preserves_power_safety_stall_and_boost_state() -> None:
+    controller = _controller(35)
+    controller.set_power(False)
+    controller._safety_active = True
+    controller._recovery_since = 9.0
+    controller._stalled[0] = True
+    controller._no_tach_since[0] = 4.0
+    controller._boost_until[1] = 20.0
+    controller._stages = [2, 1]
+    updated_control = replace(
+        controller.config,
+        hysteresis_celsius=3.0,
+        emergency_temperature_celsius=80.0,
+        recovery_seconds=20.0,
+    )
+    updated_hardware = replace(
+        controller.hardware,
+        startup_boost_seconds=2.0,
+        stall_timeout_seconds=8.0,
+        shutdown_mode="off",
+    )
+
+    controller.reconfigure(updated_control, updated_hardware)
+
+    assert controller.power is False
+    assert controller._safety_active is True
+    assert controller._recovery_since is None
+    assert controller._stalled == [True, False]
+    assert controller._no_tach_since == [4.0, None]
+    assert controller._boost_until == [None, 20.0]
+    assert controller._stages == [None, None]

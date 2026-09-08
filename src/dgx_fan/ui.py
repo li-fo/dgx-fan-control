@@ -10,6 +10,7 @@ from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.widgets import Button, Footer, Header, Static, TabbedContent, TabPane
 
 from .config import DashboardColors
@@ -277,6 +278,7 @@ class FanAppUI(Static):
         emergency_temperature: float,
         collection_interval_seconds: float,
         dashboard_colors: DashboardColors | None = None,
+        settings: Callable[[], None] | None = None,
         *,
         read_only: bool = False,
     ) -> None:
@@ -287,6 +289,7 @@ class FanAppUI(Static):
             emergency_temperature,
         )
         self.dashboard_colors = dashboard_colors or DashboardColors()
+        self.settings = settings
         self.read_only = read_only
         self.snapshot: ControlSnapshot | None = None
         self.history = DashboardHistory(collection_interval_seconds)
@@ -428,22 +431,53 @@ class FanAppUI(Static):
         """Apply a full replacement received from the read-only local monitor stream."""
         self.history = history
         self.last_signature = None
-        self.update_snapshot(snapshot, now, append_history=False)
+        try:
+            self.update_snapshot(snapshot, now, append_history=False)
+        except NoMatches:
+            # Ignore a final frame after renderer child widgets start unmounting.
+            pass
+
+    def reconfigure_display(
+        self,
+        emergency_temperature: float,
+        collection_interval_seconds: float,
+        dashboard_colors: DashboardColors,
+    ) -> None:
+        """Apply effective presentation settings without discarding chart history."""
+        self.emergency_temperature = emergency_temperature
+        self.dashboard_colors = dashboard_colors
+        self.history.collection_interval_seconds = collection_interval_seconds
+        self.last_signature = None
+        if self.snapshot is not None and self.last_render_time is not None:
+            try:
+                self.update_snapshot(self.snapshot, self.last_render_time, append_history=False)
+            except NoMatches:
+                # A monitor frame may race the renderer's child teardown.
+                pass
 
     def set_monitor_transport_status(self, status: str | None) -> None:
         """Show monitor connection state without changing controller data."""
         self.monitor_transport_status = status
         if self.snapshot is not None and self.last_render_time is not None:
-            self.update_snapshot(self.snapshot, self.last_render_time, append_history=False)
+            try:
+                self.update_snapshot(self.snapshot, self.last_render_time, append_history=False)
+            except NoMatches:
+                # Renderer shutdown must not turn a final socket event into an app error.
+                pass
         elif status is not None:
-            self.query_one("#error-banner", Static).update(
-                Text(status, no_wrap=True, overflow="ellipsis")
-            )
+            try:
+                self.query_one("#error-banner", Static).update(
+                    Text(status, no_wrap=True, overflow="ellipsis")
+                )
+            except NoMatches:
+                pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button = event.button
         if button.id == "power-toggle" and not button.disabled and button.display:
             self.toggle()
+        if button.id == "fan-settings" and not button.disabled and self.settings is not None:
+            self.settings()
 
     def _render_dashboard(self, snapshot: ControlSnapshot, now: float) -> None:
         scroll = self.query_one("#dashboard-scroll", VerticalScroll)

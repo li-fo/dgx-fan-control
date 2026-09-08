@@ -50,6 +50,10 @@ class CollectorStateMixin(Generic[Sample]):
         self._failed_attempts.pop(endpoint_id, None)
         self._revisions[endpoint_id] += 1
 
+    def reset_retry_waits(self) -> None:
+        """Clear only an obsolete generation's in-progress retry indicators."""
+        self._retrying.clear()
+
     def _snapshot_state(self, endpoint_id: str, now: float | Clock | None) -> CollectorStateSnapshot[Sample]:
         current = self._current_at(now)
         prior = self._last_good.get(endpoint_id)

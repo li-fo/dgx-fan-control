@@ -8,6 +8,7 @@ import signal
 import sys
 import threading
 import time
+import uuid
 from asyncio import CancelledError, Task, create_task, sleep
 from dataclasses import dataclass, replace
 from typing import Any, ClassVar
@@ -56,6 +57,8 @@ from .hardware import FanHardware, create_hardware
 from .models import ControlSnapshot, EndpointSnapshot, NodeMemorySnapshot
 from .monitor import MonitorPublisher
 from .node_exporter import NodeExporterCollector
+from .settings import SettingsCommandServer, SettingsService, control_socket_path
+from .settings_ui import SettingsScreen
 from .ui import FanAppUI
 
 
@@ -172,11 +175,88 @@ class DGXFanApp(App[None]):
         self._poll_tasks: tuple[Task[None], ...] = ()
         self._node_poll_tasks: tuple[Task[None], ...] = ()
         self._control_timer: Any | None = None
+        self._shutting_down = False
         self.monitor_publisher: MonitorPublisher | None = (
             MonitorPublisher(config.web.socket_path, config.collection.interval_seconds)
             if config.web.enabled and config.web.socket_path
             else None
         )
+        self._settings_source_id = uuid.uuid4().hex
+        self.settings = SettingsService(
+            config,
+            self.apply_settings,
+            self._set_power,
+            lambda: self.controller.power,
+            self._settings_source_id,
+        )
+        self.command_server: SettingsCommandServer | None = (
+            SettingsCommandServer(
+                control_socket_path(config.web.socket_path),
+                self.settings,
+                config.web.allow_control,
+            )
+            if config.web.enabled and config.web.socket_path
+            else None
+        )
+        if self.monitor_publisher is not None:
+            self.monitor_publisher.reconfigure(
+                config, self._settings_source_id, 0, self.controller.power
+            )
+
+    async def apply_settings(self, config: AppConfig, revision: int) -> None:
+        """Apply accepted configuration without replacing the controller/hardware owner."""
+        collection_changed = config.collection != self.config.collection
+        if collection_changed:
+            old_tasks = (*self._poll_tasks, *self._node_poll_tasks)
+            for task in old_tasks:
+                task.cancel()
+            for task in old_tasks:
+                try:
+                    await task
+                except CancelledError:
+                    pass
+            self._poll_tasks = ()
+            self._node_poll_tasks = ()
+            self.collector.reset_retry_waits()
+            self.node_collector.reset_retry_waits()
+
+        self.config = config
+        self.controller.reconfigure(config.control, config.hardware)
+        if self.hardware is not None:
+            self.hardware.set_shutdown_mode(config.hardware.shutdown_mode)
+        # Collection instances retain last-good/error state; their next loops
+        # observe the new cadence and existing retry settings remain fail-safe.
+        self.collector.timeout = config.collection.timeout_seconds
+        self.collector.stale_after = config.collection.stale_after_seconds
+        self.collector.retry_count = config.collection.retry_count
+        self.collector.retry_delay_seconds = config.collection.retry_delay_seconds
+        self.node_collector.timeout = config.collection.timeout_seconds
+        self.node_collector.stale_after = config.collection.stale_after_seconds
+        self.node_collector.retry_count = config.collection.retry_count
+        self.node_collector.retry_delay_seconds = config.collection.retry_delay_seconds
+        try:
+            ui = self.query_one(FanAppUI)
+        except NoMatches:
+            ui = None
+        if ui is not None:
+            ui.reconfigure_display(
+                config.control.emergency_temperature_celsius,
+                config.collection.interval_seconds,
+                config.dashboard_colors,
+            )
+        if self.monitor_publisher is not None:
+            self.monitor_publisher.reconfigure(
+                config, self._settings_source_id, revision, self.controller.power
+            )
+        if collection_changed and not self._shutting_down:
+            self._poll_tasks = tuple(
+                create_task(self._poll_loop(endpoint)) for endpoint in config.endpoints
+            )
+            self._node_poll_tasks = tuple(
+                create_task(self._node_poll_loop(endpoint)) for endpoint in self.node_endpoints
+            )
+        if self.hardware is not None:
+            self.control_tick()
 
     def compose(self) -> ComposeResult:
         yield FanAppUI(
@@ -185,7 +265,17 @@ class DGXFanApp(App[None]):
             self.config.control.emergency_temperature_celsius,
             self.config.collection.interval_seconds,
             self.config.dashboard_colors,
+            self.open_settings,
         )
+
+    def open_settings(self) -> None:
+        async def save(patch: dict[str, object], revision: int, source_id: str) -> dict[str, object]:
+            if source_id != self._settings_source_id:
+                raise RuntimeError("controller identity changed; reload settings")
+            await self.settings.save(patch, revision)
+            return self.settings.response()
+
+        self.push_screen(SettingsScreen(self.settings.response(), save))
 
     async def on_mount(self) -> None:
         self.hardware = create_hardware(self.config.hardware)
@@ -206,6 +296,11 @@ class DGXFanApp(App[None]):
                 # Browser publication is optional display output. It must not
                 # prevent or alter the fan controller's safety lifecycle.
                 self.monitor_publisher = None
+        if self.command_server is not None:
+            try:
+                await self.command_server.start()
+            except (OSError, RuntimeError):
+                self.command_server = None
         self.control_tick()
 
     async def _poll_loop(self, endpoint: EndpointConfig) -> None:
@@ -290,12 +385,31 @@ class DGXFanApp(App[None]):
         )
 
     def toggle_power(self) -> None:
-        self.controller.set_power(not self.controller.power)
+        self._set_power(not self.controller.power)
+
+    def _set_power(self, enabled: bool) -> None:
+        """Set requested power explicitly and publish that request authoritatively."""
+        self.controller.set_power(enabled)
+        if self.monitor_publisher is not None:
+            self.monitor_publisher.reconfigure(
+                self.config,
+                self._settings_source_id,
+                self.settings.effective.revision,
+                enabled,
+            )
+        if self.hardware is not None:
+            self.control_tick()
 
     async def on_unmount(self) -> None:
+        self._shutting_down = True
         if self._control_timer is not None:
             self._control_timer.stop()
             self._control_timer = None
+        if self.command_server is not None:
+            await self.command_server.close()
+            self.command_server = None
+        else:
+            await self.settings.close()
         for task in (*self._poll_tasks, *self._node_poll_tasks):
             task.cancel()
         for task in (*self._poll_tasks, *self._node_poll_tasks):

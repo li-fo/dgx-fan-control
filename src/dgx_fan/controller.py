@@ -25,6 +25,18 @@ class FanController:
     def set_power(self, enabled: bool) -> None:
         self.power = enabled
 
+    def reconfigure(self, config: ControlConfig, hardware: HardwareConfig) -> None:
+        """Apply policy without discarding safety, tach, or boost observations."""
+        curve_changed = (self.config.stages, self.config.fan_endpoint_ids, self.config.hysteresis_celsius) != (
+            config.stages, config.fan_endpoint_ids, config.hysteresis_celsius
+        )
+        recovery_changed = (self.config.recovery_seconds, self.config.emergency_temperature_celsius, self.config.hysteresis_celsius) != (config.recovery_seconds, config.emergency_temperature_celsius, config.hysteresis_celsius)
+        self.config, self.hardware = config, hardware
+        if curve_changed:
+            self._stages = [None, None]
+        if recovery_changed and self._safety_active:
+            self._recovery_since = None
+
     def update(
         self, endpoints: tuple[EndpointSnapshot, ...], fans: tuple[FanReading, FanReading], now: float
     ) -> ControlSnapshot:

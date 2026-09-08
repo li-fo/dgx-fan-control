@@ -131,3 +131,4 @@ docs/tmp/*
 # Local MVP configuration
 config.toml
 config.dev.toml
+*.toml.bak

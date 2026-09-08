@@ -5,10 +5,34 @@ import shlex
 import sys
 from pathlib import Path
 
+import pytest
 from aiohttp import ClientSession, WSMsgType, web
 from aiohttp.test_utils import make_mocked_request
 
 from dgx_fan.web_server import RequestOriginServer
+
+
+@pytest.mark.parametrize(
+    ("allow_control", "headers"),
+    [
+        (False, {"Host": "127.0.0.1:8000", "Origin": "http://evil.invalid"}),
+        (True, {"Host": "127.0.0.1:8000", "Origin": "http://evil.invalid"}),
+        (True, {"Host": "127.0.0.1:8000"}),
+    ],
+)
+def test_websocket_origin_guard_rejects_before_textual_start(
+    allow_control: bool, headers: dict[str, str]
+) -> None:
+    async def exercise() -> None:
+        server = RequestOriginServer(
+            "must-not-start", host="127.0.0.1", port=8000, allow_control=allow_control
+        )
+        app = await server._make_app()
+        request = make_mocked_request("GET", "/ws", headers=headers, app=app)
+        with pytest.raises(web.HTTPForbidden):
+            await server.handle_websocket(request)
+
+    asyncio.run(exercise())
 
 
 def test_request_origin_server_uses_request_host_not_wildcard_bind() -> None:
@@ -41,10 +65,15 @@ def test_wildcard_listener_serves_request_origin_and_monitor_websocket(tmp_path:
 
     async def exercise() -> None:
         config_path = tmp_path / "config.toml"
-        config_path.write_text(Path("config.example.toml").read_text().replace("enabled = false", "enabled = true"))
+        config_path.write_text(
+            Path("config.example.toml")
+            .read_text()
+            .replace("enabled = false", "enabled = true")
+            .replace("allow_control = false", "allow_control = true")
+        )
         program = "from dgx_fan.monitor_app import main; main()"
         command = f"{shlex.quote(sys.executable)} -c {shlex.quote(program)} --config {shlex.quote(str(config_path))}"
-        server = RequestOriginServer(command, host="0.0.0.0", port=0)
+        server = RequestOriginServer(command, host="0.0.0.0", port=0, allow_control=True)
         runner = web.AppRunner(await server._make_app())
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", 0)
@@ -58,7 +87,13 @@ def test_wildcard_listener_serves_request_origin_and_monitor_websocket(tmp_path:
                 assert response.status == 200
                 assert f"ws://127.0.0.1:{port}/ws" in page
                 assert "0.0.0.0" not in page
-                websocket = await asyncio.wait_for(client.ws_connect(f"http://127.0.0.1:{port}/ws"), timeout=4)
+                websocket = await asyncio.wait_for(
+                    client.ws_connect(
+                        f"http://127.0.0.1:{port}/ws",
+                        origin=f"http://127.0.0.1:{port}",
+                    ),
+                    timeout=4,
+                )
                 try:
                     for _ in range(80):
                         message = await asyncio.wait_for(websocket.receive(), timeout=4)
