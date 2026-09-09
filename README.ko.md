@@ -166,7 +166,7 @@ clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 
 Memory, UTIL, temperature, GPU power는 누락 sample을 gap으로 표시합니다. Exporter가 complete physical-GPU value를 제공하지 못하면 GPU power는 **N/A**입니다. Queue, storage, query warning은 History에 표시되며 fan control을 중지하지 않습니다. Database와 SQLite sidecar는 Git에서 무시되고 restart, install, uninstall 후에도 보존됩니다. 저장된 history를 의도적으로 폐기할 때만 직접 제거하세요.
 
-History에서 DGX endpoint를 선택하세요. 기본값은 최근 1시간이며 **+**/**−**로 1분, 10분, 1시간, 6시간, 1일, 8일을 선택하고 drag 또는 arrow key로 pan할 수 있습니다. **Now**를 선택하면 live following으로 돌아갑니다. Raw `DCGM_*`와 설정된 `node_memory_*` response만 collection cadence로 store에 기록됩니다. 각 column에서 Memory는 mean이며 UTIL, temperature, physical-GPU power 합계는 maximum입니다. 정확한 8일 cutoff는 startup과 매 1분마다 유지되며 cleanup은 chunk 단위이므로 앱이 중간에 종료되면 다음 start에서 이어집니다. Database 크기는 exporter response cardinality와 gap에 따라 달라집니다.
+History에서 DGX endpoint를 선택하세요. 기본값은 최근 1시간이며 **+**/**−**로 1분, 10분, 1시간, 6시간, 1일, 8일을 선택할 수 있습니다. History를 열거나 확대/축소하면 최신 범위의 live following으로 돌아가며, drag 또는 arrow key로 과거 범위를 고정해 확인할 수 있습니다. 네 개의 border chart는 numeric 세로 tick 없이 한 화면에 compact하게 표시됩니다. Power는 고정 **240 W** display scale을 사용하므로 240 W를 넘는 값은 화면에서만 상한으로 보이며 저장 데이터는 변경되지 않습니다. Raw `DCGM_*`와 설정된 `node_memory_*` response만 collection cadence로 store에 기록됩니다. 각 column에서 Memory는 mean이며 UTIL, temperature, physical-GPU power 합계는 maximum입니다. 정확한 8일 cutoff는 startup과 매 1분마다 유지되며 cleanup은 chunk 단위이므로 앱이 중간에 종료되면 다음 start에서 이어집니다. Database 크기는 exporter response cardinality와 gap에 따라 달라집니다.
 
 ### Collection
 

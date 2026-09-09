@@ -20,7 +20,7 @@ from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.timer import Timer
 from textual.widgets import Button, Static
@@ -44,7 +44,7 @@ METRICS: Final[tuple[tuple[str, str, float, str, str], ...]] = (
     ("memory", "Memory mean %", 100.0, "memory", "%"),
     ("utilization", "UTIL max %", 100.0, "utilization", "%"),
     ("temperature", "Temp max C", 100.0, "temperature", " C"),
-    ("power", "Power max W", 1000.0, "power", " W"),
+    ("power", "Power max · fixed 240 W", 240.0, "power", " W"),
 )
 
 
@@ -70,11 +70,11 @@ class HistoryChart(Static):
 
     DEFAULT_CSS = """
     HistoryChart {
-        height: 8;
-        min-height: 8;
+        height: 1fr;
+        min-height: 3;
         width: 1fr;
         border: round $primary;
-        padding: 0 1;
+        padding: 0;
     }
     """
 
@@ -104,33 +104,28 @@ class HistoryChart(Static):
     ) -> None:
         self.values, self.start, self.end, self.status = values, start, end, status
         observed = [value for value in values if value is not None and isfinite(value)]
-        self.maximum = max(self.base_maximum, max(observed, default=self.base_maximum))
+        # Power intentionally stays at a fixed 240 W display scale. Values
+        # remain unchanged in ``self.values`` and are only clamped while drawn.
+        self.maximum = (
+            self.base_maximum
+            if self.metric == "power"
+            else max(self.base_maximum, max(observed, default=self.base_maximum))
+        )
         self._refresh_render()
 
     def _refresh_render(self) -> None:
-        width = max(1, self.content_size.width - 5)
+        width = max(1, self.content_size.width)
         values = self._fit_values(width)
-        rows = 4
-        content = Text(f"{self.label} · max {self.maximum:.0f}{self.unit}\n")
+        rows = max(1, self.content_size.height)
+        self.border_title = self.label
+        content = Text()
         color = _rich_color(self.color)
         style = Style(color=color) if color else None
         for row in range(rows):
-            threshold = (rows - 1 - row) / (rows - 1) * self.maximum
             line = "".join(self._glyph(value, row, rows) for value in values)
-            content.append(f"{threshold:>3.0f} ")
             content.append(line, style=style)
-            content.append("\n")
-        if self.end <= self.start:
-            axis = self.status
-        else:
-            start_label = _local_time(self.start).strftime("%m-%d %H:%M")
-            end_label = _local_time(self.end).strftime("%H:%M")
-            axis = (
-                f"{start_label}"
-                + " " * max(1, width - len(start_label) - len(end_label))
-                + end_label
-            )
-        content.append(axis[: width].ljust(width), style=style)
+            if row < rows - 1:
+                content.append("\n")
         self.update(content)
 
     def _fit_values(self, width: int) -> list[float | None]:
@@ -170,14 +165,25 @@ class HistoryPanel(Vertical):
     ]
     DEFAULT_CSS = """
     HistoryPanel { height: 1fr; width: 1fr; }
-    #history-controls { height: 3; }
-    .history-endpoint { width: auto; min-width: 10; margin-right: 1; }
+    #history-controls { height: 1; }
+    #history-controls Button {
+        height: 1; min-height: 1; border: none !important; padding: 0;
+    }
+    Button.history-endpoint { width: auto; min-width: 8; margin-right: 1; }
     #history-spacer { width: 1fr; }
-    #history-zoom-out, #history-zoom-in, #history-now { width: 8; margin-left: 1; }
-    #history-range { width: 14; content-align: center middle; }
+    #history-zoom-out, #history-zoom-in { width: 3; margin-left: 1; }
+    #history-controls Button.history-endpoint.-primary, #history-controls Button:focus {
+        text-style: bold reverse;
+        background: ansi_default !important;
+        border: none !important;
+    }
+    #history-controls Button:hover, #history-controls Button.-active {
+        border: none !important;
+    }
+    #history-range { width: 8; content-align: center middle; }
     #history-status { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
-    #history-scroll { height: 1fr; }
-    #history-timeline { height: 3; min-height: 3; border: round $primary; padding: 0 1; }
+    #history-plots { height: 1fr; }
+    #history-timeline { height: 3; min-height: 3; border: round $primary; padding: 0; }
     """
 
     def __init__(
@@ -218,9 +224,8 @@ class HistoryPanel(Vertical):
             yield Button("-", id="history-zoom-out")
             yield Static("1 hour", id="history-range")
             yield Button("+", id="history-zoom-in")
-            yield Button("Now", id="history-now")
         yield Static("History waiting", id="history-status", markup=False)
-        with VerticalScroll(id="history-scroll"):
+        with Vertical(id="history-plots"):
             for metric, label, maximum, color_name, unit in METRICS:
                 color = getattr(self.dashboard_colors, color_name, None)
                 if metric == "power" and color is None:
@@ -247,6 +252,8 @@ class HistoryPanel(Vertical):
 
     def activate(self) -> None:
         self._mounted_active = True
+        self.live = True
+        self.end = time()
         self._start_live_timer()
         self.refresh_history()
 
@@ -276,10 +283,6 @@ class HistoryPanel(Vertical):
             self._zoom(1)
         elif identifier == "history-zoom-out":
             self._zoom(-1)
-        elif identifier == "history-now":
-            self.live = True
-            self.end = time()
-            self.refresh_history()
         event.stop()
 
     def action_pan_left(self) -> None:
@@ -312,14 +315,11 @@ class HistoryPanel(Vertical):
             event.stop()
 
     def _zoom(self, direction: int) -> None:
-        current = ZOOM_SPANS[self.span_index]
-        midpoint = self.end - current / 2
         self.span_index = min(max(0, self.span_index + direction), len(ZOOM_SPANS) - 1)
-        span = ZOOM_SPANS[self.span_index]
-        self.end = midpoint + span / 2
-        # Zoom is an explicit inspection action. Keep the prior midpoint;
-        # only Now resumes live-following collection time.
-        self.live = False
+        # Zoom is a fresh live-range selection; dragging/arrow pan is the
+        # deliberate path for historical inspection.
+        self.live = True
+        self.end = time()
         self._clamp_window()
         self._queue_refresh()
 
@@ -366,7 +366,7 @@ class HistoryPanel(Vertical):
             chart = self.query_one("#history-memory-chart", HistoryChart)
         except NoMatches:
             return
-        width = min(MAX_QUERY_WIDTH, max(1, chart.content_size.width - 5))
+        width = min(MAX_QUERY_WIDTH, max(1, chart.content_size.width))
         self._request_generation += 1
         generation = self._request_generation
         self._cancel_request()
@@ -458,7 +458,7 @@ class HistoryPanel(Vertical):
             chart = self.query_one("#history-memory-chart", HistoryChart)
         except NoMatches:
             return
-        width = max(1, chart.content_size.width - 5)
+        width = max(1, chart.content_size.width)
         self._set_status(status)
         for metric, _, _, _, _ in METRICS:
             self.query_one(f"#history-{metric}-chart", HistoryChart).update_series([None] * width, start, end, status)

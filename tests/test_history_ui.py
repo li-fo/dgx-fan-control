@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 from time import time
 
+from rich.cells import cell_len
 from textual import events
 from textual.app import App, ComposeResult
-from textual.widgets import Button, TabbedContent
+from textual.widgets import Button, Footer, TabbedContent
 
 from dgx_fan.config import DashboardColors, EndpointConfig
 from dgx_fan.history_ui import ZOOM_SPANS, HistoryChart, HistoryPanel
@@ -67,10 +68,10 @@ def test_history_tab_queries_only_when_active_and_renders_four_charts_at_79_colu
             await pilot.pause()
             assert calls and calls[-1][0] == "one"
             assert 1 <= calls[-1][3] <= 1024
-            assert "Memory mean %" in app.query_one("#history-memory-chart").render().plain
-            assert "UTIL max %" in app.query_one("#history-utilization-chart").render().plain
-            assert "Temp max C" in app.query_one("#history-temperature-chart").render().plain
-            assert "Power max W" in app.query_one("#history-power-chart").render().plain
+            assert app.query_one("#history-memory-chart", HistoryChart).border_title == "Memory mean %"
+            assert app.query_one("#history-utilization-chart", HistoryChart).border_title == "UTIL max %"
+            assert app.query_one("#history-temperature-chart", HistoryChart).border_title == "Temp max C"
+            assert app.query_one("#history-power-chart", HistoryChart).border_title == "Power max · fixed 240 W"
             assert "[safe]" in app.query_one("#history-endpoint-0", Button).label.plain
             assert panel._mounted_active
             app.query_one(TabbedContent).active = "dashboard"
@@ -132,15 +133,14 @@ def test_history_endpoint_zoom_pan_now_resize_and_pending_request_cancellation()
             chart = app.query_one("#history-memory-chart", HistoryChart)
             assert chart.values and all(value == 25.0 for value in chart.values)
             before = panel.span_index
-            midpoint = panel.end - ZOOM_SPANS[before] / 2
             app.query_one("#history-zoom-in", Button).press()
             await pilot.pause()
             assert panel.span_index == min(before + 1, len(ZOOM_SPANS) - 1)
-            assert not panel.live
-            assert abs((panel.end - ZOOM_SPANS[panel.span_index] / 2) - midpoint) < 0.01
+            assert panel.live and abs(panel.end - time()) < 2
             panel.action_pan_left()
             assert not panel.live
-            app.query_one("#history-now", Button).press()
+            panel.deactivate()
+            panel.activate()
             await pilot.pause()
             assert panel.live and abs(panel.end - time()) < 2
             await pilot.resize_terminal(79, 24)
@@ -279,9 +279,147 @@ def test_history_status_and_dynamic_temperature_power_maximum_are_visible() -> N
             assert "Storage warning: database busy" in app.query_one("#history-status").render().plain
             temperature = app.query_one("#history-temperature-chart", HistoryChart)
             power = app.query_one("#history-power-chart", HistoryChart)
-            assert temperature.maximum == 120 and "max 120 C" in temperature.render().plain
-            assert power.maximum == 1500 and "max 1500 W" in power.render().plain
+            assert temperature.maximum == 120
+            assert power.maximum == 240 and power.values == [1500.0] * len(power.values)
             panel.deactivate()
+
+    asyncio.run(exercise())
+
+
+def test_history_compact_layout_keeps_all_charts_visible_after_real_app_resizes() -> None:
+    widths: list[int] = []
+
+    async def query(endpoint_id: str, start: float, end: float, width: int) -> dict[str, object]:
+        widths.append(width)
+        return _result(endpoint_id, start, end, width)
+
+    class HistoryApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FanAppUI(
+                "config.toml", lambda: None, 75, 2, history_query=query, history_endpoints=_endpoints()
+            )
+
+    app = HistoryApp()
+
+    async def exercise() -> None:
+        async with app.run_test(size=(79, 24)) as pilot:
+            app.query_one(TabbedContent).active = "history"
+            await pilot.pause()
+            panel = app.query_one(HistoryPanel)
+            timeline = app.query_one("#history-timeline")
+            plots = app.query_one("#history-plots")
+            footer = app.query_one(Footer)
+            assert len(panel.query("VerticalScroll")) == 0
+            assert len(app.query("#history-now")) == 0
+            controls = (
+                app.query_one("#history-endpoint-0", Button),
+                app.query_one("#history-endpoint-1", Button),
+                app.query_one("#history-zoom-out", Button),
+                app.query_one("#history-zoom-in", Button),
+            )
+            assert all(button.region.height == 1 and button.region.width > 0 for button in controls)
+            before = panel.span_index
+            controls[-1].press()
+            await pilot.pause()
+            assert panel.span_index == min(before + 1, len(ZOOM_SPANS) - 1)
+            for size in ((79, 24), (128, 37), (79, 24), (128, 37)):
+                await pilot.resize_terminal(*size)
+                await asyncio.sleep(0.1)
+                await pilot.pause()
+                charts = list(panel.query(HistoryChart))
+                assert len(charts) == 4
+                assert all(chart.region.height >= 3 for chart in charts)
+                assert charts[0].region.y >= plots.region.y
+                assert all(chart.region.bottom <= timeline.region.y for chart in charts)
+                assert charts[-1].region.bottom <= timeline.region.y
+                assert timeline.region.bottom <= footer.region.y
+                assert timeline.content_size.height >= 1
+                assert all(chart.border_title for chart in charts)
+                assert all(_has_complete_border(chart) for chart in charts)
+                assert plots.region.height >= sum(chart.region.height for chart in charts)
+                assert panel.scroll_y == 0 and plots.scroll_y == 0
+                assert all(not any(character.isdigit() for character in chart.render().plain) for chart in charts)
+                assert all(
+                    len(chart.render().plain.splitlines()) <= chart.content_size.height
+                    and all(cell_len(line) <= chart.content_size.width for line in chart.render().plain.splitlines())
+                    for chart in charts
+                )
+                assert widths[-1] == app.query_one("#history-memory-chart", HistoryChart).content_size.width
+
+    asyncio.run(exercise())
+
+
+def test_history_controls_stay_plain_in_native_ansi_focus_hover_and_active_states() -> None:
+    queried: list[str] = []
+
+    async def query(endpoint_id: str, start: float, end: float, width: int) -> dict[str, object]:
+        queried.append(endpoint_id)
+        return _result(endpoint_id, start, end, width)
+
+    class HistoryApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FanAppUI(
+                "config.toml", lambda: None, 75, 2, history_query=query, history_endpoints=_endpoints()
+            )
+
+    app = HistoryApp(ansi_color=True)
+    app.theme = "ansi-dark"
+
+    async def exercise() -> None:
+        async with app.run_test(size=(79, 24)) as pilot:
+            app.query_one(TabbedContent).active = "history"
+            await pilot.pause()
+            endpoint_one = app.query_one("#history-endpoint-0", Button)
+            endpoint_two = app.query_one("#history-endpoint-1", Button)
+            zoom_out = app.query_one("#history-zoom-out", Button)
+            zoom_in = app.query_one("#history-zoom-in", Button)
+            controls = (endpoint_one, endpoint_two, zoom_out, zoom_in)
+            assert all(button.region.height == button.content_size.height == 1 for button in controls)
+            assert all(_has_no_border(button) for button in controls)
+            assert endpoint_one.has_class("-primary") and "reverse" in str(endpoint_one.styles.text_style)
+            endpoint_two.focus()
+            await pilot.pause()
+            await pilot.hover("#history-endpoint-1")
+            assert endpoint_two.has_focus and _has_no_border(endpoint_two)
+            assert "reverse" in str(endpoint_two.styles.text_style)
+            before = app.query_one(HistoryPanel).span_index
+            assert await pilot.click("#history-endpoint-1")
+            await asyncio.sleep(0.1)
+            assert queried[-1] == "two" and endpoint_two.has_class("-primary")
+            assert await pilot.click("#history-zoom-in")
+            await pilot.pause()
+            assert app.query_one(HistoryPanel).span_index == min(before + 1, len(ZOOM_SPANS) - 1)
+            assert all(_has_no_border(button) for button in controls)
+            assert all("▁" not in button.render().plain and "▄" not in button.render().plain for button in controls)
+
+    asyncio.run(exercise())
+
+
+def _has_complete_border(chart: HistoryChart) -> bool:
+    top, right, bottom, left = chart.styles.border
+    return all(edge[0] for edge in (top, right, bottom, left))
+
+
+def _has_no_border(button: Button) -> bool:
+    return not any(edge[0] for edge in button.styles.border)
+
+
+def test_power_chart_uses_fixed_240_watt_display_proportions() -> None:
+    class ChartApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield HistoryChart("power", "Power max · fixed 240 W", 240, "ansi_green", " W")
+
+    app = ChartApp()
+
+    async def exercise() -> None:
+        async with app.run_test(size=(80, 10)) as pilot:
+            chart = app.query_one(HistoryChart)
+            chart.update_series([120.0], 1, 2, "ready")
+            half_rows = sum(chart._glyph(120.0, row, 4) != " " for row in range(4))
+            full_rows = sum(chart._glyph(240.0, row, 4) != " " for row in range(4))
+            assert chart.maximum == 240 and chart.values == [120.0]
+            assert half_rows == 2 and full_rows == 4
+            await pilot.pause()
 
     asyncio.run(exercise())
 
