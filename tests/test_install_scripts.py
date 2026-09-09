@@ -561,6 +561,11 @@ def _sandbox(tmp_path: Path) -> Path:
     for command, body in {
         "systemctl": 'case "$1" in show) printf "not-found\\n";; esac\n',
         "systemd-run": "exit 0\n",
+        "openvt": "exit 0\n",
+        "chvt": "exit 0\n",
+        "deallocvt": "exit 0\n",
+        "fuser": "exit 1\n",
+        "python3": "exit 1\n",
         "sudo": (
             'if [ -n "${DGX_FAN_FAKE_SUDO_LOG:-}" ]; then printf "%s\\n" "$*" >> "$DGX_FAN_FAKE_SUDO_LOG"; fi\n'
             'case "$*" in *dgx-fan-prepare-hardware*) exit "${DGX_FAN_FAKE_SUDO_HELPER_STATUS:-0}";; '
@@ -571,6 +576,10 @@ def _sandbox(tmp_path: Path) -> Path:
         tool.parent.mkdir(parents=True, exist_ok=True)
         tool.write_text("#!/bin/sh\nset -eu\n" + body)
         tool.chmod(0o755)
+    runuser = sandbox / "usr/sbin/runuser"
+    runuser.parent.mkdir(parents=True, exist_ok=True)
+    runuser.write_text("#!/bin/sh\nexit 0\n")
+    runuser.chmod(0o755)
     return sandbox
 
 
@@ -967,7 +976,8 @@ def test_uninstall_stops_web_then_display_and_preserves_everything_on_web_failur
     assert result.returncode == 1
     entries = (sandbox / "stop-order.log").read_text().splitlines()
     assert entries[0].startswith("--user show")
-    assert "stop dgx-fan-display.service" in entries[1]
+    assert entries[1] == "show --property=LoadState --value dgx-fan-display.service"
+    assert not any("stop dgx-fan-display.service" in entry for entry in entries[1:])
     assert all(path.exists() for path in _managed_artifacts(sandbox))
 
 
@@ -1195,6 +1205,7 @@ def test_fake_vt_lifecycle_runs_cleanup_only_after_tty_marker(tmp_path: Path) ->
     assert no_marker_cleanup.returncode == 0
     assert not log.exists()
     marker.write_text("tty4\n")
+    active_tty.write_text("tty4\n")
     _fake_command(sandbox / "usr/bin/chvt", "exit 1\n")
     failed_cleanup = subprocess.run(["sh", str(cleanup)], env=environment, text=True, capture_output=True, check=False)
     assert failed_cleanup.returncode == 1
@@ -1205,7 +1216,7 @@ def test_fake_vt_lifecycle_runs_cleanup_only_after_tty_marker(tmp_path: Path) ->
     assert not marker.exists()
 
 
-def test_cleanup_retries_dealloc_after_tty8_carriage_return(tmp_path: Path) -> None:
+def test_cleanup_recovers_selection_after_failed_normal_dealloc(tmp_path: Path) -> None:
     clone = _clone(tmp_path)
     sandbox = _sandbox(tmp_path)
     assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
@@ -1214,16 +1225,22 @@ def test_cleanup_retries_dealloc_after_tty8_carriage_return(tmp_path: Path) -> N
     marker = sandbox / "run/dgx-fan-display-tty8"
     marker.parent.mkdir()
     marker.write_text("tty3\n")
-    tty8 = sandbox / "dev/tty8"
-    tty8.parent.mkdir()
-    tty8.write_text("")
+    active_tty = sandbox / "sys/class/tty/tty0/active"
+    active_tty.parent.mkdir(parents=True)
+    active_tty.write_text("tty3\n")
+    return_console = sandbox / "dev/tty3"
+    return_console.parent.mkdir()
+    return_console.write_text("")
+    _fake_command(sandbox / "usr/bin/fuser", "exit 1\n")
+    _fake_command(sandbox / "usr/bin/python3", 'printf "python3 %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/retry.log"\n')
     cleanup = sandbox / "usr/local/libexec/dgx-fan-display-cleanup"
 
     result = subprocess.run(["sh", str(cleanup)], env=_environment(sandbox), text=True, capture_output=True, check=False)
     assert result.returncode == 0
     assert not marker.exists()
-    assert tty8.read_bytes() == b"\r"
-    assert (sandbox / "retry.log").read_text().splitlines() == ["chvt 3", "deallocvt 8", "deallocvt 8"]
+    assert (sandbox / "retry.log").read_text().splitlines()[:2] == ["chvt 3", "deallocvt 8"]
+    assert "python3 -I -S -c" in (sandbox / "retry.log").read_text()
+    assert (sandbox / "retry.log").read_text().splitlines()[-1] == "deallocvt 8"
 
 
 def test_cleanup_retains_marker_when_dealloc_retry_fails(tmp_path: Path) -> None:
@@ -1235,20 +1252,23 @@ def test_cleanup_retains_marker_when_dealloc_retry_fails(tmp_path: Path) -> None
     marker = sandbox / "run/dgx-fan-display-tty8"
     marker.parent.mkdir()
     marker.write_text("tty3\n")
-    tty8 = sandbox / "dev/tty8"
-    tty8.parent.mkdir()
-    tty8.write_text("")
+    active_tty = sandbox / "sys/class/tty/tty0/active"
+    active_tty.parent.mkdir(parents=True)
+    active_tty.write_text("tty3\n")
+    (sandbox / "dev").mkdir()
+    (sandbox / "dev/tty3").write_text("")
+    _fake_command(sandbox / "usr/bin/fuser", "exit 1\n")
+    _fake_command(sandbox / "usr/bin/python3", "exit 0\n")
     cleanup = sandbox / "usr/local/libexec/dgx-fan-display-cleanup"
 
     result = subprocess.run(["sh", str(cleanup)], env=_environment(sandbox), text=True, capture_output=True, check=False)
     assert result.returncode == 1
     assert marker.read_text() == "tty3\n"
-    assert tty8.read_bytes() == b"\r"
     assert (sandbox / "fail.log").read_text().splitlines() == ["chvt 3", "deallocvt 8", "deallocvt 8"]
     assert result.stderr
 
 
-def test_cleanup_retains_marker_when_tty8_write_fails(tmp_path: Path) -> None:
+def test_cleanup_retains_marker_when_selection_recovery_cannot_open_return_console(tmp_path: Path) -> None:
     clone = _clone(tmp_path)
     sandbox = _sandbox(tmp_path)
     assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
@@ -1257,8 +1277,11 @@ def test_cleanup_retains_marker_when_tty8_write_fails(tmp_path: Path) -> None:
     marker = sandbox / "run/dgx-fan-display-tty8"
     marker.parent.mkdir()
     marker.write_text("tty3\n")
-    tty8 = sandbox / "dev/tty8"
-    tty8.mkdir(parents=True)
+    active_tty = sandbox / "sys/class/tty/tty0/active"
+    active_tty.parent.mkdir(parents=True)
+    active_tty.write_text("tty3\n")
+    _fake_command(sandbox / "usr/bin/fuser", "exit 1\n")
+    _fake_command(sandbox / "usr/bin/python3", "exit 1\n")
     cleanup = sandbox / "usr/local/libexec/dgx-fan-display-cleanup"
 
     result = subprocess.run(["sh", str(cleanup)], env=_environment(sandbox), text=True, capture_output=True, check=False)
@@ -1266,6 +1289,44 @@ def test_cleanup_retains_marker_when_tty8_write_fails(tmp_path: Path) -> None:
     assert marker.read_text() == "tty3\n"
     assert (sandbox / "write-fail.log").read_text().splitlines() == ["chvt 3", "deallocvt 8"]
     assert result.stderr
+
+
+def test_cleanup_rejects_malformed_or_tty8_return_marker_without_deallocating(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    marker = sandbox / "run/dgx-fan-display-tty8"
+    marker.parent.mkdir()
+    cleanup = sandbox / "usr/local/libexec/dgx-fan-display-cleanup"
+    _fake_command(sandbox / "usr/bin/deallocvt", 'printf dealloc >> "$DGX_FAN_TEST_ROOT/dealloc.log"\n')
+
+    for value in ("tty8\n", "tty64\n", "tty3oops\n"):
+        marker.write_text(value)
+        result = subprocess.run(["sh", str(cleanup)], env=_environment(sandbox), text=True, capture_output=True, check=False)
+        assert result.returncode == 1
+        assert marker.read_text() == value
+    assert not (sandbox / "dealloc.log").exists()
+
+
+def test_cleanup_retains_marker_when_tty8_is_occupied(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    marker = sandbox / "run/dgx-fan-display-tty8"
+    marker.parent.mkdir()
+    marker.write_text("tty3\n")
+    active_tty = sandbox / "sys/class/tty/tty0/active"
+    active_tty.parent.mkdir(parents=True)
+    active_tty.write_text("tty3\n")
+    _fake_command(sandbox / "usr/bin/chvt", "exit 0\n")
+    _fake_command(sandbox / "usr/bin/deallocvt", "exit 1\n")
+    _fake_command(sandbox / "usr/bin/fuser", "printf '123' >&2\nexit 0\n")
+    cleanup = sandbox / "usr/local/libexec/dgx-fan-display-cleanup"
+
+    result = subprocess.run(["sh", str(cleanup)], env=_environment(sandbox), text=True, capture_output=True, check=False)
+    assert result.returncode == 1
+    assert marker.read_text() == "tty3\n"
+    assert "still occupied" in result.stderr
 
 
 def test_fake_manager_refuses_active_and_orders_restart(tmp_path: Path) -> None:
@@ -1284,11 +1345,11 @@ def test_fake_manager_refuses_active_and_orders_restart(tmp_path: Path) -> None:
     restarted = subprocess.run(["sh", str(manager), "restart"], env=environment, text=True, capture_output=True, check=False)
     assert restarted.returncode == 0, restarted.stderr
     entries = (sandbox / "manager.log").read_text().splitlines()
-    assert entries[:2] == [
+    assert entries[:3] == [
+        "systemctl show --property=LoadState --value dgx-fan-display.service",
         "systemctl stop dgx-fan-display.service",
         "systemctl show --property=LoadState --value dgx-fan-display.service",
     ]
-    assert entries[2] == "systemctl show --property=LoadState --value dgx-fan-display.service"
     assert entries[3] == "systemctl reset-failed dgx-fan-display.service"
     assert "--property=TimeoutStopSec=10s" in entries[-1]
     assert "--property=KillSignal=SIGUSR1" in entries[-1]
@@ -1317,7 +1378,7 @@ def test_fake_manager_covers_stale_start_refusals_stop_and_status(tmp_path: Path
         assert result.returncode == 0, result.stderr
     entries = (sandbox / "manager-coverage.log").read_text()
     assert entries.count("systemd-run ") == 2
-    assert "systemctl stop dgx-fan-display.service" in entries
+    assert "systemctl stop dgx-fan-display.service" not in entries
     assert "systemctl status --no-pager dgx-fan-display.service" in entries
 
 
@@ -1343,6 +1404,9 @@ def test_fake_manager_restart_cleans_stale_marker_in_one_action(tmp_path: Path) 
     marker = sandbox / "run/dgx-fan-display-tty8"
     marker.parent.mkdir()
     marker.write_text("tty2\n")
+    active_tty = sandbox / "sys/class/tty/tty0/active"
+    active_tty.parent.mkdir(parents=True)
+    active_tty.write_text("tty2\n")
     manager = sandbox / "usr/local/libexec/dgx-fan-display-manager"
     result = subprocess.run(["sh", str(manager), "restart"], env=_environment(sandbox), text=True, capture_output=True, check=False)
     assert result.returncode == 0, result.stderr

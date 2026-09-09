@@ -94,6 +94,14 @@ sudo journalctl -u dgx-fan-display.service --no-pager
 
 transient display 프로세스는 tty8에서 동작하므로 SSH가 끊겨도 유지됩니다. `shutdown_mode = "off"`에서는 **Ctrl+Q**, `./scripts/display.sh stop`, `./scripts/display.sh restart`의 stop 단계가 clean-stop 경로를 사용해 0% duty를 명령합니다. 처리 가능한 비정상 종료에는 full-duty fail-safe가 적용되고, SIGKILL과 전원 손실은 cleanup을 실행할 수 없어 마지막 duty가 유지될 수 있습니다. display가 실행 중일 때 두 번째 `./scripts/start.sh`를 실행하지 마세요. hardware-owner lock이 기존 앱을 멈추지 않고 두 번째 실행을 거부합니다. `uv run dgx-fan --config config.toml`과 `uvx`는 현재 터미널의 foreground 명령입니다.
 
+관리된 tty8 cleanup이 busy이면 설치된 helper는 먼저 기록된 tty8 이외 콘솔로 돌아가 일반 deallocation을 다시 시도합니다. 자체 유효 marker, 안전한 active console 확인, 비어 있는 tty8이 모두 충족될 때만 bounded no-reboot selection recovery를 수행합니다. 실패는 표시되고 marker는 보존됩니다. recovery는 return console의 text selection을 잠시 바꾼 뒤 숨길 수 있으며 tty holder를 종료하지 않습니다. 재시도 전 올바른 clone에서 helper를 적용하세요:
+
+```bash
+./install.sh --no-launch
+./scripts/display.sh stop
+./scripts/display.sh start
+```
+
 ## 브라우저 모니터와 신뢰된 LAN 제어
 
 선택적 브라우저 화면은 RPM, 그래프, 게이지와 controller 기준 설정을 포함한 같은 Textual `DGX Dashboard`, `Fan Control` 탭을 표시합니다. 기본은 **READ ONLY**입니다. 브라우저 renderer는 어떤 모드에서도 GPIO/PWM 소유권을 얻지 않습니다.

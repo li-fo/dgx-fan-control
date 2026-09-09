@@ -143,15 +143,17 @@ if problems:
 }
 
 check_platform() {
-    [[ -n "$TEST_ROOT" ]] && return
+    if [[ -z "$TEST_ROOT" ]]; then
     [[ -r /proc/device-tree/model ]] || fail 'this installer must run on Raspberry Pi OS'
     local model
     model=$(tr -d '\000' </proc/device-tree/model)
     [[ "$model" == *'Raspberry Pi 4'* ]] || fail "unsupported platform (Raspberry Pi 4 required): $model"
     command -v raspi-config >/dev/null 2>&1 || fail 'raspi-config is required for tty1 console auto-login'
     command -v visudo >/dev/null 2>&1 || fail 'visudo is required to validate the sudoers policy'
-    for required_tool in systemctl systemd-run openvt runuser chvt deallocvt; do
-        command -v "$required_tool" >/dev/null 2>&1 || fail "$required_tool is required for physical-display integration"
+    fi
+    local required_path
+    for required_path in /usr/bin/systemctl /usr/bin/systemd-run /usr/bin/openvt /usr/sbin/runuser /usr/bin/chvt /usr/bin/deallocvt /usr/bin/fuser /usr/bin/python3; do
+        [[ -x "$(target_path "$required_path")" ]] || fail "${required_path##*/} is required for physical-display integration"
     done
 }
 
@@ -242,7 +244,7 @@ EOF
 }
 
 write_display_helpers() {
-    local manager session acquired cleanup rendered project_quoted user_quoted marker_quoted tty_active_quoted tty8_quoted openvt_quoted runuser_quoted chvt_quoted deallocvt_quoted systemctl_quoted systemd_run_quoted acquired_quoted cleanup_quoted session_quoted
+    local manager session acquired cleanup rendered project_quoted user_quoted marker_quoted tty_active_quoted return_console_prefix_quoted openvt_quoted runuser_quoted chvt_quoted deallocvt_quoted fuser_quoted python3_quoted systemctl_quoted systemd_run_quoted acquired_quoted cleanup_quoted session_quoted
     manager=$(target_path "/usr/local/libexec/$DISPLAY_MANAGER_NAME")
     session=$(target_path "/usr/local/libexec/$DISPLAY_SESSION_NAME")
     acquired=$(target_path "/usr/local/libexec/$DISPLAY_TTY_ACQUIRED_NAME")
@@ -251,11 +253,13 @@ write_display_helpers() {
     user_quoted=$(posix_quote "$INSTALL_USER")
     marker_quoted=$(posix_quote "$(target_path /run/dgx-fan-display-tty8)")
     tty_active_quoted=$(posix_quote "$(target_path /sys/class/tty/tty0/active)")
-    tty8_quoted=$(posix_quote "$(target_path /dev/tty8)")
+    return_console_prefix_quoted=$(posix_quote "$(target_path /dev/tty)")
     openvt_quoted=$(posix_quote "$(target_path /usr/bin/openvt)")
     runuser_quoted=$(posix_quote "$(target_path /usr/sbin/runuser)")
     chvt_quoted=$(posix_quote "$(target_path /usr/bin/chvt)")
     deallocvt_quoted=$(posix_quote "$(target_path /usr/bin/deallocvt)")
+    fuser_quoted=$(posix_quote "$(target_path /usr/bin/fuser)")
+    python3_quoted=$(posix_quote "$(target_path /usr/bin/python3)")
     systemctl_quoted=$(posix_quote "$(target_path /usr/bin/systemctl)")
     systemd_run_quoted=$(posix_quote "$(target_path /usr/bin/systemd-run)")
     acquired_quoted=$(posix_quote "$acquired")
@@ -312,16 +316,62 @@ set -eu
 marker=$marker_quoted
 chvt=$chvt_quoted
 deallocvt=$deallocvt_quoted
-tty8=$tty8_quoted
+fuser=$fuser_quoted
+python3=$python3_quoted
+tty_active=$tty_active_quoted
+return_console_prefix=$return_console_prefix_quoted
 if [ -L "\$marker" ] || { [ -e "\$marker" ] && [ ! -f "\$marker" ]; }; then
     echo "unsafe tty8 ownership marker: \$marker" >&2; exit 1
 fi
 if [ -f "\$marker" ]; then
     previous_vt=\$(cat "\$marker" 2>/dev/null || true)
-    case "\$previous_vt" in tty[1-9]|tty[1-9][0-9]*) ;; *) echo "invalid tty8 ownership marker" >&2; exit 1;; esac
+    case "\$previous_vt" in tty[1-9]|tty[1-5][0-9]|tty6[0-3]) ;; *) echo "invalid tty8 ownership marker" >&2; exit 1;; esac
+    [ "\$previous_vt" != tty8 ] || { echo "unsafe tty8 return marker" >&2; exit 1; }
     "\$chvt" "\${previous_vt#tty}" || exit 1
-    if ! "\$deallocvt" 8 2>/dev/null; then
-        printf '\r' >"\$tty8" || exit 1
+    switch_count=0
+    while [ "\$switch_count" -lt 20 ]; do
+        active_vt=\$(cat "\$tty_active" 2>/dev/null || true)
+        [ "\$active_vt" = "\$previous_vt" ] && break
+        sleep 0.1
+        switch_count=\$((switch_count + 1))
+    done
+    [ "\${active_vt:-}" = "\$previous_vt" ] || { echo "return console did not become active" >&2; exit 1; }
+    if ! "\$deallocvt" 8 >/dev/null 2>&1; then
+        occupancy_count=0
+        while :; do
+            if fuser_output=\$("\$fuser" "$(target_path /dev/tty8)" 2>&1); then
+                fuser_status=0
+            else
+                fuser_status=\$?
+            fi
+            if [ "\$fuser_status" -eq 1 ] && [ -z "\$fuser_output" ]; then
+                break
+            fi
+            if [ "\$fuser_status" -ne 0 ]; then
+                echo "cannot inspect tty8 occupancy: \$fuser_output" >&2; exit 1
+            fi
+            [ "\$occupancy_count" -lt 20 ] || { echo "tty8 is still occupied; refusing selection recovery" >&2; exit 1; }
+            sleep 0.1
+            occupancy_count=\$((occupancy_count + 1))
+        done
+        return_console="\${return_console_prefix}\${previous_vt#tty}"
+        echo "retrying tty8 deallocation after selection recovery" >&2
+        "\$python3" -I -S -c '
+import fcntl
+import os
+import struct
+import sys
+
+console, active_path, expected_vt = sys.argv[1:]
+if open(active_path, encoding="ascii").read().strip() != expected_vt:
+    raise SystemExit("return console is no longer active")
+fd = os.open(console, os.O_RDWR | os.O_NOCTTY | os.O_CLOEXEC)
+try:
+    for mode in (3, 4):
+        fcntl.ioctl(fd, 0x541C, struct.pack("=B5H", 2, 1, 1, 1, 1, mode))
+finally:
+    os.close(fd)
+' "\$return_console" "\$tty_active" "\$previous_vt" || exit 1
         "\$deallocvt" 8 || exit 1
     fi
     rm -f -- "\$marker"
@@ -342,14 +392,26 @@ session=$session_quoted
 cleanup=$cleanup_quoted
 systemctl=$systemctl_quoted
 systemd_run=$systemd_run_quoted
+load_state() {
+  state=\$("\$systemctl" show --property=LoadState --value "\$unit") || {
+    echo "cannot inspect \$unit load state" >&2; return 1
+  }
+  printf '%s\n' "\$state"
+}
 wait_unloaded() {
   count=0
   while [ "\$count" -lt 20 ]; do
-    [ "\$("\$systemctl" show --property=LoadState --value "\$unit" 2>/dev/null || true)" = not-found ] && return 0
+    [ "\$(load_state)" = not-found ] && return 0
     sleep 0.1
     count=\$((count + 1))
   done
   echo "timed out waiting for \$unit to unload" >&2; return 1
+}
+stop_display() {
+  state=\$(load_state) || return 1
+  [ "\$state" = not-found ] && return 0
+  "\$systemctl" stop "\$unit"
+  wait_unloaded
 }
 run_cleanup() {
   "\$cleanup"
@@ -360,23 +422,20 @@ case "\${1:-}" in
     state=\$("\$systemctl" is-active "\$unit" 2>/dev/null || true)
     case "\$state" in active|activating|deactivating|reloading) echo "dgx-fan display is already \$state" >&2; exit 1;; esac
     "\$systemctl" reset-failed "\$unit" >/dev/null 2>&1 || true
-    "\$systemctl" stop "\$unit" >/dev/null 2>&1 || true
-    wait_unloaded
+    stop_display
     run_cleanup
     exec "\$systemd_run" --quiet --collect --service-type=exec --unit=dgx-fan-display --property=KillSignal=SIGUSR1 --property=TimeoutStopSec=10s --property=ExecStopPost="\$cleanup" "\$session"
     ;;
   restart)
     [ "\$#" -eq 1 ] || exit 64
-    "\$systemctl" stop "\$unit" >/dev/null 2>&1 || true
-    wait_unloaded
+    stop_display
     run_cleanup
     "\$systemctl" reset-failed "\$unit" >/dev/null 2>&1 || true
     exec "\$systemd_run" --quiet --collect --service-type=exec --unit=dgx-fan-display --property=KillSignal=SIGUSR1 --property=TimeoutStopSec=10s --property=ExecStopPost="\$cleanup" "\$session"
     ;;
   stop)
     [ "\$#" -eq 1 ] || exit 64
-    "\$systemctl" stop "\$unit" || true
-    wait_unloaded
+    stop_display
     run_cleanup
     ;;
   status)

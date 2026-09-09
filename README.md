@@ -94,6 +94,14 @@ sudo journalctl -u dgx-fan-display.service --no-pager
 
 The transient display process runs on tty8 and continues after SSH disconnects. With `shutdown_mode = "off"`, **Ctrl+Q**, `./scripts/display.sh stop`, and the stop phase of `./scripts/display.sh restart` use the clean-stop path and command 0% duty. Handled abnormal termination uses the full-duty fail-safe; SIGKILL and power loss cannot run cleanup and may preserve the last duty. Do not start a second foreground `./scripts/start.sh` while the display is active; the hardware-owner lock rejects it without stopping the running app. `uv run dgx-fan --config config.toml` and `uvx` remain foreground terminal commands.
 
+If a managed tty8 cleanup is busy, the installed helper first returns to the recorded non-tty8 console and retries normal deallocation. Only its own valid marker, a confirmed safe active console, and an unoccupied tty8 permit bounded no-reboot selection recovery; failure remains visible and preserves the marker. Recovery can briefly change and then hide text selection on the return console; it never kills tty holders. Apply the updated helper from the correct clone before retrying:
+
+```bash
+./install.sh --no-launch
+./scripts/display.sh stop
+./scripts/display.sh start
+```
+
 ## Browser monitor and trusted-LAN control
 
 The optional browser view renders the same Textual `DGX Dashboard` and `Fan Control` tabs, including RPM, charts, gauges, and controller-authoritative settings. It is **READ ONLY by default**: browser visitors cannot toggle fans or change configuration, and the renderer never acquires GPIO/PWM ownership.
