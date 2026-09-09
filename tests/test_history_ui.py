@@ -151,6 +151,58 @@ def test_history_endpoint_zoom_pan_now_resize_and_pending_request_cancellation()
     asyncio.run(exercise())
 
 
+def test_history_loading_indicator_tracks_current_request_without_status_churn() -> None:
+    first_stale_release = asyncio.Event()
+    second_release = asyncio.Event()
+    calls: list[str] = []
+
+    async def query(endpoint_id: str, start: float, end: float, width: int) -> dict[str, object]:
+        calls.append(endpoint_id)
+        if endpoint_id == "one":
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # Emulate a client that returns after cancellation. Its stale
+                # completion must not clear the newer endpoint's indicator.
+                await first_stale_release.wait()
+                return _result(endpoint_id, start, end, width)
+        await second_release.wait()
+        return _result(endpoint_id, start, end, width)
+
+    class HistoryOnlyApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield HistoryPanel(_endpoints(), query)
+
+    app = HistoryOnlyApp()
+
+    async def exercise() -> None:
+        async with app.run_test(size=(128, 37)) as pilot:
+            panel = app.query_one(HistoryPanel)
+            loading = app.query_one("#history-loading")
+            status = app.query_one("#history-status")
+            panel.activate()
+            await pilot.pause()
+            assert calls == ["one"] and loading.render().plain == "[*]"
+            assert "Loading history" not in status.render().plain
+            app.query_one("#history-endpoint-1", Button).press()
+            await asyncio.sleep(0.1)
+            await pilot.pause()
+            assert calls[-1] == "two" and loading.render().plain == "[*]"
+            first_stale_release.set()
+            await pilot.pause()
+            assert loading.render().plain == "[*]"
+            panel.deactivate()
+            assert loading.render().plain == "   "
+            panel.activate()
+            await pilot.pause()
+            assert loading.render().plain == "[*]"
+            second_release.set()
+            await pilot.pause()
+            assert loading.render().plain == "   "
+
+    asyncio.run(exercise())
+
+
 def test_history_live_timer_stops_inactive_and_drag_uses_screen_coordinates() -> None:
     calls = 0
 
@@ -317,7 +369,9 @@ def test_history_compact_layout_keeps_all_charts_visible_after_real_app_resizes(
                 app.query_one("#history-zoom-out", Button),
                 app.query_one("#history-zoom-in", Button),
             )
+            loading = app.query_one("#history-loading")
             assert all(button.region.height == 1 and button.region.width > 0 for button in controls)
+            assert loading.region.width == loading.content_size.width == 3 and loading.region.height == 1
             before = panel.span_index
             controls[-1].press()
             await pilot.pause()
@@ -440,6 +494,7 @@ def test_history_query_exception_is_visible_in_panel_status() -> None:
             panel.activate()
             await pilot.pause()
             assert "History unavailable: database corrupt" in app.query_one("#history-status").render().plain
+            assert app.query_one("#history-loading").render().plain == "   "
             panel.deactivate()
 
     asyncio.run(exercise())

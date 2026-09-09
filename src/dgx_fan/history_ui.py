@@ -180,6 +180,7 @@ class HistoryPanel(Vertical):
     #history-controls Button:hover, #history-controls Button.-active {
         border: none !important;
     }
+    #history-loading { width: 3; min-width: 3; content-align: center middle; }
     #history-range { width: 8; content-align: center middle; }
     #history-status { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
     #history-plots { height: 1fr; }
@@ -220,6 +221,9 @@ class HistoryPanel(Vertical):
                     id=self._endpoint_button_ids[index],
                     classes="history-endpoint",
                 )
+            # Keep the three cells allocated so queries don't move the zoom
+            # controls. ASCII is intentional for the physical Linux console.
+            yield Static("   ", id="history-loading", markup=False)
             yield Static(id="history-spacer")
             yield Button("-", id="history-zoom-out")
             yield Static("1 hour", id="history-range")
@@ -261,13 +265,19 @@ class HistoryPanel(Vertical):
         self._mounted_active = False
         self._stop_timers()
         self._cancel_request()
+        self._set_loading(False)
 
     def on_mount(self) -> None:
         self._update_controls()
 
     def on_unmount(self) -> None:
+        # Some query clients can return a value after cancellation. Marking the
+        # panel inactive before cancelling keeps those completions from trying
+        # to update a widget tree that has already been removed.
+        self._mounted_active = False
         self._stop_timers()
         self._cancel_request()
+        self._set_loading(False)
 
     def on_resize(self) -> None:
         if self._mounted_active:
@@ -361,7 +371,6 @@ class HistoryPanel(Vertical):
             self.end = time()
         self._clamp_window()
         self._update_controls()
-        self._set_status("Loading history…")
         try:
             chart = self.query_one("#history-memory-chart", HistoryChart)
         except NoMatches:
@@ -370,6 +379,7 @@ class HistoryPanel(Vertical):
         self._request_generation += 1
         generation = self._request_generation
         self._cancel_request()
+        self._set_loading(True)
         self._request = create_task(self._load(generation, self.endpoint_id, self.end - ZOOM_SPANS[self.span_index], self.end, width))
 
     def _queue_refresh(self) -> None:
@@ -434,6 +444,7 @@ class HistoryPanel(Vertical):
             self._apply_unavailable(generation, start, end, "History unavailable: invalid response")
             return
         status_text = _safe_text(status) if isinstance(status, str) else "History ready"
+        self._set_loading(False)
         self._set_status(status_text)
         for metric, _, _, _, _ in METRICS:
             values = series.get(metric)
@@ -459,6 +470,7 @@ class HistoryPanel(Vertical):
         except NoMatches:
             return
         width = max(1, chart.content_size.width)
+        self._set_loading(False)
         self._set_status(status)
         for metric, _, _, _, _ in METRICS:
             self.query_one(f"#history-{metric}-chart", HistoryChart).update_series([None] * width, start, end, status)
@@ -469,6 +481,13 @@ class HistoryPanel(Vertical):
             self.query_one("#history-status", Static).update(
                 Text(_safe_text(status), no_wrap=True, overflow="ellipsis")
             )
+        except NoMatches:
+            pass
+
+    def _set_loading(self, loading: bool) -> None:
+        """Update the reserved indicator only for the current request lifecycle."""
+        try:
+            self.query_one("#history-loading", Static).update("[*]" if loading else "   ")
         except NoMatches:
             pass
 
