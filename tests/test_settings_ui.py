@@ -392,6 +392,7 @@ def test_existing_custom_colors_are_preserved_until_explicitly_replaced() -> Non
         "memory": "#123456",
         "utilization": "deep_sky_blue3",
         "temperature": "red",
+        "power": "ansi_green",
     }
 
 

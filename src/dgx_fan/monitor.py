@@ -292,6 +292,7 @@ def encode_state(state: MonitorState) -> bytes:
                 "memory": state.dashboard_colors.memory,
                 "utilization": state.dashboard_colors.utilization,
                 "temperature": state.dashboard_colors.temperature,
+                "power": state.dashboard_colors.power,
             }
         ),
         "power_enabled": state.power_enabled,
@@ -333,6 +334,7 @@ def decode_state(encoded: bytes, collection_interval_seconds: float) -> MonitorS
             _optional_string(colors_mapping.get("memory"), "dashboard_colors.memory"),
             _optional_string(colors_mapping.get("utilization"), "dashboard_colors.utilization"),
             _optional_string(colors_mapping.get("temperature"), "dashboard_colors.temperature"),
+            _optional_string(colors_mapping.get("power", "ansi_green"), "dashboard_colors.power"),
         )
     settings_revision_raw = mapping.get("settings_revision")
     settings_revision = (

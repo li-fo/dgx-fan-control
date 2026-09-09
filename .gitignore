@@ -132,3 +132,6 @@ docs/tmp/*
 config.toml
 config.dev.toml
 *.toml.bak
+
+# Persistent local History store and SQLite sidecars
+data/history.sqlite3*

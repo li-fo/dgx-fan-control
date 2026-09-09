@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 from collections import defaultdict
+from collections.abc import Callable
 
 import httpx
 from prometheus_client.parser import text_string_to_metric_families
@@ -24,6 +25,8 @@ _METRICS = {
     "DCGM_FI_DEV_FB_FREE": "memory_free_mib",
     "DCGM_FI_DEV_FB_RESERVED": "memory_reserved_mib",
 }
+
+ArchiveCallback = Callable[[EndpointConfig, str | None, str | None], None]
 def _valid(value: float, metric: str) -> bool:
     if not math.isfinite(value) or value in _SENTINELS:
         return False
@@ -70,9 +73,11 @@ class DCGMCollector(CollectorStateMixin[tuple[GPUStat, ...]]):
         stale_after_seconds: float,
         retry_count: int = 0,
         retry_delay_seconds: float = 10.0,
+        archive_callback: ArchiveCallback | None = None,
     ) -> None:
         self.endpoints, self.timeout, self.stale_after = endpoints, timeout_seconds, stale_after_seconds
         self.retry_count, self.retry_delay_seconds = retry_count, retry_delay_seconds
+        self._archive_callback = archive_callback
         self._last_good: dict[str, tuple[float, tuple[GPUStat, ...]]] = {}
         self._errors: dict[str, str | None] = {}
         self._retrying: dict[str, int] = {}
@@ -98,14 +103,20 @@ class DCGMCollector(CollectorStateMixin[tuple[GPUStat, ...]]):
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
                     response = await client.get(endpoint.url)
                 if response.status_code in {408, 429} or 500 <= response.status_code <= 599:
+                    self._archive(endpoint, None, f"HTTP {response.status_code}")
                     raise _RetryableHTTPStatus(response.status_code)
+                if response.is_error:
+                    self._archive(endpoint, None, f"HTTP {response.status_code}")
                 response.raise_for_status()
+                self._archive(endpoint, response.text, None)
                 gpus = parse_metrics(endpoint.id, endpoint.name, response.text)
                 if not gpus:
                     raise ValueError("no usable GPU data")
             except asyncio.CancelledError:
                 raise
             except (httpx.TransportError, _RetryableHTTPStatus) as error:
+                if isinstance(error, httpx.TransportError):
+                    self._archive(endpoint, None, str(error))
                 if attempt < self.retry_count:
                     # retry_attempt is one-based from the operator's point of
                     # view: it identifies the next extra attempt to be made.
@@ -172,6 +183,18 @@ class DCGMCollector(CollectorStateMixin[tuple[GPUStat, ...]]):
         """Publish an unexpected task-level failure without affecting peers."""
         message = str(error) or type(error).__name__
         self._record_failure(endpoint.id, f"collector failure: {message}", 0)
+
+    def _archive(
+        self, endpoint: EndpointConfig, text: str | None, error: str | None
+    ) -> None:
+        if self._archive_callback is None:
+            return
+        try:
+            self._archive_callback(endpoint, text, error)
+        except Exception:  # noqa: BLE001 - storage failure must not alter fan safety.
+            # Persistent history is advisory; it must not affect endpoint
+            # health, retry state, or the controller's fail-safe policy.
+            return
 
 
 class _RetryableHTTPStatus(Exception):

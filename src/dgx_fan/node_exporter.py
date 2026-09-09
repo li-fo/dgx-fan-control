@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 from collections import defaultdict
+from collections.abc import Callable
 
 import httpx
 from prometheus_client.parser import text_string_to_metric_families
@@ -13,6 +14,8 @@ from .models import MemoryStat, NodeMemorySnapshot
 
 _REQUIRED = {"node_memory_MemTotal_bytes", "node_memory_MemAvailable_bytes"}
 _SIGNED_64_MAX = 9223372036854775807
+
+ArchiveCallback = Callable[[EndpointConfig, str | None, str | None], None]
 
 
 def parse_memory_metrics(text: str) -> MemoryStat:
@@ -56,9 +59,11 @@ class NodeExporterCollector(CollectorStateMixin[MemoryStat]):
         stale_after_seconds: float,
         retry_count: int = 0,
         retry_delay_seconds: float = 10.0,
+        archive_callback: ArchiveCallback | None = None,
     ) -> None:
         self.endpoints, self.timeout, self.stale_after = endpoints, timeout_seconds, stale_after_seconds
         self.retry_count, self.retry_delay_seconds = retry_count, retry_delay_seconds
+        self._archive_callback = archive_callback
         self._last_good: dict[str, tuple[float, MemoryStat]] = {}
         self._errors: dict[str, str | None] = {}
         self._retrying: dict[str, int] = {}
@@ -74,12 +79,18 @@ class NodeExporterCollector(CollectorStateMixin[MemoryStat]):
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
                     response = await client.get(endpoint.node_exporter_url)
                 if response.status_code in {408, 429} or 500 <= response.status_code <= 599:
+                    self._archive(endpoint, None, f"HTTP {response.status_code}")
                     raise _RetryableHTTPStatus(response.status_code)
+                if response.is_error:
+                    self._archive(endpoint, None, f"HTTP {response.status_code}")
                 response.raise_for_status()
+                self._archive(endpoint, response.text, None)
                 memory = parse_memory_metrics(response.text)
             except asyncio.CancelledError:
                 raise
             except (httpx.TransportError, _RetryableHTTPStatus) as error:
+                if isinstance(error, httpx.TransportError):
+                    self._archive(endpoint, None, str(error))
                 if attempt < self.retry_count:
                     self._record_retry_wait(endpoint.id, attempt)
                     await asyncio.sleep(self.retry_delay_seconds)
@@ -127,6 +138,18 @@ class NodeExporterCollector(CollectorStateMixin[MemoryStat]):
             f"collector failure: {str(error) or type(error).__name__}",
             0,
         )
+
+    def _archive(
+        self, endpoint: EndpointConfig, text: str | None, error: str | None
+    ) -> None:
+        if self._archive_callback is None:
+            return
+        try:
+            self._archive_callback(endpoint, text, error)
+        except Exception:  # noqa: BLE001 - archive isolation is intentional.
+            # Node memory remains display-only and history failures must not
+            # alter its collector state or DCGM fan safety.
+            return
 
 
 class _RetryableHTTPStatus(Exception):

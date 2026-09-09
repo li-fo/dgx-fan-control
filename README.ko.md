@@ -160,6 +160,14 @@ clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 
 브라우저 client는 현재 120초 그래프 이력, 적용된 색상·주기, settings revision, 요청 전원이 포함된 완전한 versioned replacement snapshot을 받습니다. Settings와 power는 fresh하고 compatible한 controller frame이 확인된 뒤에만 활성화되며, legacy frame, 연결 끊김, controller identity 변경 또는 publisher stall에서는 다시 비활성화됩니다. 오래된 revision은 무시하며 malformed, publish error, 연결 끊김 또는 publisher stall 데이터는 정상 telemetry로 취급하지 않고 monitor-stream 상태로 표시합니다. Controller 종료 시 새 mutation과 listener를 먼저 닫고 hardware에 fail-safe full duty를 명령한 다음, 이미 승인된 persistence를 제한된 시간 동안만 조정합니다. Kernel-uninterruptible filesystem I/O는 process exit와 최종 clean-`off` release를 지연시킬 수 있지만 그 전에 수행되는 safe-full duty 명령은 지연시키지 않습니다. Browser의 시작·중지·재연결 또는 **Ctrl+Q**는 해당 renderer에만 영향을 주며 primary controller를 중지하지 않습니다. textual-serve의 launch page를 건너뛰려면 `?delay` 없이 served URL을 여세요.
 
+### History
+
+공유 **History** 탭은 active configuration 옆 `data/history.sqlite3`에 최대 8일의 original DCGM 및 설정된 node-exporter response를 보관합니다. Primary controller만 writer이며 local과 browser view는 선택한 endpoint, UTC range, 제한된 chart width만 요청합니다. Browser History는 `web.allow_control = false`여도 read-only로 사용할 수 있고, 별도 collector를 시작하거나 8일 raw data를 live monitor stream으로 받지 않습니다.
+
+Memory, UTIL, temperature, GPU power는 누락 sample을 gap으로 표시합니다. Exporter가 complete physical-GPU value를 제공하지 못하면 GPU power는 **N/A**입니다. Queue, storage, query warning은 History에 표시되며 fan control을 중지하지 않습니다. Database와 SQLite sidecar는 Git에서 무시되고 restart, install, uninstall 후에도 보존됩니다. 저장된 history를 의도적으로 폐기할 때만 직접 제거하세요.
+
+History에서 DGX endpoint를 선택하세요. 기본값은 최근 1시간이며 **+**/**−**로 1분, 10분, 1시간, 6시간, 1일, 8일을 선택하고 drag 또는 arrow key로 pan할 수 있습니다. **Now**를 선택하면 live following으로 돌아갑니다. Raw `DCGM_*`와 설정된 `node_memory_*` response만 collection cadence로 store에 기록됩니다. 각 column에서 Memory는 mean이며 UTIL, temperature, physical-GPU power 합계는 maximum입니다. 정확한 8일 cutoff는 startup과 매 1분마다 유지되며 cleanup은 chunk 단위이므로 앱이 중간에 종료되면 다음 start에서 이어집니다. Database 크기는 exporter response cardinality와 gap에 따라 달라집니다.
+
 ### Collection
 
 | 항목 | 의미와 검증 조건 |
@@ -185,9 +193,18 @@ clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 | `control.emergency_temperature_celsius` | 필수 유한 수 `>= 0`입니다. 유효 GPU 온도 하나라도 이 값 이상이면 두 팬이 fallback으로 전환됩니다. |
 | `control.recovery_seconds` | 필수 유한 수 `>= 0`입니다. 아래에 설명한 safety recovery dwell 시간입니다. |
 
-DCGM endpoint unavailable/stale, 매핑된 GPU 온도 누락, fan stall, 비상 온도에서는 두 팬 모두 safety override가 적용됩니다. 이 상태는 UI Off보다 우선합니다. 복구 가능한 safety 조건이 해제된 뒤에도 모든 유효 GPU의 최고 온도가 `emergency_temperature_celsius - hysteresis_celsius`보다 낮은 상태를 `recovery_seconds` 동안 연속 유지해야 자동 제어로 복귀합니다. 이 dwell은 일반 stage 전환에는 적용되지 않습니다. stall된 팬은 앱을 재시작할 때까지 unsafe 상태로 유지됩니다.
-
 **Setting > Fan Control**에서 **Independent** 또는 **Linked (higher demand)**를 고르고 **Save and Apply**를 누르면 저장 및 즉시 적용됩니다. 이 mode만 바꾸면 endpoint mapping, endpoint별 stage/hysteresis, safety/boost 상태는 유지되고 다음 evaluation에서 출력 coordination만 바뀝니다. `config.toml`을 직접 편집하면 controller 재시작이 필요합니다. normal cap은 linked demand를 비교하기 전에 계속 적용되고, safety fallback은 이 cap과 독립적입니다. 두 editor가 같은 setting을 보이도록 updated controller와 display/web monitor 코드를 함께 실행하세요.
+
+#### Safety override
+
+Safety override는 normal control과 UI Off보다 우선합니다. independent와 linked mode 모두에서 `max_speed_percent`를 적용하지 않고 **두** 팬을 `fallback_speed_percent`(기본값 `100`)로 구동합니다. 화면에 표시되는 reason은 다음 중 하나입니다.
+
+- `endpoint unavailable`: 설정된 DCGM endpoint에 prior sample이 없거나(첫 sample 전 포함), stale 상태이거나, terminal collection error가 있습니다. retry 중에는 fresh prior sample을 계속 사용할 수 있으므로 모든 일시적인 request failure가 즉시 fallback을 작동시키지는 않지만, terminal error는 cache가 fresh여도 fallback을 작동시킵니다.
+- `no valid GPU temperature`: 어느 한 팬의 mapped endpoint에 유효한 GPU temperature가 없습니다.
+- `fan stalled`: 이전 duty가 양수인 fan에 tach가 없어 한 번의 tach-retry startup boost를 사용한 뒤, 다음 `stall_timeout_seconds` 동안에도 tach가 없습니다. 이 latch는 앱을 재시작할 때까지 unsafe 상태이며 Off 또는 settings 저장으로 해제되지 않습니다. 재시작하기 전에 fan과 wiring을 점검하세요.
+- `emergency temperature`: unmapped endpoint를 포함해 수집된 유효 GPU temperature 하나라도 `emergency_temperature_celsius` 이상입니다.
+
+node exporter failure는 선택적인 memory display에만 영향을 주며 이 override를 작동시키지 않습니다. `STARTUP BOOST`는 safety reason이 아닌 별도의 normal-control state입니다. recovery 중에는 temperature boundary를 충족할 때까지 `safety recovery temperature`가 표시되고, timer가 동작하는 동안에는 `safety recovery dwell`이 표시됩니다. 모든 safety 조건이 해제된 후에도 유효 GPU temperature의 최고값이 `emergency_temperature_celsius - hysteresis_celsius`보다 **엄격히 낮은** 상태를 `recovery_seconds` 동안 연속 유지해야 하며, 중간에 조건이 깨지면 dwell이 다시 시작됩니다. 기본 emergency threshold 75°C, hysteresis 2°C, recovery 10초에서는 73°C **미만**을 10초 동안 유지해야 합니다. 이 dwell은 일반 stage 전환에는 적용되지 않습니다. `fallback_speed_percent`를 낮추면 emergency와 stalled-fan output도 함께 낮아지며, low-level PWM/GPIO failure는 별도의 full-speed recovery 동작을 유지합니다.
 
 #### `[[control.stages]]`: 4단계 온도 곡선
 

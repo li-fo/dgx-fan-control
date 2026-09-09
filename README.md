@@ -160,6 +160,14 @@ Direct operational scripts moved from the repository root to `scripts/`. Existin
 
 Browser clients receive a complete versioned replacement snapshot containing the current 120-second chart history, effective colors/cadence, settings revision, and requested power. Settings and power stay disabled until a fresh, compatible controller frame is present, and disable again on a legacy frame, disconnect, controller identity change, or publisher stall. Older revisions are ignored; malformed, publish-error, disconnected, or stalled monitor data is shown as a monitor-stream state rather than being treated as healthy telemetry. On controller shutdown, new mutations and listeners close before the hardware is commanded to fail-safe full duty; accepted persistence receives only a bounded reconciliation grace. Kernel-uninterruptible filesystem I/O can still delay process exit and the final clean-`off` release, but it does not postpone the preceding safe-full duty command. Starting, stopping, reconnecting, or pressing browser **Ctrl+Q** affects only that renderer and never stops the primary controller. Open the served URL without `?delay`; textual-serve connects automatically and replaces its launch page as soon as the monitor stream starts.
 
+### History
+
+The shared **History** tab retains up to eight days of original DCGM and configured node-exporter responses in `data/history.sqlite3` beside the active configuration. The primary controller is the sole writer; local and browser views request only a selected endpoint, UTC range, and bounded chart width. Browser history remains read-only and is available even when `web.allow_control = false`; it never starts another collector or receives eight days of raw data in the live monitor stream.
+
+Memory, UTIL, temperature, and GPU power are plotted with gaps for missing samples. GPU power is **N/A** when the exporter cannot provide a complete physical-GPU value. Queue, storage, or query warnings appear in History and do not stop fan control. The database and SQLite sidecars are ignored by Git and are preserved across restarts, install, and uninstall; remove them manually only when intentionally discarding stored history.
+
+Choose a DGX endpoint in History. It opens on the latest hour; use **+**/**−** for 1 minute, 10 minutes, 1 hour, 6 hours, 1 day, or 8 days, drag or use arrow keys to pan, and choose **Now** to resume live following. Raw `DCGM_*` and configured `node_memory_*` responses are filtered into the store at collection cadence. Per column, Memory is a mean and UTIL, temperature, and summed physical-GPU power are maxima. The exact eight-day cutoff is maintained on startup and once per minute; cleanup is chunked and resumes at the next start if the app exits mid-cleanup. Database size varies with exporter response cardinality and gaps.
+
 ### Collection
 
 | Field | Meaning and validation |
@@ -185,9 +193,18 @@ Each DGX is collected independently. A fresh cached sample can be used only unti
 | `control.emergency_temperature_celsius` | Required finite number `>= 0`. Any valid GPU temperature at or above it activates fallback for both fans. |
 | `control.recovery_seconds` | Required finite number `>= 0`. Safety-recovery dwell, described below. |
 
-Safety override applies to both fans for unavailable/stale DCGM endpoints, missing mapped GPU temperatures, a stalled fan, or emergency temperature. It overrides the UI Off control. After a recoverable safety condition clears, the maximum valid GPU temperature must remain below `emergency_temperature_celsius - hysteresis_celsius` continuously for `recovery_seconds` before automatic control resumes. This dwell is **not** used for ordinary stage changes. A stalled fan remains unsafe until the app is restarted.
-
 Select **Independent** or **Linked (higher demand)** in **Setting > Fan Control**, then **Save and Apply** to persist and apply it live. Changing only this mode retains endpoint mappings, per-endpoint stages/hysteresis, and safety/boost state; it changes output coordination on the next evaluation. Manual `config.toml` edits require a controller restart. The normal cap still applies before linked demands are compared; safety fallback remains independent of that cap. Run the updated controller and display/web monitor code together so both editors expose the same setting.
+
+#### Safety override
+
+Safety override has priority over normal control and UI Off. It drives **both** fans at `fallback_speed_percent` (default `100`), without applying `max_speed_percent`, in independent and linked modes. The displayed reason is one of:
+
+- `endpoint unavailable`: a configured DCGM endpoint has no prior sample (including before its first sample), is stale, or has a terminal collection error. A retry can continue to use a fresh prior sample; not every transient request failure immediately activates fallback, but a terminal error does even while a cache is fresh.
+- `no valid GPU temperature`: either fan's mapped endpoint has no valid GPU temperature.
+- `fan stalled`: a fan had positive duty with no tach, used its one tach-retry startup boost, then remained without tach for the next `stall_timeout_seconds`. This latch remains unsafe until the app is restarted; turning Off or saving settings does not clear it. Inspect the fan and wiring before restarting.
+- `emergency temperature`: any collected valid GPU temperature, including an unmapped endpoint, is at least `emergency_temperature_celsius`.
+
+Node exporter failure affects only the optional memory display and does not trigger this override. `STARTUP BOOST` is a separate normal-control state, not a safety reason. During recovery, the displayed reason is `safety recovery temperature` until the temperature boundary is met, then `safety recovery dwell` while the timer runs. After every safety condition clears, the maximum valid GPU temperature must remain **strictly below** `emergency_temperature_celsius - hysteresis_celsius` continuously for `recovery_seconds`; any interruption resets the dwell. With the default 75°C emergency threshold, 2°C hysteresis, and 10-second recovery, temperatures must stay below 73°C for 10 seconds. This dwell is **not** used for ordinary stage changes. Lowering `fallback_speed_percent` also lowers emergency and stalled-fan output; low-level PWM/GPIO failures retain their separate full-speed recovery behavior.
 
 #### `[[control.stages]]`: four-stage temperature curve
 

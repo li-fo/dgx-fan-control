@@ -518,6 +518,61 @@ def test_command_socket_end_to_end_opt_in_power_save_and_duplicate_scope(
     asyncio.run(exercise())
 
 
+def test_command_socket_serves_bounded_history_without_control_opt_in(tmp_path: Path) -> None:
+    async def query(endpoint_id: str, start: float, end: float, width: int) -> dict[str, object]:
+        assert (endpoint_id, start, end, width) == ("dgx-1", 10.0, 20.0, 4)
+        await asyncio.sleep(0.02)
+        return {
+            "endpoint_id": endpoint_id,
+            "start": start,
+            "end": end,
+            "now": 20.0,
+            "retention_start": 0.0,
+            "series": {key: [None] * width for key in ("memory", "utilization", "temperature", "power")},
+            "status": "",
+        }
+
+    async def exercise() -> None:
+        path = _config_path(tmp_path)
+        service, _power = _service(path, [])
+        socket_path = tmp_path / "history.sock"
+        server = SettingsCommandServer(socket_path, service, False, query)
+        server.ACK_TIMEOUT = 0.01
+        server.HISTORY_ACK_TIMEOUT = 0.1
+        await server.start()
+        try:
+            response = await _request(
+                socket_path,
+                {
+                    "version": 1,
+                    "operation": "read-history",
+                    "request_id": "history",
+                    "source_id": "",
+                    "endpoint_id": "dgx-1",
+                    "start": 10.0,
+                    "end": 20.0,
+                    "width": 4,
+                },
+            )
+            assert response["ok"] is True and response["series"]["power"] == [None] * 4
+            blocked = await _request(
+                socket_path,
+                {
+                    "version": 1,
+                    "operation": "set-power",
+                    "request_id": "blocked",
+                    "source_id": "controller-one",
+                    "revision": 0,
+                    "enabled": False,
+                },
+            )
+            assert blocked["ok"] is False and blocked["error"] == "PermissionError"
+        finally:
+            await server.close()
+
+    asyncio.run(exercise())
+
+
 def test_slow_accepted_save_returns_pending_then_same_request_gets_final_result(
     tmp_path: Path,
 ) -> None:

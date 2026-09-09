@@ -14,7 +14,8 @@ from textual.css.query import NoMatches
 from textual.widget import WidgetError
 from textual.widgets import Button, Footer, Header, Static, TabbedContent, TabPane
 
-from .config import DashboardColors
+from .config import DashboardColors, EndpointConfig
+from .history_ui import HistoryPanel, HistoryQuery
 from .models import ControlSnapshot, GPUStat, MemoryStat
 
 HISTORY_SECONDS = 120.0
@@ -282,6 +283,8 @@ class FanAppUI(Static):
         settings: Callable[[], None] | None = None,
         *,
         read_only: bool = False,
+        history_query: HistoryQuery | None = None,
+        history_endpoints: tuple[EndpointConfig, ...] = (),
     ) -> None:
         super().__init__()
         self.config_path, self.toggle, self.emergency_temperature = (
@@ -290,8 +293,11 @@ class FanAppUI(Static):
             emergency_temperature,
         )
         self.dashboard_colors = dashboard_colors or DashboardColors()
+        self.collection_interval_seconds = collection_interval_seconds
         self.settings = settings
         self.read_only = read_only
+        self.history_query = history_query
+        self.history_endpoints = history_endpoints
         self.snapshot: ControlSnapshot | None = None
         self.history = DashboardHistory(collection_interval_seconds)
         self.panels: dict[str, Static] = {}
@@ -327,6 +333,13 @@ class FanAppUI(Static):
                 with Horizontal(id="fan-gauge-row"):
                     yield FanGauge(1)
                     yield FanGauge(2)
+            with TabPane("History", id="history"):
+                yield HistoryPanel(
+                    self.history_endpoints,
+                    self.history_query,
+                    self.dashboard_colors,
+                    self.collection_interval_seconds,
+                )
         yield Footer()
 
     def update_snapshot(
@@ -448,6 +461,11 @@ class FanAppUI(Static):
         self.emergency_temperature = emergency_temperature
         self.dashboard_colors = dashboard_colors
         self.history.collection_interval_seconds = collection_interval_seconds
+        self.collection_interval_seconds = collection_interval_seconds
+        try:
+            self.query_one(HistoryPanel).reconfigure(dashboard_colors, collection_interval_seconds)
+        except NoMatches:
+            pass
         self.last_signature = None
         if self.snapshot is not None and self.last_render_time is not None:
             try:
@@ -472,6 +490,25 @@ class FanAppUI(Static):
                 )
             except NoMatches:
                 pass
+
+    def set_history_query(self, query: HistoryQuery | None) -> None:
+        """Set the controller-owned bounded history reader for the shared History tab."""
+        self.history_query = query
+        try:
+            self.query_one(HistoryPanel).set_query(query)
+        except NoMatches:
+            pass
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        """Load history only while its pane is selected; cancel it on other tabs."""
+        try:
+            panel = self.query_one(HistoryPanel)
+        except NoMatches:
+            return
+        if event.pane.id == "history":
+            panel.activate()
+        else:
+            panel.deactivate()
 
     def set_control_available(self, available: bool) -> None:
         """Enable browser mutations only while a compatible controller is fresh."""

@@ -19,11 +19,13 @@ url = "http://192.168.1.10:9400/metrics"
 # node_exporter_url = "http://192.168.1.11:9100/metrics"
 
 [dashboard.colors]
-# Optional foreground colors for MEM, UTIL, and TEMP charts. Use a Rich color
+# Optional foreground colors for MEM, UTIL, TEMP, and History Power charts. Use a Rich color
 # name or exact #RRGGBB; omit any key to retain the terminal default color.
 memory = "yellow"
 utilization = "cyan"
 temperature = "red"
+# Power defaults to ansi_green when omitted.
+power = "ansi_green"
 
 [web]
 # The browser companion is opt-in and read-only by default. `./scripts/web.sh start` serves the

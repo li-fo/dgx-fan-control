@@ -39,6 +39,7 @@ class DGXFanMonitorApp(App[None]):
     WATCHDOG_SECONDS = 0.25
     COMMAND_CONNECT_TIMEOUT = 3.0
     COMMAND_RESPONSE_TIMEOUT = 4.0
+    COMMAND_HISTORY_RESPONSE_TIMEOUT = 20.0
     COMMAND_RECONCILE_TIMEOUT = 20.0
     COMMAND_RETRY_SECONDS = 0.1
 
@@ -69,6 +70,8 @@ class DGXFanMonitorApp(App[None]):
             self.config.collection.interval_seconds,
             self.config.dashboard_colors,
             self.open_settings,
+            history_query=self.query_history,
+            history_endpoints=self.config.endpoints,
             # Opt-in alone is insufficient: a compatible, fresh controller
             # frame must prove that the command endpoint is authoritative.
             read_only=True,
@@ -223,6 +226,15 @@ class DGXFanMonitorApp(App[None]):
 
         create_task(show())
 
+    async def query_history(
+        self, endpoint_id: str, start: float, end: float, width: int
+    ) -> dict[str, object]:
+        """Read one bounded history window without enabling browser control."""
+        return await self._command(
+            "read-history",
+            {"endpoint_id": endpoint_id, "start": start, "end": end, "width": width},
+        )
+
     async def _set_requested_power(self) -> None:
         try:
             if self._requested_power is None or self._settings_revision is None:
@@ -260,7 +272,7 @@ class DGXFanMonitorApp(App[None]):
         self._sync_control_availability()
 
     async def _command(self, operation: str, payload: dict[str, object]) -> dict[str, object]:
-        if not self.config.web.allow_control:
+        if not self.config.web.allow_control and operation not in {"read-settings", "read-history"}:
             raise RuntimeError("browser control is disabled by web.allow_control")
         request_id = uuid.uuid4().hex
         request = {
@@ -324,7 +336,12 @@ class DGXFanMonitorApp(App[None]):
             )
             await writer.drain()
             raw = await asyncio.wait_for(
-                reader.readline(), self.COMMAND_RESPONSE_TIMEOUT
+                reader.readline(),
+                (
+                    self.COMMAND_HISTORY_RESPONSE_TIMEOUT
+                    if request.get("operation") == "read-history"
+                    else self.COMMAND_RESPONSE_TIMEOUT
+                ),
             )
             if not raw:
                 raise RuntimeError("controller closed the command connection")

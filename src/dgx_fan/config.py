@@ -66,11 +66,12 @@ class HardwareConfig:
 
 @dataclass(frozen=True)
 class DashboardColors:
-    """Optional foreground colors for the dashboard's three chart metrics."""
+    """Optional foreground colors for the dashboard's chart metrics."""
 
     memory: str | None = None
     utilization: str | None = None
     temperature: str | None = None
+    power: str | None = "ansi_green"
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,11 @@ def _integer(value: object, name: str, *, minimum: int = 0, maximum: int | None 
 
 _COLOR_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*\Z")
 _HEX_COLOR = re.compile(r"#[0-9A-Fa-f]{6}\Z")
+_ANSI_COLOR_NAMES = {
+    "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+    "bright_black", "bright_red", "bright_green", "bright_yellow", "bright_blue",
+    "bright_magenta", "bright_cyan", "bright_white",
+}
 
 
 def _reject_unknown_keys(table: dict[str, object], name: str, allowed: set[str]) -> None:
@@ -142,6 +148,8 @@ def _dashboard_color(value: object, name: str) -> str:
     normalized = value.lower()
     if normalized == "default" or not (_COLOR_NAME.fullmatch(value) or _HEX_COLOR.fullmatch(value)):
         raise ConfigError(f"{name} must be a foreground color name or exact #RRGGBB")
+    if normalized.startswith("ansi_") and normalized.removeprefix("ansi_") in _ANSI_COLOR_NAMES:
+        return normalized
     try:
         Color.parse(value)
     except ColorParseError as error:
@@ -159,7 +167,7 @@ def _dashboard_colors(raw: dict[str, object]) -> DashboardColors:
     if colors_raw is None:
         return DashboardColors()
     colors = _mapping(colors_raw, "dashboard.colors")
-    _reject_unknown_keys(colors, "dashboard.colors", {"memory", "utilization", "temperature"})
+    _reject_unknown_keys(colors, "dashboard.colors", {"memory", "utilization", "temperature", "power"})
     return DashboardColors(
         **{key: _dashboard_color(value, f"dashboard.colors.{key}") for key, value in colors.items()}
     )

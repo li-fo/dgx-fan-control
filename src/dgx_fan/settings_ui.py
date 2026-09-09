@@ -312,8 +312,11 @@ class SettingsScreen(ModalScreen[bool]):
                         ("memory", "Memory color"),
                         ("utilization", "Utilization color"),
                         ("temperature", "Temperature color"),
+                        ("power", "Power color"),
                     ):
-                        options, selected = self._color_options(colors.get(key))
+                        options, selected = self._color_options(
+                            colors.get(key, "ansi_green" if key == "power" else None)
+                        )
                         yield self._row(
                             label,
                             Select(
@@ -381,7 +384,7 @@ class SettingsScreen(ModalScreen[bool]):
             stages.append(stage)
         colors = {
             key: value
-            for key in ("memory", "utilization", "temperature")
+            for key in ("memory", "utilization", "temperature", "power")
             if (value := self._color_value(key))
         }
         return {

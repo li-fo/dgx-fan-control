@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from asyncio import CancelledError, Task, create_task, sleep
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any, ClassVar
 
@@ -54,6 +55,7 @@ from .config import AppConfig, ConfigError, EndpointConfig, load_config, resolve
 from .controller import FanController
 from .dcgm import DCGMCollector
 from .hardware import FanHardware, create_hardware
+from .history import HistoryService
 from .models import ControlSnapshot, EndpointSnapshot, NodeMemorySnapshot
 from .monitor import MonitorPublisher
 from .node_exporter import NodeExporterCollector
@@ -143,7 +145,9 @@ class DGXFanApp(App[None]):
     ansi_theme_dark = Reactive(DEFAULT_TERMINAL_THEME, init=False)
     ansi_theme_light = Reactive(DEFAULT_TERMINAL_THEME, init=False)
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(
+        self, config: AppConfig, *, history_clock: Callable[[], float] = time.time
+    ) -> None:
         # Preserve Textual's Windows/headless paths and an explicit custom
         # driver.  Only the default POSIX Linux driver receives the balanced
         # CSI-u adapter above.
@@ -152,6 +156,9 @@ class DGXFanApp(App[None]):
             driver_class = _NO_KITTY_LINUX_DRIVER
         super().__init__(driver_class=driver_class)
         self.config = config
+        self._history_clock = history_clock
+        self.history = HistoryService(config.path, config.endpoints)
+        self._history_start_error: str | None = None
         self.hardware: FanHardware | None = None
         self.controller = FanController(config.control, config.hardware)
         self.collector = DCGMCollector(
@@ -160,6 +167,7 @@ class DGXFanApp(App[None]):
             config.collection.stale_after_seconds,
             config.collection.retry_count,
             config.collection.retry_delay_seconds,
+            self._archive_dcgm,
         )
         self.node_endpoints = tuple(
             endpoint for endpoint in config.endpoints if endpoint.memory_source == "node-exporter"
@@ -170,6 +178,7 @@ class DGXFanApp(App[None]):
             config.collection.stale_after_seconds,
             config.collection.retry_count,
             config.collection.retry_delay_seconds,
+            self._archive_node,
         )
         self.endpoints: tuple[EndpointSnapshot, ...] = ()
         self.latest: ControlSnapshot | None = None
@@ -196,6 +205,7 @@ class DGXFanApp(App[None]):
                 control_socket_path(config.web.socket_path),
                 self.settings,
                 config.web.allow_control,
+                self._query_history,
             )
             if config.web.enabled and config.web.socket_path
             else None
@@ -273,6 +283,8 @@ class DGXFanApp(App[None]):
             self.config.collection.interval_seconds,
             self.config.dashboard_colors,
             self.open_settings,
+            history_query=self._query_history,
+            history_endpoints=self.config.endpoints,
         )
 
     def open_settings(self) -> None:
@@ -289,6 +301,10 @@ class DGXFanApp(App[None]):
         self.hardware.set_duties(
             (self.config.control.fallback_speed_percent,) * 2
         )  # Application fallback before any external read.
+        try:
+            await self.history.start()
+        except Exception as error:  # noqa: BLE001 - persistent history cannot stop fan control.
+            self._history_start_error = str(error) or type(error).__name__
         self._control_timer = self.set_interval(self.CONTROL_TICK_SECONDS, self.control_tick)
         self._poll_tasks = tuple(
             create_task(self._poll_loop(endpoint)) for endpoint in self.config.endpoints
@@ -330,6 +346,18 @@ class DGXFanApp(App[None]):
         except Exception as error:  # noqa: BLE001 - a supervisor must convert unexpected poll failures to fail-safe state.
             self.collector.mark_endpoint_unhealthy(endpoint, error)
 
+    def _archive_dcgm(
+        self, endpoint: EndpointConfig, text: str | None, error: str | None
+    ) -> None:
+        self.history.submit(
+            endpoint.id,
+            "dcgm",
+            text,
+            self._history_clock(),
+            self.config.collection.interval_seconds,
+            error,
+        )
+
     async def _node_poll_loop(self, endpoint: EndpointConfig) -> None:
         while True:
             await self._node_poll_once(endpoint)
@@ -342,6 +370,35 @@ class DGXFanApp(App[None]):
             raise
         except Exception as error:  # noqa: BLE001 - node memory is display-only.
             self.node_collector.mark_endpoint_unhealthy(endpoint, error)
+
+    def _archive_node(
+        self, endpoint: EndpointConfig, text: str | None, error: str | None
+    ) -> None:
+        self.history.submit(
+            endpoint.id,
+            "node",
+            text,
+            self._history_clock(),
+            self.config.collection.interval_seconds,
+            error,
+        )
+
+    async def _query_history(
+        self, endpoint_id: str, start: float, end: float, width: int
+    ) -> dict[str, object]:
+        if self._history_start_error is None:
+            return await self.history.query(endpoint_id, start, end, width)
+        return {
+            "endpoint_id": endpoint_id,
+            "start": start,
+            "end": end,
+            "now": self._history_clock(),
+            "retention_start": self._history_clock() - 8 * 24 * 60 * 60,
+            "series": {
+                key: [None] * width for key in ("memory", "utilization", "temperature", "power")
+            },
+            "status": f"history storage unavailable: {self._history_start_error}",
+        }
 
     def control_tick(self, now: float | None = None) -> None:
         current = time.monotonic() if now is None else now
@@ -460,6 +517,10 @@ class DGXFanApp(App[None]):
         if self.monitor_publisher is not None:
             await self.monitor_publisher.close()
             self.monitor_publisher = None
+        try:
+            await self.history.close()
+        except Exception as error:  # noqa: BLE001 - history teardown cannot mask fan shutdown.
+            self._history_start_error = str(error) or type(error).__name__
         if safe_duty_error is not None:
             raise RuntimeError("failed to command safe-full duty during shutdown") from safe_duty_error
 

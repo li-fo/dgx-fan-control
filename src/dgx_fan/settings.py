@@ -15,6 +15,7 @@ import tempfile
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ import tomlkit
 from .config import AppConfig, ConfigError, load_config
 
 MAX_CONTROL_MESSAGE_BYTES = 64 * 1024
+HistoryQuery = Callable[[str, float, float, int], Awaitable[dict[str, object]]]
 
 
 class SettingsError(RuntimeError):
@@ -98,7 +100,7 @@ def settings_payload(config: AppConfig) -> dict[str, object]:
     """Build the stable, JSON-safe editor payload from an effective config."""
     colors = {
         key: value
-        for key in ("memory", "utilization", "temperature")
+        for key in ("memory", "utilization", "temperature", "power")
         if (value := getattr(config.dashboard_colors, key)) is not None
     }
     return {
@@ -604,7 +606,7 @@ class SettingsService:
                     target[key] = value
                 continue
             colors = _as_mapping(values.get("colors", {}), "dashboard.colors")
-            unknown_colors = set(colors) - {"memory", "utilization", "temperature"}
+            unknown_colors = set(colors) - {"memory", "utilization", "temperature", "power"}
             if unknown_colors:
                 raise ConfigError(
                     f"unknown settings key: dashboard.colors.{min(unknown_colors)}"
@@ -612,7 +614,7 @@ class SettingsService:
             if "colors" not in target:
                 target["colors"] = tomlkit.table()
             color_table = target["colors"]
-            for key in ("memory", "utilization", "temperature"):
+            for key in ("memory", "utilization", "temperature", "power"):
                 if key in colors:
                     color_table[key] = colors[key]
                 elif key in color_table:
@@ -627,11 +629,22 @@ class SettingsCommandServer:
     MAX_CACHE = 256
     REQUEST_TIMEOUT = 3.0
     ACK_TIMEOUT = 2.5
+    HISTORY_ACK_TIMEOUT = 18.0
+    HISTORY_TIMEOUT = 18.0
+    MAX_HISTORY_QUERIES = 2
 
-    def __init__(self, path: Path, service: SettingsService, allow_control: bool) -> None:
+    def __init__(
+        self,
+        path: Path,
+        service: SettingsService,
+        allow_control: bool,
+        history_query: HistoryQuery | None = None,
+    ) -> None:
         self.path = path
         self.service = service
         self.allow_control = allow_control
+        self._history_query = history_query
+        self._history_slots = asyncio.Semaphore(self.MAX_HISTORY_QUERIES)
         self.server: asyncio.AbstractServer | None = None
         self._seen: OrderedDict[str, _CommandOperation] = OrderedDict()
         self._seen_lock = asyncio.Lock()
@@ -735,6 +748,11 @@ class SettingsCommandServer:
             body_hash = hashlib.sha256(
                 json.dumps(request, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
             ).hexdigest()
+            if request.get("operation") == "read-history":
+                response = await asyncio.wait_for(
+                    self._run_dispatch(request), self.HISTORY_ACK_TIMEOUT
+                )
+                raise _DirectResponse(response)
             async with self._seen_lock:
                 cached = self._seen.get(request_id)
                 if cached is not None:
@@ -779,6 +797,8 @@ class SettingsCommandServer:
                 "error": type(error).__name__,
                 "message": str(error) or "control command failed",
             }
+        except _DirectResponse as direct:
+            response = direct.response
         except Exception as error:  # noqa: BLE001 - isolate malformed clients from the controller.
             response = {
                 "ok": False,
@@ -868,6 +888,16 @@ class SettingsCommandServer:
                 "revision",
                 "enabled",
             },
+            "read-history": {
+                "version",
+                "operation",
+                "request_id",
+                "source_id",
+                "endpoint_id",
+                "start",
+                "end",
+                "width",
+            },
         }
         if operation not in allowed_request_keys:
             raise ConfigError("unknown control operation")
@@ -876,6 +906,34 @@ class SettingsCommandServer:
             raise ConfigError(f"unknown command key: {min(unknown)}")
         if operation == "read-settings":
             return self.service.response()
+        if operation == "read-history":
+            if self._history_query is None:
+                raise SettingsError("history is unavailable")
+            source_id = request.get("source_id")
+            if not isinstance(source_id, str) or source_id not in {"", self.service.source_id}:
+                raise SettingsConflict("controller identity changed; reload history")
+            endpoint_id = request.get("endpoint_id")
+            start = request.get("start")
+            end = request.get("end")
+            width = request.get("width")
+            if not isinstance(endpoint_id, str) or not endpoint_id:
+                raise ConfigError("endpoint_id is required")
+            if not isinstance(start, (int, float)) or isinstance(start, bool):
+                raise ConfigError("start must be a number")
+            if not isinstance(end, (int, float)) or isinstance(end, bool):
+                raise ConfigError("end must be a number")
+            if not isinstance(width, int) or isinstance(width, bool) or not 1 <= width <= 1024:
+                raise ConfigError("width must be an integer from 1 through 1024")
+            if not isfinite(float(start)) or not isfinite(float(end)) or not 0 <= start < end:
+                raise ConfigError("start must be before end")
+            if self._history_slots.locked():
+                raise SettingsError("too many history requests are pending")
+            async with self._history_slots:
+                result = await asyncio.wait_for(
+                    self._history_query(endpoint_id, float(start), float(end), width),
+                    self.HISTORY_TIMEOUT,
+                )
+            return {"ok": True, **result}
         if not self.allow_control:
             raise PermissionError("browser control is disabled by web.allow_control")
         if request.get("source_id") != self.service.source_id:
@@ -894,3 +952,8 @@ class SettingsCommandServer:
                 raise ConfigError("enabled must be true or false")
             await self.service.set_power(enabled, revision)
         return self.service.response()
+
+
+class _DirectResponse(Exception):
+    def __init__(self, response: dict[str, object]) -> None:
+        self.response = response
