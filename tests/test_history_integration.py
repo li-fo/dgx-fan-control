@@ -36,6 +36,68 @@ def test_primary_history_construction_does_not_create_database(tmp_path: Path) -
     assert not (tmp_path / "data" / "history.sqlite3").exists()
 
 
+def test_app_archive_adapters_preserve_source_clock_and_live_interval(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(Path("config.example.toml").read_text())
+    clocks = iter((10.0, 20.0))
+    app = DGXFanApp(load_config(config_path), history_clock=lambda: next(clocks))
+    submissions: list[tuple[object, ...]] = []
+
+    class CaptureHistory:
+        def submit(self, *args: object) -> None:
+            submissions.append(args)
+
+    app.history = CaptureHistory()  # type: ignore[assignment]
+    app.config = replace(app.config, collection=replace(app.config.collection, interval_seconds=7.0))
+    endpoint = app.config.endpoints[0]
+    app._archive_dcgm(endpoint, "dcgm", None)
+    app.config = replace(app.config, collection=replace(app.config.collection, interval_seconds=9.0))
+    app._archive_node(endpoint, "node", "offline")
+    assert submissions == [
+        (endpoint.id, "dcgm", "dcgm", 10.0, 7.0, None),
+        (endpoint.id, "node", "node", 20.0, 9.0, "offline"),
+    ]
+
+
+def test_startup_history_error_preserves_two_clock_order_and_empty_shape(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(Path("config.example.toml").read_text())
+        clocks = iter((100.0, 200.0))
+        app = DGXFanApp(load_config(config_path), history_clock=lambda: next(clocks))
+        app._history_start_error = "disk unavailable"
+        result = await app._query_history("one", 1.0, 2.0, 2)
+        assert result == {
+            "endpoint_id": "one", "start": 1.0, "end": 2.0, "now": 100.0,
+            "retention_start": 200.0 - 8 * 24 * 60 * 60,
+            "series": {"memory": [None, None], "utilization": [None, None], "temperature": [None, None], "power": [None, None]},
+            "status": "history storage unavailable: disk unavailable",
+        }
+
+    asyncio.run(exercise())
+
+
+def test_normal_history_query_returns_storage_result_without_reading_clock(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(Path("config.example.toml").read_text())
+        def fail_clock() -> float:
+            raise AssertionError("normal history query must not read the clock")
+
+        app = DGXFanApp(load_config(config_path), history_clock=fail_clock)
+        expected = {"sentinel": object()}
+
+        class QueryHistory:
+            async def query(self, *args: object) -> dict[str, object]:
+                assert args == ("one", 1.0, 2.0, 2)
+                return expected
+
+        app.history = QueryHistory()  # type: ignore[assignment]
+        assert await app._query_history("one", 1.0, 2.0, 2) is expected
+
+    asyncio.run(exercise())
+
+
 def test_dcgm_response_reaches_history_through_read_only_unix_socket(
     tmp_path: Path, monkeypatch: object
 ) -> None:

@@ -28,6 +28,25 @@ def _service(tmp_path: Path, *, memory_source: str = "dcgm") -> HistoryService:
     return HistoryService(tmp_path / "config.toml", (endpoint,))
 
 
+def test_empty_result_preserves_shape_and_independent_series_arrays(tmp_path: Path) -> None:
+    result = _service(tmp_path)._empty_result("one", 1.0, 2.0, 3.0, 4.0, 2, "unavailable")
+    assert result == {
+        "endpoint_id": "one",
+        "start": 1.0,
+        "end": 2.0,
+        "now": 3.0,
+        "retention_start": 4.0,
+        "series": {"memory": [None, None], "utilization": [None, None], "temperature": [None, None], "power": [None, None]},
+        "status": "unavailable",
+    }
+    series = result["series"]
+    assert isinstance(series, dict)
+    assert len({id(values) for values in series.values()}) == 4
+    second = _service(tmp_path)._empty_result("one", 1.0, 2.0, 3.0, 4.0, 2, "unavailable")
+    series["memory"][0] = 1.0
+    assert second["series"]["memory"] == [None, None]
+
+
 @pytest.mark.asyncio
 async def test_archives_raw_dcgm_including_mig_and_queries_derived_values(tmp_path: Path) -> None:
     service = _service(tmp_path)

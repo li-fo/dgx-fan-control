@@ -349,14 +349,7 @@ class DGXFanApp(App[None]):
     def _archive_dcgm(
         self, endpoint: EndpointConfig, text: str | None, error: str | None
     ) -> None:
-        self.history.submit(
-            endpoint.id,
-            "dcgm",
-            text,
-            self._history_clock(),
-            self.config.collection.interval_seconds,
-            error,
-        )
+        self._archive_history(endpoint, "dcgm", text, error)
 
     async def _node_poll_loop(self, endpoint: EndpointConfig) -> None:
         while True:
@@ -374,9 +367,14 @@ class DGXFanApp(App[None]):
     def _archive_node(
         self, endpoint: EndpointConfig, text: str | None, error: str | None
     ) -> None:
+        self._archive_history(endpoint, "node", text, error)
+
+    def _archive_history(
+        self, endpoint: EndpointConfig, source: str, text: str | None, error: str | None
+    ) -> None:
         self.history.submit(
             endpoint.id,
-            "node",
+            source,
             text,
             self._history_clock(),
             self.config.collection.interval_seconds,
@@ -388,17 +386,16 @@ class DGXFanApp(App[None]):
     ) -> dict[str, object]:
         if self._history_start_error is None:
             return await self.history.query(endpoint_id, start, end, width)
-        return {
-            "endpoint_id": endpoint_id,
-            "start": start,
-            "end": end,
-            "now": self._history_clock(),
-            "retention_start": self._history_clock() - 8 * 24 * 60 * 60,
-            "series": {
-                key: [None] * width for key in ("memory", "utilization", "temperature", "power")
-            },
-            "status": f"history storage unavailable: {self._history_start_error}",
-        }
+        now = self._history_clock()
+        return HistoryService._empty_result(
+            endpoint_id,
+            start,
+            end,
+            now,
+            self._history_clock() - 8 * 24 * 60 * 60,
+            width,
+            f"history storage unavailable: {self._history_start_error}",
+        )
 
     def control_tick(self, now: float | None = None) -> None:
         current = time.monotonic() if now is None else now

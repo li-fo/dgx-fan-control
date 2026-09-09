@@ -393,8 +393,9 @@ class HistoryService:
         finally:
             self._read_slots.release()
 
+    @staticmethod
     def _empty_result(
-        self, endpoint_id: str, start: float, end: float, now: float, retention_start: float, width: int, status: str
+        endpoint_id: str, start: float, end: float, now: float, retention_start: float, width: int, status: str
     ) -> dict[str, object]:
         return {
             "endpoint_id": endpoint_id,
