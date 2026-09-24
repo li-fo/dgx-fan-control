@@ -796,6 +796,9 @@ def test_large_metric_glyphs_are_unique_and_fit_wide_and_79_column_cards() -> No
     assert rows[0].index("TEMP") < rows[0].index("MEM") < rows[0].index("UTIL") < rows[0].index("POWER")
     assert "GiB" in "\n".join(rows[1:])
 
+    narrow_rows, _spans = ui._large_metric_rows(("50.0 C", "111 / 121 GiB", "0%", "12 W"), 39)
+    assert "UTIL POWER" in narrow_rows[0]
+
     extreme = ("150.0 C", "976562500 / 976562500 GiB", "100%", "999999 W")
     rows, _spans = ui._large_metric_rows(extreme, 39)
     assert rows == [f"{label} {value}" for label, value in zip(("TEMP", "MEM", "UTIL", "POWER"), extreme, strict=True)]

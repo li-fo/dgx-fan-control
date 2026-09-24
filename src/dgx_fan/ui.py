@@ -814,6 +814,8 @@ class FanAppUI(Static):
         for rendered_values, preferred_gap in ((values, 1), (narrow, 0)):
             glyphs = [self._large_value(value) for value in rendered_values]
             widths = [max(len(glyph[0]), len(label)) for glyph, label in zip(glyphs, _GRAPH_TWO_METRIC_LABELS, strict=True)]
+            if rendered_values == narrow:
+                preferred_gap = min(1, max(0, (card_width - sum(widths)) // (len(widths) - 1)))
             required = sum(widths) + preferred_gap * (len(widths) - 1)
             if required > card_width:
                 continue
