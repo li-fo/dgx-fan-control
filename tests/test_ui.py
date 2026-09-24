@@ -11,6 +11,7 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.renderables.digits import Digits
 from textual.widgets import Button, Static, TabbedContent
 
+import dgx_fan.ui as ui_module
 from dgx_fan.app import DGXFanApp
 from dgx_fan.config import DashboardColors, EndpointConfig, load_config
 from dgx_fan.models import (
@@ -740,22 +741,38 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             )
             ui.update_snapshot(zero_total, 122)
             await pilot.pause()
-            assert next(iter(ui.query(".dgx-panel"))).render().plain.count("N/A") >= 1
+            text = next(iter(ui.query(".dgx-panel"))).render().plain
+            assert "GiB" in text and "N/A" not in text and " /" not in text
+            partial_memory = replace(
+                snapshot,
+                endpoint_snapshots=(
+                    replace(
+                        snapshot.endpoint_snapshots[0],
+                        gpus=(gpu, replace(gpu, memory_used_mib=None)),
+                        sample_revision=2,
+                    ),
+                    snapshot.endpoint_snapshots[1],
+                ),
+            )
+            ui.update_snapshot(partial_memory, 122.5)
+            await pilot.pause()
+            assert "N/A" in next(iter(ui.query(".dgx-panel"))).render().plain
             uma = replace(
                 snapshot,
                 endpoint_snapshots=(
                     replace(
                         snapshot.endpoint_snapshots[0],
                         memory_source="node-exporter",
-                        uma_memory=MemoryStat(114399, 124546),
-                        sample_revision=2,
+                        uma_memory=MemoryStat(114399, 0),
+                        sample_revision=3,
                     ),
                     snapshot.endpoint_snapshots[1],
                 ),
             )
             ui.update_snapshot(uma, 123)
             await pilot.pause()
-            assert "GiB" in next(iter(ui.query(".dgx-panel"))).render().plain
+            text = next(iter(ui.query(".dgx-panel"))).render().plain
+            assert "GiB" in text and "N/A" not in text
             await pilot.resize_terminal(79, 30)
             await pilot.pause()
             scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
@@ -772,14 +789,14 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             extreme = replace(
                 snapshot,
                 endpoint_snapshots=(
-                    replace(snapshot.endpoint_snapshots[0], gpus=(high,), sample_revision=3),
-                    replace(snapshot.endpoint_snapshots[1], gpus=(high,), sample_revision=3),
+                    replace(snapshot.endpoint_snapshots[0], gpus=(high,), sample_revision=4),
+                    replace(snapshot.endpoint_snapshots[1], gpus=(high,), sample_revision=4),
                 ),
             )
             ui.update_snapshot(extreme, 124)
             await pilot.pause()
             text = next(iter(ui.query(".dgx-panel"))).render().plain
-            assert "TEMP 150.0 C" in text and "MEM 976562500 / 976562500 GiB" in text
+            assert "TEMP 150.0 C" in text and "MEM 976562500 GiB" in text
             assert "UTIL 100%" in text and "POWER 999999 W" in text and "…" not in text
             styles = " ".join(str(span.style) for span in next(iter(ui.query(".dgx-panel"))).render().spans)
             for color in ("ansi_yellow", "ansi_cyan", "ansi_red", "ansi_green"):
@@ -789,8 +806,9 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
     asyncio.run(exercise())
 
 
-def test_native_digits_metric_layout_fits_wide_and_79_column_cards() -> None:
+def test_native_digits_metric_layout_fits_wide_and_79_column_cards(monkeypatch: pytest.MonkeyPatch) -> None:
     ui = FanAppUI("config.toml", lambda: None, 75, 2, graph_view="graph-2")
+    assert len(set(ui_module._ASCII_DIGITS.values())) == 10
     expected: list[str] = []
     line = ""
     for segment in Digits("50.0").render(Style()):
@@ -801,19 +819,38 @@ def test_native_digits_metric_layout_fits_wide_and_79_column_cards() -> None:
             line += segment.text
     assert Digits.get_width("50.0") == sum(3 if character.isdigit() else 1 for character in "50.0")
     assert ui._native_digit_lines("50.0") == tuple(expected)
-    ordinary = ("50.0 C", "111 / 121 GiB", "0%", "12 W")
-    rows, _spans = ui._large_metric_rows(ordinary, 50)
-    assert len(rows) == 8 and all(len(row) <= 50 for row in rows)
-    assert "TEMP" in rows[0] and "MEM" in rows[0]
-    assert "UTIL" in rows[4] and "POWER" in rows[4]
-    assert "GiB" in "\n".join(rows[1:])
+    ordinary = ("50.0 C", "111 GiB", "0%", "12 W")
+    rows, _spans = ui._large_metric_rows(ordinary, 39)
+    assert len(rows) == 4 and all(len(row) <= 39 for row in rows)
+    assert all(label in rows[0] for label in ("TEMP", "MEM", "UTIL", "POWER"))
+    assert all(unit in rows[0] for unit in ("C", "GiB", "%", "W"))
+    assert any(ord(character) > 127 for row in rows[1:] for character in row)
 
-    narrow_rows, _spans = ui._large_metric_rows(("50.0 C", "111 / 121 GiB", "0%", "12 W"), 39)
-    assert len(narrow_rows) == 8 and all(len(row) <= 39 for row in narrow_rows)
-    assert "TEMP" in narrow_rows[0] and "MEM" in narrow_rows[0]
-    assert "UTIL" in narrow_rows[4] and "POWER" in narrow_rows[4]
+    normal_power_rows, normal_power_spans = ui._large_metric_rows(("50.0 C", "111 GiB", "55%", "250 W"), 39)
+    assert len(normal_power_rows) == 4 and all(len(row) <= 39 for row in normal_power_rows)
+    assert all(label in normal_power_rows[0] for label in ("TEMP", "MEM", "UTIL", "POWER"))
+    assert normal_power_spans[0][1][1] > normal_power_spans[0][0][1] + normal_power_spans[0][0][2]
+    assert normal_power_spans[0][2][1] > normal_power_spans[0][1][1] + normal_power_spans[0][1][2]
 
-    extreme = ("150.0 C", "976562500 / 976562500 GiB", "100%", "999999 W")
+    class FakeTTY:
+        def isatty(self) -> bool:
+            return True
+
+        def fileno(self) -> int:
+            return 8
+
+    fake_tty = FakeTTY()
+    monkeypatch.setattr(ui_module.sys, "stdin", fake_tty)
+    monkeypatch.setattr(ui_module.os, "ttyname", lambda _fd: "/dev/tty8")
+    monkeypatch.setenv("TERM", "xterm-256color")
+    assert ui_module._is_linux_virtual_console()
+    monkeypatch.delenv("TERM")
+    assert ui_module._is_linux_virtual_console()
+    forced_ascii, _spans = ui._large_metric_rows(ordinary, 39)
+    assert len(forced_ascii) == 4 and all(len(row) <= 39 for row in forced_ascii)
+    assert all(ord(character) < 128 for row in forced_ascii for character in row)
+
+    extreme = ("150.0 C", "976562500 GiB", "100%", "999999 W")
     rows, _spans = ui._large_metric_rows(extreme, 39)
     assert rows == [f"{label} {value}" for label, value in zip(("TEMP", "MEM", "UTIL", "POWER"), extreme, strict=True)]
     assert all("…" not in row and value in row for row, value in zip(rows, extreme, strict=True))

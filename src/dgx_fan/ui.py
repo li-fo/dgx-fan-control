@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sys
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -25,6 +27,27 @@ MIN_DASHBOARD_WIDTH = 79
 PLOT_HEIGHT = 5
 MAX_LAYOUT_CONVERGENCE_PASSES = 2
 _GRAPH_TWO_METRIC_LABELS = ("TEMP", "MEM", "UTIL", "POWER")
+_ASCII_DIGITS = {
+    "0": ("[]", "||", "[]"), "1": (" .", " |", "_|"), "2": ("[]", " _", "[_"),
+    "3": ("[]", " _", "_]"), "4": ("||", "[_", " |"), "5": ("[ ", "[_", "_]"),
+    "6": ("[ ", "[_", "[]"), "7": ("[]", " |", " |"), "8": ("[]", "[_", "[]"),
+    "9": ("[]", "[_", " |"),
+}
+
+
+def _is_linux_virtual_console(stream: object | None = None) -> bool:
+    """Identify /dev/ttyN without trusting an inherited TERM value."""
+    candidate = sys.stdin if stream is None else stream
+    try:
+        if not candidate.isatty():  # type: ignore[union-attr]
+            return False
+        path = os.ttyname(candidate.fileno())  # type: ignore[union-attr]
+    except (AttributeError, OSError):
+        return False
+    suffix = path.removeprefix("/dev/tty")
+    return path != suffix and suffix.isdecimal()
+
+
 def _safe_display_text(value: object) -> str:
     """Prevent external text from carrying terminal control sequences into Rich."""
     return "".join(
@@ -740,19 +763,13 @@ class FanAppUI(Static):
                     if gpus and endpoint.memory_healthy and not endpoint.memory_stale and endpoint.memory_error is None
                     else None
                 )
-                mem = (
-                    "N/A"
-                    if memory is None or memory.total_mib <= 0
-                    else f"{int(memory.used_mib // 1024)} / {int(memory.total_mib // 1024)} GiB"
-                )
+                # The dashboard is deliberately used-only.  Node-exporter can
+                # report a valid used counter even while its total is absent or
+                # zero, and that should remain useful to an operator.
+                mem = "N/A" if memory is None else f"{int(memory.used_mib // 1024)} GiB"
             else:
-                used = sum(gpu.memory_used_mib or 0 for gpu in gpus)
-                total = sum(gpu.memory_total_mib or 0 for gpu in gpus)
-                mem = (
-                    "N/A"
-                    if not gpus or total <= 0 or any(gpu.memory_used_mib is None or gpu.memory_total_mib is None for gpu in gpus)
-                    else f"{int(used // 1024)} / {int(total // 1024)} GiB"
-                )
+                used = [gpu.memory_used_mib for gpu in gpus if gpu.memory_used_mib is not None]
+                mem = "N/A" if not gpus or len(used) != len(gpus) else f"{int(sum(used) // 1024)} GiB"
             power = "N/A" if not gpus or any(value is None for value in powers) else f"{sum(value for value in powers if value is not None):.0f} W"
             util_chart = self.history.endpoint_area(endpoint.endpoint_id, "util", now, max(1, card_width - 7), 100, 2)
             util_box = self._chart_lines("UTIL", util, util_chart)
@@ -805,37 +822,47 @@ class FanAppUI(Static):
         self,
         values: tuple[str, str, str, str], card_width: int
     ) -> tuple[list[str], tuple[tuple[tuple[int, int, int], ...], ...]]:
-        """Use Textual's native 3x3 Digits renderer in a responsive 2x2 card."""
-        prepared = [self._digit_value(value) for value in values]
-        rows: list[str] = []
-        spans: list[tuple[tuple[int, int, int], ...]] = []
-        for left, right in ((0, 1), (2, 3)):
-            left_value, right_value = prepared[left], prepared[right]
-            if left == 0:
-                # At 79 columns omit only separator spaces around '/', never
-                # either memory count or the GiB unit.
-                right_value = self._digit_value(values[right].replace(" / ", "/"))
-            widths = [
-                max(len(_GRAPH_TWO_METRIC_LABELS[index]), len(value[0]))
-                for index, value in ((left, left_value), (right, right_value))
-            ]
-            if sum(widths) + 1 > card_width:
-                return self._stacked_metric_rows(values)
-            positions = ((left, 0, widths[0]), (right, widths[0] + 1, widths[1]))
-            rows.append(
-                _GRAPH_TWO_METRIC_LABELS[left].center(widths[0])
-                + " "
-                + _GRAPH_TWO_METRIC_LABELS[right].center(widths[1])
+        """Render a compact four-metric group, falling back before clipping.
+
+        Native Textual digits are crisp in capable terminals.  At a physical
+        Linux console the ASCII form is deterministic and narrow enough to
+        keep all four metrics on one horizontal group.
+        """
+        # Only a real Linux VT needs the ASCII form.  Modern terminals and the
+        # browser retain Textual's native renderer even for 39-cell cards.
+        ascii_digits = _is_linux_virtual_console()
+        labels = tuple(
+            self._metric_label(label, value)
+            for label, value in zip(_GRAPH_TWO_METRIC_LABELS, values, strict=True)
+        )
+        prepared = [self._digit_value(self._numeric_value(value), ascii_digits) for value in values]
+        widths = [
+            max(len(label), len(value[0]))
+            for label, value in zip(labels, prepared, strict=True)
+        ]
+        spare = card_width - sum(widths)
+        if spare < 0:
+            return self._stacked_metric_rows(values)
+        # A single spare cell still improves scanability.  Allocate it from
+        # left to right instead of dividing it away to zero across all gaps.
+        gaps = [1 if index < min(3, spare) else 0 for index in range(3)]
+        positions: list[tuple[int, int, int]] = []
+        offset = 0
+        for index, width in enumerate(widths):
+            positions.append((index, offset, width))
+            if index < len(gaps):
+                offset += width + gaps[index]
+
+        def joined(parts: list[str]) -> str:
+            return "".join(
+                part + (" " * gaps[index] if index < len(gaps) else "")
+                for index, part in enumerate(parts)
             )
-            spans.append(positions)
-            for row in range(3):
-                rows.append(
-                    left_value[1][row].center(widths[0])
-                    + " "
-                    + right_value[1][row].center(widths[1])
-                )
-                spans.append(positions)
-        return rows, tuple(spans)
+
+        rows = [joined([label.center(width) for label, width in zip(labels, widths, strict=True)])]
+        for row in range(3):
+            rows.append(joined([value[1][row].center(width) for value, width in zip(prepared, widths, strict=True)]))
+        return rows, tuple(tuple(positions) for _ in rows)
 
     @staticmethod
     def _native_digit_lines(value: str) -> tuple[str, str, str]:
@@ -852,17 +879,41 @@ class FanAppUI(Static):
                 line += segment.text
         return rows[0], rows[1], rows[2]
 
-    @classmethod
-    def _digit_value(cls, value: str) -> tuple[str, tuple[str, str, str]]:
-        if value == "N/A":
-            return value, ("", value, "")
-        numeric, unit = value, ""
+    @staticmethod
+    def _ascii_digit_lines(value: str) -> tuple[str, str, str]:
+        """Render only portable ASCII for the Linux virtual console."""
+        rows = ["", "", ""]
+        for character in value:
+            glyph = _ASCII_DIGITS.get(character, ("  ", "  ", character.ljust(2)))
+            for index, part in enumerate(glyph):
+                rows[index] += part
+        return rows[0], rows[1], rows[2]
+
+    @staticmethod
+    def _numeric_value(value: str) -> str:
         for suffix in (" GiB", " C", " W", "%"):
             if value.endswith(suffix):
-                numeric, unit = value.removesuffix(suffix), suffix
-                break
-        lines = list(cls._native_digit_lines(numeric))
-        lines[-1] += unit
+                return value.removesuffix(suffix)
+        return value
+
+    @staticmethod
+    def _metric_label(label: str, value: str) -> str:
+        """Keep normal-size units beside their metric label in compact cards."""
+        if value.endswith(" GiB"):
+            return f"{label} GiB"
+        if value.endswith(" C"):
+            return f"{label} C"
+        if value.endswith(" W"):
+            return f"{label} W"
+        if value.endswith("%"):
+            return f"{label} %"
+        return label
+
+    @classmethod
+    def _digit_value(cls, value: str, ascii_digits: bool) -> tuple[str, tuple[str, str, str]]:
+        if value == "N/A":
+            return value, ("", value, "")
+        lines = list(cls._ascii_digit_lines(value) if ascii_digits else cls._native_digit_lines(value))
         width = max(len(line) for line in lines)
         return " " * width, tuple(line.ljust(width) for line in lines)  # type: ignore[return-value]
 
