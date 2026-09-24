@@ -897,8 +897,17 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
                 assert ui.graph_two_sparklines[(endpoint_id, "power")].data == (250,)
                 assert [ui.graph_two_sparklines[(endpoint_id, metric)].maximum for metric in
                         ("util", "temp", "mem", "power")] == [100, 100, 100, 240]
-            assert "TEMP 55 C · 0–100 C" in ui.graph_two_metric_labels[("one", "temp")].render().plain
-            assert "POWER 250 W · 0–240 W" in ui.graph_two_metric_labels[("one", "power")].render().plain
+            for metric, expected, color in (
+                ("util", "UTIL 40% · 0–100%", "cyan"),
+                ("temp", "TEMP 55 C · 0–100 C", "red"),
+                ("mem", "MEM 92% · 0–100%", "yellow"),
+                ("power", "POWER 250 W · 0–240 W", "green"),
+            ):
+                label = ui.graph_two_metric_labels[("one", metric)].render()
+                assert label.plain == expected
+                assert len(label.spans) == 1
+                assert (label.spans[0].start, label.spans[0].end) == (0, len(metric))
+                assert str(label.spans[0].style) == f"ansi_{color}"
             util_lines = [ui.graph_two_sparklines[(endpoint, "util")] for endpoint in ("one", "two")]
             assert all(sparkline.data == (40,) and sparkline.display for sparkline in util_lines)
             assert _mounted_sparkline_ink(util_lines[0])
@@ -1170,7 +1179,7 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
                 [" " * sparkline.size.width]
                 + [" " * (sparkline.size.width - 1) + "▁"]
             )
-            assert "UTIL 5% · 0–100% · 0s · One" in ui.query_one(".graph-two-util-label", Static).render().plain
+            assert ui.query_one(".graph-two-util-label", Static).render().plain == "UTIL 5% · 0–100%"
 
             zero = replace(snapshot, endpoint_snapshots=(
                 replace(snapshot.endpoint_snapshots[0], gpus=(replace(gpu, utilization_percent=0),), sample_revision=2),
@@ -1181,12 +1190,15 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
             rows = _mounted_sparkline_rows(sparkline)
             assert rows[:1] == [" " * sparkline.size.width]
             assert rows[-1] == " " * (sparkline.size.width - 1) + "▁"
-            assert "UTIL 0% · 0–100% · 1s · One" in ui.query_one(".graph-two-util-label", Static).render().plain
+            assert ui.query_one(".graph-two-util-label", Static).render().plain == "UTIL 0% · 0–100%"
             before_ink = _mounted_sparkline_ink(sparkline)
 
             ui.reconfigure_display(75, 1, DashboardColors(utilization="green"), graph_view="graph-2")
             await pilot.pause()
             assert sparkline.max_color is not None and sparkline.max_color.hex == "#008000"
+            label = ui.query_one(".graph-two-util-label", Static).render()
+            assert label.plain == "UTIL 0% · 0–100%"
+            assert len(label.spans) == 1 and str(label.spans[0].style) == "ansi_green"
             assert sparkline.collection_interval_seconds == 1
             old_hold = time_columns(
                 sparkline.data, sparkline.sample_times, 123, sparkline.size.width,
@@ -1210,7 +1222,7 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
             assert sparkline.display
             assert set(_mounted_sparkline_text(sparkline)) == {" "}
             assert _mounted_sparkline_ink(sparkline) == set()
-            assert "UTIL N/A · 0–100% · N/A · One" in ui.query_one(".graph-two-util-label", Static).render().plain
+            assert ui.query_one(".graph-two-util-label", Static).render().plain == "UTIL N/A · 0–100%"
 
             sparse = replace(zero, endpoint_snapshots=(
                 replace(zero.endpoint_snapshots[0], sample_revision=3),
@@ -1239,7 +1251,7 @@ def test_graph_two_sparkline_fixed_scale_label_survives_long_name_at_79_columns(
         def compose(self) -> ComposeResult:
             yield FanAppUI("config.toml", lambda: None, 75, 2, graph_view="graph-2")
 
-    name = "DGX-with-an-intentionally-very-long-endpoint-name"
+    name = "DGX-with-an-intentionally-very-long-endpoint-name\x1b[31m"
     first = GPUStat("GPU-a", "A100", 1024, 2048, 5, 50, 12)
     second = replace(first, utilization_percent=10)
     snapshot = _fan_snapshot(
@@ -1264,7 +1276,8 @@ def test_graph_two_sparkline_fixed_scale_label_survives_long_name_at_79_columns(
             await pilot.pause()
             labels = [label.render().plain for label in ui.query(".graph-two-util-label")]
             assert len(labels) == 2
-            assert all("UTIL 10% · 0–100% · 1s" in label for label in labels)
+            assert labels == ["UTIL 10% · 0–100%"] * 2
+            assert all("DGX-with" not in label and "\x1b" not in label for label in labels)
             assert all(len(label) <= 39 for label in labels)
             assert ui.query_one("#dashboard-scroll", VerticalScroll).max_scroll_y == 0
 

@@ -884,13 +884,12 @@ class FanAppUI(Static):
                 sparkline.min_color = self._sparkline_color(configured_color)
                 sparkline.max_color = self._sparkline_color(configured_color)
                 sparkline.refresh()
-                span = f"{samples[-1].at - samples[0].at:.0f}s" if samples else "N/A"
                 scale = f"0–{maximum:.0f}{unit}"
+                label = Text(_compact_display_text(f"{metric.upper()} {current} · {scale}", card_width))
+                if configured_color is not None:
+                    label.stylize(Style(color=_rich_color(configured_color)), 0, len(metric))
                 self.graph_two_metric_labels[(endpoint.endpoint_id, metric)].update(
-                    _compact_display_text(
-                        f"{metric.upper()} {current} · {scale} · {span} · {endpoint.name}",
-                        card_width,
-                    )
+                    label
                 )
         rendered = Text()
         height = max((len(card[0]) for card in cards), default=0)
