@@ -818,20 +818,18 @@ def test_native_digits_metric_layout_fits_wide_and_79_column_cards(monkeypatch: 
             line += segment.text
     assert Digits.get_width("50.0") == sum(3 if character.isdigit() else 1 for character in "50.0")
     assert ui._native_digit_lines("50.0") == tuple(expected)
-    native_top, native_middle, native_bottom = ui._native_digit_lines("50")
-    assert ui._graph_two_digit_lines("50") == (native_top, native_middle, native_middle, native_bottom)
     ordinary = ("50 C", "111 GiB", "0%", "12 W")
     rows, spans = ui._large_metric_rows(ordinary, 39)
-    assert len(rows) == 5 and all(len(row) == 39 for row in rows)
+    assert len(rows) == 4 and all(len(row) == 39 for row in rows)
     assert all(label in rows[0] for label in ("TEMP", "MEM", "UTIL", "POWER"))
     assert all(unit in rows[0] for unit in ("C", "GiB", "%", "W"))
     assert any(ord(character) > 127 for row in rows[1:] for character in row)
     assert spans[0] == ((0, 0, 9), (1, 10, 9), (2, 20, 9), (3, 30, 9))
     assert "." not in "\n".join(rows)
-    assert rows[2] == rows[3]
+    assert len(rows[1:]) == len(ui._native_digit_lines("50"))
 
     normal_power_rows, normal_power_spans = ui._large_metric_rows(("50 C", "111 GiB", "55%", "250 W"), 39)
-    assert len(normal_power_rows) == 5 and all(len(row) == 39 for row in normal_power_rows)
+    assert len(normal_power_rows) == 4 and all(len(row) == 39 for row in normal_power_rows)
     assert all(label in normal_power_rows[0] for label in ("TEMP", "MEM", "UTIL", "POWER"))
     assert normal_power_spans[0][1][1] > normal_power_spans[0][0][1] + normal_power_spans[0][0][2]
     assert normal_power_spans[0][2][1] > normal_power_spans[0][1][1] + normal_power_spans[0][1][2]
@@ -855,7 +853,7 @@ def test_native_digits_metric_layout_fits_wide_and_79_column_cards(monkeypatch: 
     assert "#" not in "\n".join(plain_console)
     monkeypatch.setenv(ui_module._TTY8_FONT_MARKER, "1")
     marked_console, _spans = ui._large_metric_rows(ordinary, 39)
-    assert len(marked_console) == 5 and marked_console[2] == marked_console[3]
+    assert len(marked_console) == 4
     assert any(ord(character) > 127 for row in marked_console[1:] for character in row)
 
     extreme = ("1500 C", "976562500 GiB", "100%", "999999 W")
