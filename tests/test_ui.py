@@ -745,6 +745,36 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize(("graph_view", "size"), [("graph-1", (100, 24)), ("graph-2", (79, 30))])
+def test_documented_ansi_dashboard_colors_render_in_terminal(
+    graph_view: str, size: tuple[int, int]
+) -> None:
+    config = load_config(Path("config.example.toml"))
+
+    class AnsiDashboardApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FanAppUI(
+                "config.toml", lambda: None, 75, 2, config.dashboard_colors, graph_view=graph_view
+            )
+
+    gpu = GPUStat("GPU-a", "A100", 50, 100, 40, 55, 250)
+    snapshot = _fan_snapshot(
+        20, "curve", "AUTO ON", 55, 0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (EndpointSnapshot("one", "One", True, 0, gpus=(gpu,), sample_revision=1),),
+    )
+    app = AnsiDashboardApp()
+
+    async def exercise() -> None:
+        async with app.run_test(size=size) as pilot:
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 120)
+            await pilot.pause()
+            assert ui.query_one("#dashboard-scroll", VerticalScroll).display
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize(
     ("endpoint", "expected"),
     [

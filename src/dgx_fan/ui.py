@@ -43,6 +43,11 @@ def _compact_display_text(value: object, maximum_cells: int) -> str:
     return result
 
 
+def _rich_color(color: str | None) -> str | None:
+    """Translate persisted terminal-safe aliases before Rich parses a style."""
+    return color.removeprefix("ansi_") if color else None
+
+
 @dataclass(frozen=True)
 class HistoryPoint:
     at: float
@@ -757,15 +762,19 @@ class FanAppUI(Static):
                 if row == 1:
                     split = value.find("  MEM ")
                     if split >= 0:
-                        line.stylize(Style(color=self.dashboard_colors.temperature), start, start + split)
-                        line.stylize(Style(color=self.dashboard_colors.memory), start + split + 2, start + len(value.rstrip()))
+                        line.stylize(Style(color=_rich_color(self.dashboard_colors.temperature)), start, start + split)
+                        line.stylize(Style(color=_rich_color(self.dashboard_colors.memory)), start + split + 2, start + len(value.rstrip()))
                 elif row == 2:
                     split = value.find("  POWER ")
                     if split >= 0:
-                        line.stylize(Style(color=self.dashboard_colors.utilization), start, start + split)
-                        line.stylize(Style(color=self.dashboard_colors.power), start + split + 2, start + len(value.rstrip()))
+                        line.stylize(Style(color=_rich_color(self.dashboard_colors.utilization)), start, start + split)
+                        line.stylize(Style(color=_rich_color(self.dashboard_colors.power)), start + split + 2, start + len(value.rstrip()))
                 elif row >= 3:
-                    line.stylize(Style(color=self.dashboard_colors.utilization), start, start + len(value.rstrip()))
+                    line.stylize(
+                        Style(color=_rich_color(self.dashboard_colors.utilization)),
+                        start,
+                        start + len(value.rstrip()),
+                    )
                 if index < len(cards) - 1:
                     line.append(" ")
             rendered.append(line)
@@ -774,7 +783,7 @@ class FanAppUI(Static):
         rendered.append(_compact_display_text("TEMP 120s · " + " · ".join(labels) + " · X: overlap", available) + "\n")
         rendered.append(
             "\n".join(self._shared_temperature_lines(snapshot.endpoint_snapshots[:2], now, available)) + "\n",
-            style=Style(color=self.dashboard_colors.temperature),
+            style=Style(color=_rich_color(self.dashboard_colors.temperature)),
         )
         panel.update(rendered)
         scroll.move_child(panel, before=0)
@@ -860,7 +869,7 @@ class FanAppUI(Static):
         if color is None:
             rendered.append(value)
         else:
-            rendered.append(value, style=Style(color=color))
+            rendered.append(value, style=Style(color=_rich_color(color)))
 
     def on_resize(self) -> None:
         if self.snapshot is None or self.last_render_time is None:
