@@ -16,7 +16,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.renderables.digits import Digits
 from textual.widget import WidgetError
-from textual.widgets import Button, Footer, Header, Static, TabbedContent, TabPane
+from textual.widgets import Button, Footer, Header, Sparkline, Static, TabbedContent, TabPane
 
 from .config import DashboardColors, EndpointConfig
 from .history_ui import HistoryPanel, HistoryQuery
@@ -248,6 +248,19 @@ class DashboardHistory:
         ]
         return aggregate.area(endpoint_id, "__endpoint__", metric, now, width, maximum, plot_height)
 
+    def endpoint_values(self, endpoint_id: str, metric: str, now: float) -> tuple[float, ...]:
+        """Return observed 120-second per-endpoint maxima without fabricating gaps."""
+        cutoff = now - HISTORY_SECONDS
+        values_by_time: dict[float, float] = {}
+        for (source, _gpu, source_metric), points in self.points.items():
+            if source != endpoint_id or source_metric != metric:
+                continue
+            for point in points:
+                if cutoff <= point.at <= now:
+                    previous = values_by_time.get(point.at)
+                    values_by_time[point.at] = point.value if previous is None else max(previous, point.value)
+        return tuple(values_by_time[at] for at in sorted(values_by_time))
+
 
 class FanGauge(Static):
     """A compact terminal-safe ring for one fan's independent PWM and tach state."""
@@ -318,6 +331,10 @@ class FanAppUI(Static):
         border: round $primary;
         content-align: center middle;
     }
+    #graph-two-util-row { height: 2; width: 1fr; }
+    .graph-two-util-card { height: 2; width: 1fr; }
+    .graph-two-util-label { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
+    .graph-two-util-sparkline { height: 1; width: 1fr; }
     """
 
     def __init__(
@@ -350,6 +367,11 @@ class FanAppUI(Static):
         self.snapshot: ControlSnapshot | None = None
         self.history = DashboardHistory(collection_interval_seconds)
         self.panels: dict[str, Static] = {}
+        self.graph_two_util_row: Horizontal | None = None
+        self.graph_two_temp_panel: Static | None = None
+        self.graph_two_util_labels: dict[str, Static] = {}
+        self.graph_two_sparklines: dict[str, Sparkline] = {}
+        self.graph_two_endpoint_ids: tuple[str, ...] = ()
         self.last_render_time: float | None = None
         self.last_signature: tuple[tuple[object, ...], ...] | None = None
         self.monitor_transport_status: str | None = None
@@ -589,6 +611,7 @@ class FanAppUI(Static):
         if self.graph_view == "graph-2":
             self._render_graph_two(snapshot, now)
             return
+        self._clear_graph_two_widgets()
         scroll = self.query_one("#dashboard-scroll", VerticalScroll)
         terminal_width = self.screen.size.width
         warning = self.query_one("#dashboard-warning", Static)
@@ -737,15 +760,16 @@ class FanAppUI(Static):
         if panel is None:
             panel = Static(classes="dgx-panel", markup=False)
             self.panels["__graph_two__"] = panel
-            scroll.mount(panel)
         for key, stale_panel in list(self.panels.items()):
             if key != "__graph_two__":
                 stale_panel.remove()
                 del self.panels[key]
         available = max(30, scroll.scrollable_content_region.width)
         card_width = max(30, (available - 1) // max(1, min(2, len(snapshot.endpoint_snapshots))))
+        endpoints = snapshot.endpoint_snapshots[:2]
+        self._ensure_graph_two_widgets(scroll, panel, endpoints)
         cards: list[tuple[list[str], tuple[tuple[tuple[int, int, int], ...], ...]]] = []
-        for endpoint in snapshot.endpoint_snapshots[:2]:
+        for endpoint in endpoints:
             gpus = endpoint.gpus if endpoint.healthy and not endpoint.stale and endpoint.error is None else ()
             temperatures = [gpu.temperature_celsius for gpu in gpus if gpu.temperature_celsius is not None]
             utilization = [gpu.utilization_percent for gpu in gpus if gpu.utilization_percent is not None]
@@ -766,14 +790,19 @@ class FanAppUI(Static):
                 used = [gpu.memory_used_mib for gpu in gpus if gpu.memory_used_mib is not None]
                 mem = "N/A" if not gpus or len(used) != len(gpus) else f"{int(sum(used) // 1024)} GiB"
             power = "N/A" if not gpus or any(value is None for value in powers) else f"{sum(value for value in powers if value is not None):.0f} W"
-            util_chart = self.history.endpoint_area(endpoint.endpoint_id, "util", now, max(1, card_width - 7), 100, 2)
-            util_box = self._chart_lines("UTIL", util, util_chart)
             metric_rows, metric_spans = self._large_metric_rows((temp, mem, util, power), card_width)
             cards.append(([
                 _compact_display_text(f"┌ {endpoint.name}", card_width).ljust(card_width, "─"),
                 *metric_rows,
-                *util_box,
             ], metric_spans))
+            label = self.graph_two_util_labels[endpoint.endpoint_id]
+            label.update(_compact_display_text(f"UTIL {util} · {endpoint.name}", card_width))
+            sparkline = self.graph_two_sparklines[endpoint.endpoint_id]
+            sparkline.data = (
+                self.history.endpoint_values(endpoint.endpoint_id, "util", now)
+                if gpus
+                else ()
+            )
         rendered = Text()
         height = max((len(card[0]) for card in cards), default=0)
         for row in range(height):
@@ -793,26 +822,63 @@ class FanAppUI(Static):
                     for metric_index, offset, width in metric_spans[row - 1]:
                         color = colors[metric_index]
                         line.stylize(Style(color=_rich_color(color)), start + offset, start + offset + width)
-                elif row > len(metric_spans):
-                    line.stylize(
-                        Style(color=_rich_color(self.dashboard_colors.utilization)),
-                        start,
-                        start + len(value.rstrip()),
-                    )
                 if index < len(cards) - 1:
                     line.append(" ")
             rendered.append(line)
             rendered.append("\n")
         labels = [f"{index + 1}:{_compact_display_text(endpoint.name, 15)}" for index, endpoint in enumerate(snapshot.endpoint_snapshots[:2])]
-        rendered.append(_compact_display_text("TEMP 120s · " + " · ".join(labels) + " · X: overlap", available) + "\n")
-        rendered.append(
-            "\n".join(self._shared_temperature_lines(snapshot.endpoint_snapshots[:2], now, available)) + "\n",
+        temp_rendered = Text(_compact_display_text("TEMP 120s · " + " · ".join(labels) + " · X: overlap", available) + "\n")
+        temp_rendered.append(
+            "\n".join(self._shared_temperature_lines(endpoints, now, available)) + "\n",
             style=Style(color=_rich_color(self.dashboard_colors.temperature)),
         )
         panel.update(rendered)
-        scroll.move_child(panel, before=0)
+        assert self.graph_two_temp_panel is not None
+        self.graph_two_temp_panel.update(temp_rendered)
         self._dashboard_layout_signature = self._layout_signature(scroll)
         self._schedule_layout_check()
+
+    def _ensure_graph_two_widgets(
+        self, scroll: VerticalScroll, panel: Static, endpoints: tuple[EndpointSnapshot, ...]
+    ) -> None:
+        """Mount and retain the real Graph #2 utilization Sparklines by endpoint."""
+        endpoint_ids = tuple(endpoint.endpoint_id for endpoint in endpoints)
+        if self.graph_two_endpoint_ids == endpoint_ids and self.graph_two_util_row is not None:
+            return
+        self._clear_graph_two_widgets()
+        cards: list[Vertical] = []
+        for index, endpoint in enumerate(endpoints):
+            label = Static(classes="graph-two-util-label", markup=False)
+            sparkline = Sparkline(
+                (),
+                min_color=_rich_color(self.dashboard_colors.utilization),
+                max_color=_rich_color(self.dashboard_colors.utilization),
+                id=f"graph-two-util-{index}",
+                classes="graph-two-util-sparkline",
+            )
+            self.graph_two_util_labels[endpoint.endpoint_id] = label
+            self.graph_two_sparklines[endpoint.endpoint_id] = sparkline
+            cards.append(Vertical(label, sparkline, classes="graph-two-util-card"))
+        self.graph_two_util_row = Horizontal(*cards, id="graph-two-util-row")
+        self.graph_two_temp_panel = Static(classes="dgx-panel", markup=False)
+        self.graph_two_endpoint_ids = endpoint_ids
+        if panel.parent is None:
+            scroll.mount(panel, self.graph_two_util_row, self.graph_two_temp_panel)
+        else:
+            scroll.mount(self.graph_two_util_row, after=panel)
+            scroll.mount(self.graph_two_temp_panel, after=self.graph_two_util_row)
+
+    def _clear_graph_two_widgets(self) -> None:
+        """Remove Graph #2-only mounted widgets before graph mode or endpoint changes."""
+        if self.graph_two_util_row is not None:
+            self.graph_two_util_row.remove()
+        if self.graph_two_temp_panel is not None:
+            self.graph_two_temp_panel.remove()
+        self.graph_two_util_row = None
+        self.graph_two_temp_panel = None
+        self.graph_two_util_labels.clear()
+        self.graph_two_sparklines.clear()
+        self.graph_two_endpoint_ids = ()
 
     def _large_metric_rows(
         self,
