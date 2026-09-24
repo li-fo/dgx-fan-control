@@ -18,6 +18,12 @@ url = "http://192.168.1.10:9400/metrics"
 # memory_source = "node-exporter"
 # node_exporter_url = "http://192.168.1.11:9100/metrics"
 
+[dashboard]
+# "graph-1" preserves the classic dashboard. Select "graph-2" in Fan
+# Control > Setting > UI for the compact two-DGX summary; its POWER is N/A
+# unless DCGM reported a valid power value for every physical GPU.
+graph_view = "graph-1"
+
 [dashboard.colors]
 # Optional foreground colors for MEM, UTIL, TEMP, and History Power charts. Use a Rich color
 # name or exact #RRGGBB; omit any key to retain the terminal default color.

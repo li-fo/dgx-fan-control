@@ -24,6 +24,7 @@ _METRICS = {
     "DCGM_FI_DEV_FB_USED": "memory_used_mib",
     "DCGM_FI_DEV_FB_FREE": "memory_free_mib",
     "DCGM_FI_DEV_FB_RESERVED": "memory_reserved_mib",
+    "DCGM_FI_DEV_POWER_USAGE": "power_watts",
 }
 
 ArchiveCallback = Callable[[EndpointConfig, str | None, str | None], None]
@@ -34,6 +35,8 @@ def _valid(value: float, metric: str) -> bool:
         return -20 <= value <= 150
     if metric == "utilization_percent":
         return 0 <= value <= 100
+    if metric == "power_watts":
+        return 0 <= value < 1_000_000
     return 0 <= value < 1_000_000_000_000
 
 
@@ -61,7 +64,8 @@ def parse_metrics(endpoint_id: str, name: str, text: str) -> tuple[GPUStat, ...]
         used, free, reserved = item.get("memory_used_mib"), item.get("memory_free_mib"), item.get("memory_reserved_mib")
         total = used + free + reserved if used is not None and free is not None and reserved is not None else None
         result.append(GPUStat(key=key, name=labels.get("modelName") or labels.get("model") or "GPU", memory_used_mib=used,
-            memory_total_mib=total, utilization_percent=item.get("utilization_percent"), temperature_celsius=item.get("temperature_celsius")))
+            memory_total_mib=total, utilization_percent=item.get("utilization_percent"), temperature_celsius=item.get("temperature_celsius"),
+            power_watts=item.get("power_watts")))
     return tuple(sorted(result, key=lambda gpu: gpu.key))
 
 

@@ -686,6 +686,37 @@ class _DashboardApp(App[None]):
         yield FanAppUI("config.toml", lambda: None, 75, 2)
 
 
+def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
+    class GraphTwoApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FanAppUI("config.toml", lambda: None, 75, 2, graph_view="graph-2")
+
+    gpu = GPUStat("GPU-a", "A100", 50, 100, 40, 55, 250)
+    snapshot = _fan_snapshot(
+        20, "curve", "AUTO ON", 55, 0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (
+            EndpointSnapshot("one", "One", True, 0, gpus=(gpu,), sample_revision=1),
+            EndpointSnapshot("two", "Two", True, 0, gpus=(gpu,), sample_revision=1),
+        ),
+    )
+    app = GraphTwoApp()
+
+    async def exercise() -> None:
+        async with app.run_test(size=(102, 24)) as pilot:
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 120)
+            await pilot.pause()
+            text = next(iter(ui.query(".dgx-panel"))).render().plain
+            assert "POWER 250 W" in text and "TEMP 120s" in text and "X: overlap" in text
+            await pilot.resize_terminal(79, 30)
+            await pilot.pause()
+            scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
+            assert scroll.display and scroll.max_scroll_y == 0
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize(
     ("endpoint", "expected"),
     [

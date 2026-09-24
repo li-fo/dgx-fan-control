@@ -16,7 +16,7 @@ from textual.widgets import Button, Footer, Header, Static, TabbedContent, TabPa
 
 from .config import DashboardColors, EndpointConfig
 from .history_ui import HistoryPanel, HistoryQuery
-from .models import ControlSnapshot, GPUStat, MemoryStat
+from .models import ControlSnapshot, EndpointSnapshot, GPUStat, MemoryStat
 
 HISTORY_SECONDS = 120.0
 MIN_DASHBOARD_WIDTH = 79
@@ -201,6 +201,27 @@ class DashboardHistory:
         rows.append(axis[: width + 5].ljust(width + 5))
         return rows
 
+    def endpoint_area(
+        self, endpoint_id: str, metric: str, now: float, width: int, maximum: float, plot_height: int
+    ) -> list[str]:
+        """Draw a per-endpoint physical-GPU maximum without changing stored samples."""
+        cutoff = now - HISTORY_SECONDS
+        bins: list[float | None] = [None] * width
+        for (source, _gpu, source_metric), points in self.points.items():
+            if source != endpoint_id or source_metric != metric:
+                continue
+            for point in points:
+                if cutoff <= point.at <= now:
+                    index = min(width - 1, int((point.at - cutoff) / HISTORY_SECONDS * width))
+                    previous = bins[index]
+                    bins[index] = point.value if previous is None else max(previous, point.value)
+        aggregate = DashboardHistory(self.collection_interval_seconds)
+        aggregate.points[(endpoint_id, "__endpoint__", metric)] = [
+            HistoryPoint(cutoff + (index + 0.5) / width * HISTORY_SECONDS, value)
+            for index, value in enumerate(bins) if value is not None
+        ]
+        return aggregate.area(endpoint_id, "__endpoint__", metric, now, width, maximum, plot_height)
+
 
 class FanGauge(Static):
     """A compact terminal-safe ring for one fan's independent PWM and tach state."""
@@ -282,6 +303,7 @@ class FanAppUI(Static):
         dashboard_colors: DashboardColors | None = None,
         settings: Callable[[], None] | None = None,
         *,
+        graph_view: str = "graph-1",
         read_only: bool = False,
         history_query: HistoryQuery | None = None,
         history_endpoints: tuple[EndpointConfig, ...] = (),
@@ -293,6 +315,7 @@ class FanAppUI(Static):
             emergency_temperature,
         )
         self.dashboard_colors = dashboard_colors or DashboardColors()
+        self.graph_view = graph_view
         self.collection_interval_seconds = collection_interval_seconds
         self.settings = settings
         self.read_only = read_only
@@ -456,10 +479,12 @@ class FanAppUI(Static):
         emergency_temperature: float,
         collection_interval_seconds: float,
         dashboard_colors: DashboardColors,
+        graph_view: str = "graph-1",
     ) -> None:
         """Apply effective presentation settings without discarding chart history."""
         self.emergency_temperature = emergency_temperature
         self.dashboard_colors = dashboard_colors
+        self.graph_view = graph_view
         self.history.collection_interval_seconds = collection_interval_seconds
         self.collection_interval_seconds = collection_interval_seconds
         try:
@@ -529,6 +554,9 @@ class FanAppUI(Static):
             self.settings()
 
     def _render_dashboard(self, snapshot: ControlSnapshot, now: float) -> None:
+        if self.graph_view == "graph-2":
+            self._render_graph_two(snapshot, now)
+            return
         scroll = self.query_one("#dashboard-scroll", VerticalScroll)
         terminal_width = self.screen.size.width
         warning = self.query_one("#dashboard-warning", Static)
@@ -658,6 +686,103 @@ class FanAppUI(Static):
             previous = panel
         self._dashboard_layout_signature = self._layout_signature(scroll)
         self._schedule_layout_check()
+
+    def _render_graph_two(self, snapshot: ControlSnapshot, now: float) -> None:
+        """Compact endpoint summary using the same live samples and 120s history.
+
+        This intentionally lives behind the mode switch: Graph #1 retains its
+        exact renderer and chart layout when the new setting is absent.
+        """
+        scroll = self.query_one("#dashboard-scroll", VerticalScroll)
+        warning = self.query_one("#dashboard-warning", Static)
+        if self.screen.size.width < MIN_DASHBOARD_WIDTH:
+            warning.update(f"Dashboard width {self.screen.size.width}; at least {MIN_DASHBOARD_WIDTH} columns required for charts.")
+            scroll.display = False
+            return
+        warning.update("")
+        scroll.display = True
+        panel = self.panels.get("__graph_two__")
+        if panel is None:
+            panel = Static(classes="dgx-panel", markup=False)
+            self.panels["__graph_two__"] = panel
+            scroll.mount(panel)
+        for key, stale_panel in list(self.panels.items()):
+            if key != "__graph_two__":
+                stale_panel.remove()
+                del self.panels[key]
+        available = max(30, scroll.scrollable_content_region.width)
+        card_width = max(30, (available - 1) // max(1, min(2, len(snapshot.endpoint_snapshots))))
+        cards: list[list[str]] = []
+        for endpoint in snapshot.endpoint_snapshots[:2]:
+            gpus = endpoint.gpus if endpoint.healthy and not endpoint.stale and endpoint.error is None else ()
+            temperatures = [gpu.temperature_celsius for gpu in gpus if gpu.temperature_celsius is not None]
+            utilization = [gpu.utilization_percent for gpu in gpus if gpu.utilization_percent is not None]
+            powers = [gpu.power_watts for gpu in gpus]
+            temp = "N/A" if not temperatures else f"{max(temperatures):.1f} C"
+            util = "N/A" if not utilization else f"{max(utilization):.0f}%"
+            if endpoint.memory_source == "node-exporter":
+                memory = (
+                    endpoint.uma_memory
+                    if gpus and endpoint.memory_healthy and not endpoint.memory_stale and endpoint.memory_error is None
+                    else None
+                )
+                mem = "N/A" if memory is None or memory.total_mib <= 0 else f"{memory.used_mib:.0f}/{memory.total_mib:.0f} MiB"
+            else:
+                used = sum(gpu.memory_used_mib or 0 for gpu in gpus)
+                total = sum(gpu.memory_total_mib or 0 for gpu in gpus)
+                mem = "N/A" if not gpus or any(gpu.memory_used_mib is None or gpu.memory_total_mib is None for gpu in gpus) else f"{used:.0f}/{total:.0f} MiB"
+            power = "N/A" if not gpus or any(value is None for value in powers) else f"{sum(value for value in powers if value is not None):.0f} W"
+            util_chart = self.history.endpoint_area(endpoint.endpoint_id, "util", now, max(1, card_width - 7), 100, 2)
+            util_box = self._chart_lines("UTIL", util, util_chart)
+            cards.append([
+                _compact_display_text(f"┌ {endpoint.name}", card_width).ljust(card_width, "─"),
+                _compact_display_text(f"TEMP {temp}  MEM {mem}", card_width),
+                _compact_display_text(f"UTIL {util}  POWER {power}", card_width),
+                *util_box,
+            ])
+        rendered = Text()
+        height = max((len(card) for card in cards), default=0)
+        for row in range(height):
+            line = " ".join(card[row].ljust(card_width) if row < len(card) else " " * card_width for card in cards).rstrip()
+            rendered.append(line, style=Style(bold=row in {1, 2}))
+            rendered.append("\n")
+        labels = [f"{index + 1}:{_compact_display_text(endpoint.name, 15)}" for index, endpoint in enumerate(snapshot.endpoint_snapshots[:2])]
+        rendered.append(_compact_display_text("TEMP 120s · " + " · ".join(labels) + " · X: overlap", available) + "\n")
+        rendered.append("\n".join(self._shared_temperature_lines(snapshot.endpoint_snapshots[:2], now, available)) + "\n")
+        panel.update(rendered)
+        scroll.move_child(panel, before=0)
+        self._dashboard_layout_signature = self._layout_signature(scroll)
+        self._schedule_layout_check()
+
+    @staticmethod
+    def _chart_lines(metric: str, value: str, chart: list[str]) -> list[str]:
+        inner = max(len(row) for row in chart)
+        return [
+            f"┌ {metric} {value}"[: inner + 1].ljust(inner + 1, "─") + "┐",
+            *(f"│{row.ljust(inner)}│" for row in chart),
+            "└" + "─" * inner + "┘",
+        ]
+
+    def _shared_temperature_lines(
+        self, endpoints: tuple[EndpointSnapshot, ...], now: float, total_width: int
+    ) -> list[str]:
+        width = max(1, total_width - 7)
+        plots = [
+            self.history.endpoint_area(endpoint.endpoint_id, "temp", now, width, max(100, self.emergency_temperature), 2)
+            for endpoint in endpoints
+        ]
+        if not plots:
+            return ["N/A"]
+        lines: list[str] = []
+        for row in range(len(plots[0]) - 1):
+            prefix = plots[0][row][:5]
+            marks = []
+            for column in range(width):
+                active = [index + 1 for index, plot in enumerate(plots) if plot[row][5 + column] != " "]
+                marks.append("X" if len(active) > 1 else (str(active[0]) if active else " "))
+            lines.append(prefix + "".join(marks))
+        lines.append(plots[0][-1])
+        return self._chart_lines("TEMP", "1/2 max; gaps blank", lines)
 
     @staticmethod
     def _plot_height(viewport_height: int, endpoint_count: int, gpu_count: int) -> int:

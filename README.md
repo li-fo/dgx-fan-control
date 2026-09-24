@@ -2,7 +2,7 @@
 
 [한국어 README](README.ko.md)
 
-`dgx-fan` is a Python Textual application for a Raspberry Pi 4. It reads GPU data from up to two DCGM exporter endpoints and drives two 4-wire PWM fans independently or in a linked higher-demand mode. The dashboard shows GPU memory, utilisation, and temperature, along with each fan's status. Since DCGM cannot report DGX Spark memory information, node_exporter can provide unified-memory usage for each DGX.
+`dgx-fan` is a Python Textual application for a Raspberry Pi 4. It reads GPU data from up to two DCGM exporter endpoints and drives two 4-wire PWM fans independently or in a linked higher-demand mode. The dashboard shows GPU memory, utilisation, temperature, and fan status. Since DCGM cannot report DGX Spark memory information, node_exporter can provide unified-memory usage for each DGX.
 
 ![DGX Fan Control 7inch LCE](./images/dgx-fan-control.webp)
 
@@ -154,7 +154,9 @@ Direct operational scripts moved from the repository root to `scripts/`. Existin
 
 ### Dashboard colours
 
-`[dashboard.colors]` is optional. `memory`, `utilization`, and `temperature` independently set the foreground colour of their charts. The Colors tab offers Default plus Rich's 16 standard ANSI slots (`black` through `white` and `bright_black` through `bright_white`) with visual swatches; Default omits that field. An existing valid custom name or `#RRGGBB` value appears as **Current custom** and is preserved until explicitly replaced. Manual configuration may still use any valid Rich foreground colour name or exact `#RRGGBB`; `"default"` is not accepted as a stored value. On an 8-colour terminal, bright presets may render the same as their base colours.
+`[dashboard]` is optional. `graph_view = "graph-1"` is the unchanged default; choose `"graph-2"` in **Fan Control → Setting → UI** for the compact, two-DGX view. Graph #2 presents endpoint TEMP, MEM, UTIL, and POWER, a 120-second UTIL chart per card, and a shared 120-second TEMP comparison. The shared legend uses `1`/`2` for DGX series and `X` where they overlap; blanks are missing-data gaps. Power is live DCGM `DCGM_FI_DEV_POWER_USAGE`: it is shown only when every physical GPU has a valid value, otherwise it is **N/A**. `graph_view` and presentation metadata are carried to the browser monitor, while `web.allow_control = false` still prevents browser saves. `[dashboard.colors]` is optional. `memory`, `utilization`, and `temperature` independently set the foreground colour of their charts. The Colors tab offers Default plus Rich's 16 standard ANSI slots (`black` through `white` and `bright_black` through `bright_white`) with visual swatches; Default omits that field. An existing valid custom name or `#RRGGBB` value appears as **Current custom** and is preserved until explicitly replaced. Manual configuration may still use any valid Rich foreground colour name or exact `#RRGGBB`; `"default"` is not accepted as a stored value. On an 8-colour terminal, bright presets may render the same as their base colours.
+
+To downgrade to a version that predates Graph #2, remove `dashboard.graph_view` from `config.toml` (or restore the backup made before changing settings); older versions reject unknown configuration keys.
 
 ### Browser monitor
 

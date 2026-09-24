@@ -56,6 +56,20 @@ def test_monitor_state_round_trip_preserves_chart_history() -> None:
     assert decoded.history.area("dgx-1", "gpu-0", "mem", 100, 8, 100)
 
 
+def test_monitor_wire_keeps_optional_power_and_graph_view_compatible() -> None:
+    state = _state()
+    assert state.snapshot is not None
+    powered = MonitorState(
+        state.source_id, state.revision, state.captured_at, state.snapshot, state.history,
+        graph_view="graph-2",
+    )
+    decoded = decode_state(encode_state(powered), 2)
+    assert decoded.graph_view == "graph-2"
+    assert decoded.snapshot is not None
+    # Older frames omit these optional keys without losing the existing GPU DTO.
+    assert decoded.snapshot.endpoint_snapshots[0].gpus[0].power_watts is None
+
+
 def test_monitor_state_supports_full_two_dgx_eight_gpu_minimum_interval_history() -> None:
     """The transport covers 120 seconds at 0.1s for the documented topology."""
     state = _state()

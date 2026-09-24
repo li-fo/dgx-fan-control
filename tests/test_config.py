@@ -76,6 +76,22 @@ def test_load_valid_config(tmp_path: Path) -> None:
     assert config.web.port == 8000
     assert config.web.allow_control is False
     assert config.web.socket_path == (path.parent / ".dgx-fan-monitor.sock").resolve()
+    assert config.graph_view == "graph-1"
+
+
+@pytest.mark.parametrize("view", ["graph-0", "Graph-2", 2, ["graph-2"]])
+def test_rejects_invalid_dashboard_graph_view(tmp_path: Path, view: object) -> None:
+    path = tmp_path / "config.toml"
+    rendered = '["graph-2"]' if isinstance(view, list) else (repr(view) if not isinstance(view, str) else f'"{view}"')
+    path.write_text(_config() + f"\n[dashboard]\ngraph_view = {rendered}\n")
+    with pytest.raises(ConfigError, match=r"dashboard\.graph_view"):
+        load_config(path)
+
+
+def test_loads_graph_two(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config() + '\n[dashboard]\ngraph_view = "graph-2"\n')
+    assert load_config(path).graph_view == "graph-2"
 
 
 def test_loads_opt_in_web_monitor_settings(tmp_path: Path) -> None:

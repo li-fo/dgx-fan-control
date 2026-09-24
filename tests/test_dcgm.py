@@ -29,6 +29,13 @@ def test_parse_uuid_mig_and_sentinel() -> None:
     assert gpus[0].temperature_celsius == 55
 
 
+def test_parse_optional_physical_gpu_power() -> None:
+    gpus = parse_metrics(
+        "one", "One", METRICS + 'DCGM_FI_DEV_POWER_USAGE{UUID="GPU-a"} 321.5\n'
+    )
+    assert gpus[0].power_watts == 321.5
+
+
 @pytest.mark.asyncio
 async def test_collector_retains_fresh_sample_then_expires(monkeypatch: pytest.MonkeyPatch) -> None:
     endpoint = EndpointConfig("one", "One", "http://example/metrics")

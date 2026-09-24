@@ -70,6 +70,7 @@ class DGXFanMonitorApp(App[None]):
             self.config.collection.interval_seconds,
             self.config.dashboard_colors,
             self.open_settings,
+            graph_view=self.config.graph_view,
             history_query=self.query_history,
             history_endpoints=self.config.endpoints,
             # Opt-in alone is insufficient: a compatible, fresh controller
@@ -168,6 +169,7 @@ class DGXFanMonitorApp(App[None]):
         interval = state.collection_interval_seconds
         emergency = state.emergency_temperature_celsius
         colors = state.dashboard_colors
+        graph_view = state.graph_view
         if interval is not None:
             self.config = replace(
                 self.config,
@@ -181,12 +183,17 @@ class DGXFanMonitorApp(App[None]):
                     self.config.control, emergency_temperature_celsius=emergency
                 ),
             )
-        if colors is not None:
-            self.config = replace(self.config, dashboard_colors=colors)
+        if colors is not None or graph_view is not None:
+            self.config = replace(
+                self.config,
+                dashboard_colors=colors or self.config.dashboard_colors,
+                graph_view=graph_view or self.config.graph_view,
+            )
         ui.reconfigure_display(
             self.config.control.emergency_temperature_celsius,
             self.config.collection.interval_seconds,
             self.config.dashboard_colors,
+            self.config.graph_view,
         )
         ui.set_monitor_transport_status(None)
         ui.update_monitor_snapshot(state.snapshot, state.captured_at, state.history)

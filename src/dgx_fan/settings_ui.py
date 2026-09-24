@@ -163,6 +163,7 @@ class SettingsScreen(ModalScreen[bool]):
         control = self._section("control")
         hardware = self._section("hardware")
         colors = self._section("dashboard").get("colors", {})
+        graph_view = self._section("dashboard").get("graph_view", "graph-1")
         if not isinstance(colors, dict):
             colors = {}
         stages = control.get("stages", [])
@@ -268,6 +269,20 @@ class SettingsScreen(ModalScreen[bool]):
                     yield Static(
                         "Fallback overrides the normal cap; safety may override requested power.",
                         classes="setting-note",
+                    )
+                with (
+                    TabPane("UI", id="settings-tab-ui"),
+                    VerticalScroll(id="settings-scroll-ui", classes="settings-scroll"),
+                    Vertical(id="settings-section-ui", classes="settings-section"),
+                ):
+                    yield self._row(
+                        "Dashboard view",
+                        Select(
+                            [("Graph #1 (classic)", "graph-1"), ("Graph #2 (two DGX)", "graph-2")],
+                            value=graph_view if graph_view in {"graph-1", "graph-2"} else "graph-1",
+                            id="setting-dashboard-graph-view",
+                            classes="setting-input",
+                        ),
                     )
                 with (
                     TabPane("Hardware", id="settings-tab-hardware"),
@@ -420,7 +435,10 @@ class SettingsScreen(ModalScreen[bool]):
                 ),
                 "shutdown_mode": self._select_value("hardware-shutdown-mode", "Shutdown policy"),
             },
-            "dashboard": {"colors": colors},
+            "dashboard": {
+                "colors": colors,
+                "graph_view": self._select_value("dashboard-graph-view", "UI dashboard"),
+            },
         }
 
     def _show_error(self, message: str) -> None:

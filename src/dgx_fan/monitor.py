@@ -49,6 +49,7 @@ class MonitorState:
     collection_interval_seconds: float | None = None
     emergency_temperature_celsius: float | None = None
     dashboard_colors: DashboardColors | None = None
+    graph_view: str | None = None
     power_enabled: bool | None = None
     control_available: bool | None = None
 
@@ -95,6 +96,7 @@ def _gpu_to_wire(gpu: GPUStat) -> dict[str, object]:
         "memory_total_mib": gpu.memory_total_mib,
         "utilization_percent": gpu.utilization_percent,
         "temperature_celsius": gpu.temperature_celsius,
+        "power_watts": gpu.power_watts,
     }
 
 
@@ -107,6 +109,7 @@ def _gpu_from_wire(value: object, name: str) -> GPUStat:
         _optional_number(mapping.get("memory_total_mib"), f"{name}.memory_total_mib"),
         _optional_number(mapping.get("utilization_percent"), f"{name}.utilization_percent"),
         _optional_number(mapping.get("temperature_celsius"), f"{name}.temperature_celsius"),
+        _optional_number(mapping.get("power_watts"), f"{name}.power_watts"),
     )
 
 
@@ -295,6 +298,7 @@ def encode_state(state: MonitorState) -> bytes:
                 "power": state.dashboard_colors.power,
             }
         ),
+        "graph_view": state.graph_view,
         "power_enabled": state.power_enabled,
         "control_available": state.control_available,
     }
@@ -336,6 +340,9 @@ def decode_state(encoded: bytes, collection_interval_seconds: float) -> MonitorS
             _optional_string(colors_mapping.get("temperature"), "dashboard_colors.temperature"),
             _optional_string(colors_mapping.get("power", "ansi_green"), "dashboard_colors.power"),
         )
+    graph_view = _optional_string(mapping.get("graph_view"), "graph_view")
+    if graph_view is not None and graph_view not in {"graph-1", "graph-2"}:
+        raise MonitorProtocolError("graph_view must be graph-1 or graph-2")
     settings_revision_raw = mapping.get("settings_revision")
     settings_revision = (
         None
@@ -374,6 +381,7 @@ def decode_state(encoded: bytes, collection_interval_seconds: float) -> MonitorS
         effective_interval,
         emergency,
         colors,
+        graph_view,
         power,
         control_available,
     )
@@ -403,6 +411,7 @@ class MonitorPublisher:
         self._settings_revision: int | None = None
         self._emergency_temperature_celsius: float | None = None
         self._dashboard_colors: DashboardColors | None = None
+        self._graph_view: str | None = None
         self._power_enabled: bool | None = None
         self._control_available: bool | None = None
 
@@ -422,6 +431,7 @@ class MonitorPublisher:
         self._settings_revision = settings_revision
         self._emergency_temperature_celsius = config.control.emergency_temperature_celsius
         self._dashboard_colors = config.dashboard_colors
+        self._graph_view = config.graph_view
         self._power_enabled = power_enabled
         self._control_available = control_available
         # Make the accepted effective state observable without waiting out the
@@ -514,6 +524,7 @@ class MonitorPublisher:
                     collection_interval_seconds=self._history.collection_interval_seconds,
                     emergency_temperature_celsius=self._emergency_temperature_celsius,
                     dashboard_colors=self._dashboard_colors,
+                    graph_view=self._graph_view,
                     power_enabled=self._power_enabled,
                     control_available=self._control_available,
                 )

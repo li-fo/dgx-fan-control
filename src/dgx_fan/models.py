@@ -18,6 +18,9 @@ class GPUStat:
     memory_total_mib: float | None = None
     utilization_percent: float | None = None
     temperature_celsius: float | None = None
+    # Live-only DCGM telemetry.  The archival path intentionally retains the
+    # unmodified scrape response, so older history databases remain compatible.
+    power_watts: float | None = None
 
 
 @dataclass(frozen=True)

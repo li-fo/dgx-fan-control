@@ -214,6 +214,7 @@ def test_settings_tabs_switch_by_mouse_and_keyboard_with_fixed_actions(
                 "Collection",
                 "Fan Speed",
                 "Fan Control",
+                "UI",
                 "Hardware",
                 "Colors",
             ]

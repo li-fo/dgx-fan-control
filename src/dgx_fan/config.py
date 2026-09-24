@@ -93,6 +93,7 @@ class AppConfig:
     control: ControlConfig
     hardware: HardwareConfig
     dashboard_colors: DashboardColors = field(default_factory=DashboardColors)
+    graph_view: str = "graph-1"
     web: WebConfig = field(default_factory=WebConfig)
 
 
@@ -157,20 +158,23 @@ def _dashboard_color(value: object, name: str) -> str:
     return normalized
 
 
-def _dashboard_colors(raw: dict[str, object]) -> DashboardColors:
+def _dashboard_settings(raw: dict[str, object]) -> tuple[DashboardColors, str]:
     dashboard_raw = raw.get("dashboard")
     if dashboard_raw is None:
-        return DashboardColors()
+        return DashboardColors(), "graph-1"
     dashboard = _mapping(dashboard_raw, "dashboard")
-    _reject_unknown_keys(dashboard, "dashboard", {"colors"})
+    _reject_unknown_keys(dashboard, "dashboard", {"colors", "graph_view"})
+    graph_view = dashboard.get("graph_view", "graph-1")
+    if not isinstance(graph_view, str) or graph_view not in {"graph-1", "graph-2"}:
+        raise ConfigError("dashboard.graph_view must be graph-1 or graph-2")
     colors_raw = dashboard.get("colors")
     if colors_raw is None:
-        return DashboardColors()
+        return DashboardColors(), graph_view
     colors = _mapping(colors_raw, "dashboard.colors")
     _reject_unknown_keys(colors, "dashboard.colors", {"memory", "utilization", "temperature", "power"})
     return DashboardColors(
         **{key: _dashboard_color(value, f"dashboard.colors.{key}") for key, value in colors.items()}
-    )
+    ), graph_view
 
 
 def _web_config(raw: dict[str, object], config_path: Path) -> WebConfig:
@@ -224,7 +228,7 @@ def load_config(path: Path) -> AppConfig:
                 "set hardware.pwm_gpio_bcm = [18, 19], and set control.fan_endpoint_ids"
             )
         raise ConfigError("version must be 2")
-    dashboard_colors = _dashboard_colors(raw)
+    dashboard_colors, graph_view = _dashboard_settings(raw)
     web_config = _web_config(raw, path)
     raw_endpoints = raw.get("dgx")
     if not isinstance(raw_endpoints, list) or not 1 <= len(raw_endpoints) <= 2:
@@ -396,5 +400,6 @@ def load_config(path: Path) -> AppConfig:
             shutdown_mode,
         ),
         dashboard_colors,
+        graph_view,
         web_config,
     )

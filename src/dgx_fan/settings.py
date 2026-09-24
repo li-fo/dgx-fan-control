@@ -137,7 +137,7 @@ def settings_payload(config: AppConfig) -> dict[str, object]:
             "stall_timeout_seconds": config.hardware.stall_timeout_seconds,
             "shutdown_mode": config.hardware.shutdown_mode,
         },
-        "dashboard": {"colors": colors},
+        "dashboard": {"colors": colors, "graph_view": config.graph_view},
     }
 
 
@@ -577,7 +577,7 @@ class SettingsService:
                     "stall_timeout_seconds",
                     "shutdown_mode",
                 },
-                "dashboard": {"colors"},
+                "dashboard": {"colors", "graph_view"},
             }[section]
             unknown_keys = set(values) - permitted
             if unknown_keys:
@@ -619,6 +619,8 @@ class SettingsService:
                     color_table[key] = colors[key]
                 elif key in color_table:
                     del color_table[key]
+            if "graph_view" in values:
+                target["graph_view"] = values["graph_view"]
 
 
 class SettingsCommandServer:
