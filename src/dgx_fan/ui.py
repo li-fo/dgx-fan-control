@@ -23,6 +23,7 @@ from textual.widgets import Button, Footer, Header, Sparkline, Static, TabbedCon
 from .config import DashboardColors, EndpointConfig
 from .history_ui import HistoryPanel, HistoryQuery
 from .models import ControlSnapshot, EndpointSnapshot, GPUStat, MemoryStat
+from .ui_sparkline import FixedScaleSparkline
 
 HISTORY_SECONDS = 120.0
 MIN_DASHBOARD_WIDTH = 79
@@ -803,24 +804,19 @@ class FanAppUI(Static):
             ], metric_spans))
             sparkline = self.graph_two_sparklines[endpoint.endpoint_id]
             samples = self.history.endpoint_samples(endpoint.endpoint_id, "util", now) if gpus else ()
-            contiguous = len(samples) >= 2 and all(
+            contiguous = bool(samples) and all(
                 later.at - earlier.at <= self.collection_interval_seconds * 1.5
                 for earlier, later in pairwise(samples)
             )
-            sparkline.display = contiguous
             sparkline.data = tuple(sample.value for sample in samples) if contiguous else ()
             sparkline.min_color = self._sparkline_color(self.dashboard_colors.utilization)
             sparkline.max_color = self._sparkline_color(self.dashboard_colors.utilization)
             sparkline.refresh()
             label = self.graph_two_util_labels[endpoint.endpoint_id]
-            if contiguous:
-                minimum = min(sample.value for sample in samples)
-                maximum = max(sample.value for sample in samples)
-                span = samples[-1].at - samples[0].at
-                trend = f"REL {minimum:.0f}–{maximum:.0f}% · {span:.0f}s"
-            else:
-                trend = "REL N/A"
-            label.update(_compact_display_text(f"UTIL {util} · {trend} · {endpoint.name}", card_width))
+            span = f"{samples[-1].at - samples[0].at:.0f}s" if contiguous else "N/A"
+            label.update(_compact_display_text(
+                f"UTIL {util} · 0–100% · {span} · {endpoint.name}", card_width,
+            ))
         rendered = Text()
         height = max((len(card[0]) for card in cards), default=0)
         for row in range(height):
@@ -867,7 +863,7 @@ class FanAppUI(Static):
         cards: list[Vertical] = []
         for index, endpoint in enumerate(endpoints):
             label = Static(classes="graph-two-util-label", markup=False)
-            sparkline = Sparkline(
+            sparkline = FixedScaleSparkline(
                 (),
                 min_color=self._sparkline_color(self.dashboard_colors.utilization),
                 max_color=self._sparkline_color(self.dashboard_colors.utilization),

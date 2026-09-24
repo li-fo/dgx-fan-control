@@ -5,6 +5,8 @@ from typing import Literal
 
 import pytest
 from rich.cells import cell_len
+from rich.color import Color as RichColor
+from rich.console import Console
 from rich.style import Style
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, VerticalScroll
@@ -23,6 +25,37 @@ from dgx_fan.models import (
     NodeMemorySnapshot,
 )
 from dgx_fan.ui import DashboardHistory, FanAppUI, FanGauge, HistoryPoint
+from dgx_fan.ui_sparkline import _FixedScaleRenderable
+
+
+def _fixed_sparkline_rows(data: tuple[float, ...], width: int = 5, height: int = 1) -> list[str]:
+    console = Console(width=width)
+    renderable = _FixedScaleRenderable(
+        data, width=width, height=height,
+        min_color=RichColor.parse("green"), max_color=RichColor.parse("green"),
+    )
+    return ["".join(segment.text for segment in line) for line in
+            console.render_lines(renderable, options=console.options.update(width=width), pad=False)]
+
+
+def _mounted_sparkline_text(sparkline: Sparkline) -> str:
+    console = Console(width=sparkline.size.width)
+    return "".join(
+        segment.text for line in console.render_lines(
+            sparkline.render(), options=console.options.update(width=sparkline.size.width), pad=False,
+        ) for segment in line
+    )
+
+
+def test_graph_two_fixed_sparkline_renders_absolute_scale_and_absent_data() -> None:
+    assert _fixed_sparkline_rows((0, 50, 100)) == ["▁▁▄▄█"]
+    assert _fixed_sparkline_rows((50,)) == ["▄▄▄▄▄"]
+    assert _fixed_sparkline_rows((50, 50), width=1) == ["▄"]
+    assert _fixed_sparkline_rows((0,)) == ["▁▁▁▁▁"]
+    assert _fixed_sparkline_rows((0, 0)) == ["▁▁▁▁▁"]
+    assert _fixed_sparkline_rows((5, 5)) == ["▁▁▁▁▁"]
+    assert _fixed_sparkline_rows(()) == ["     "]
+    assert _fixed_sparkline_rows((0, 50, 100), height=2) == ["    █", "▁▁███"]
 
 
 def _fan_snapshot(
@@ -723,7 +756,7 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
                 assert color in styles
             sparklines = list(ui.query(Sparkline))
             assert len(sparklines) == 2
-            assert all(sparkline.data == () and not sparkline.display for sparkline in sparklines)
+            assert all(sparkline.data == (40,) and sparkline.display for sparkline in sparklines)
             assert all(sparkline.min_color == sparkline.max_color for sparkline in sparklines)
             assert all(sparkline.max_color is not None and sparkline.max_color.hex == "#00FFFF" for sparkline in sparklines)
             failed = replace(
@@ -841,8 +874,9 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
             ui.update_snapshot(snapshot, 120)
             await pilot.pause()
             sparkline = ui.query_one(Sparkline)
-            assert sparkline.data == () and not sparkline.display
-            assert "UTIL 5% · REL N/A · One" in ui.query_one(".graph-two-util-label", Static).render().plain
+            assert sparkline.data == (5,) and sparkline.display
+            assert set(_mounted_sparkline_text(sparkline)) == {"▁"}
+            assert "UTIL 5% · 0–100% · 0s · One" in ui.query_one(".graph-two-util-label", Static).render().plain
 
             zero = replace(snapshot, endpoint_snapshots=(
                 replace(snapshot.endpoint_snapshots[0], gpus=(replace(gpu, utilization_percent=0),), sample_revision=2),
@@ -850,11 +884,23 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
             ui.update_snapshot(zero, 121)
             await pilot.pause()
             assert sparkline.data == (5, 0) and sparkline.display
-            assert "UTIL 0% · REL 0–5% · 1s" in ui.query_one(".graph-two-util-label", Static).render().plain
+            assert set(_mounted_sparkline_text(sparkline)) == {"▁"}
+            assert "UTIL 0% · 0–100% · 1s · One" in ui.query_one(".graph-two-util-label", Static).render().plain
 
             ui.reconfigure_display(75, 2, DashboardColors(utilization="green"), graph_view="graph-2")
             await pilot.pause()
             assert sparkline.max_color is not None and sparkline.max_color.hex == "#008000"
+            console = Console(width=sparkline.size.width)
+            rendered = console.render_lines(
+                sparkline.render(),
+                options=console.options.update(width=sparkline.size.width),
+                pad=False,
+            )
+            assert any(
+                segment.style is not None and segment.style.color is not None
+                and segment.style.color.get_truecolor().hex == "#008000"
+                for line in rendered for segment in line if segment.text.strip()
+            )
 
             stale = replace(zero, endpoint_snapshots=(
                 replace(zero.endpoint_snapshots[0], stale=True, error="offline"),
@@ -862,15 +908,16 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
             ui.update_snapshot(stale, 122)
             await pilot.pause()
             assert sparkline.data == ()
-            assert not sparkline.display
-            assert "UTIL N/A · REL N/A · One" in ui.query_one(".graph-two-util-label", Static).render().plain
+            assert sparkline.display
+            assert set(_mounted_sparkline_text(sparkline)) == {" "}
+            assert "UTIL N/A · 0–100% · N/A · One" in ui.query_one(".graph-two-util-label", Static).render().plain
 
             sparse = replace(zero, endpoint_snapshots=(
                 replace(zero.endpoint_snapshots[0], sample_revision=3),
             ))
             ui.update_snapshot(sparse, 130)
             await pilot.pause()
-            assert sparkline.data == () and not sparkline.display
+            assert sparkline.data == () and sparkline.display
 
             ui.graph_view = "graph-1"
             ui.update_snapshot(snapshot, 123)
@@ -885,7 +932,7 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
     asyncio.run(exercise())
 
 
-def test_graph_two_sparkline_relative_summary_survives_long_name_at_79_columns() -> None:
+def test_graph_two_sparkline_fixed_scale_label_survives_long_name_at_79_columns() -> None:
     class GraphTwoApp(App[None]):
         def compose(self) -> ComposeResult:
             yield FanAppUI("config.toml", lambda: None, 75, 2, graph_view="graph-2")
@@ -915,14 +962,14 @@ def test_graph_two_sparkline_relative_summary_survives_long_name_at_79_columns()
             await pilot.pause()
             labels = [label.render().plain for label in ui.query(".graph-two-util-label")]
             assert len(labels) == 2
-            assert all("UTIL 10% · REL 5–10% · 1s" in label for label in labels)
+            assert all("UTIL 10% · 0–100% · 1s" in label for label in labels)
             assert all(len(label) <= 39 for label in labels)
             assert ui.query_one("#dashboard-scroll", VerticalScroll).max_scroll_y == 0
 
     asyncio.run(exercise())
 
 
-def test_graph_two_sparkline_hides_empty_and_single_zero_samples() -> None:
+def test_graph_two_sparkline_blanks_empty_and_shows_single_zero_sample() -> None:
     class GraphTwoApp(App[None]):
         def compose(self) -> ComposeResult:
             yield FanAppUI("config.toml", lambda: None, 75, 2, graph_view="graph-2")
@@ -944,10 +991,11 @@ def test_graph_two_sparkline_hides_empty_and_single_zero_samples() -> None:
             ui.update_snapshot(empty, 120)
             await pilot.pause()
             sparkline = ui.query_one(Sparkline)
-            assert sparkline.data == () and not sparkline.display
+            assert sparkline.data == () and sparkline.display
             ui.update_snapshot(one_zero, 121)
             await pilot.pause()
-            assert sparkline.data == () and not sparkline.display
+            assert sparkline.data == (0,) and sparkline.display
+            assert set(_mounted_sparkline_text(sparkline)) == {"▁"}
 
     asyncio.run(exercise())
 
