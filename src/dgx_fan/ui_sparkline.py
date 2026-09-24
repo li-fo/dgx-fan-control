@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 
+from rich.color import Color as RichColor
 from rich.console import Console, ConsoleOptions
 from rich.segment import Segment
 from rich.style import Style
@@ -11,6 +12,8 @@ from textual.app import RenderResult
 from textual.color import Color
 from textual.renderables.sparkline import Sparkline as SparklineRenderable
 from textual.widgets import Sparkline, Static
+
+_BRIGHTNESS_STRENGTHS = (0.40, 0.55, 0.70, 0.85, 1.0)
 
 
 def time_columns(
@@ -79,6 +82,8 @@ class _FixedScaleRenderable(SparklineRenderable[float]):
     """Use native Sparkline buckets and glyphs with absolute percentage bounds."""
 
     columns: Sequence[float | None] | None = None
+    background_color: RichColor | None = None
+    maximum: float = 100.0
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> Iterator[Segment]:
         width = self.width or options.max_width
@@ -95,8 +100,10 @@ class _FixedScaleRenderable(SparklineRenderable[float]):
         buckets = tuple(self._buckets(list(self.data), width)) if self.columns is None else ()
         bar_levels = len(self.BARS)
         max_level = bar_levels * height - 1
-        min_color = Color.from_rich_color(self.min_color.color)
-        max_color = Color.from_rich_color(self.max_color.color)
+        background = Color.from_rich_color(
+            self.background_color or self.min_color.color, ansi=False,
+        )
+        max_color = Color.from_rich_color(self.max_color.color, ansi=False)
         for row in reversed(range(height)):
             for column in range(width):
                 value = (
@@ -106,13 +113,14 @@ class _FixedScaleRenderable(SparklineRenderable[float]):
                 if value is None:
                     yield Segment(" ")
                     continue
-                ratio = max(0.0, min(1.0, value / 100.0))
+                ratio = max(0.0, min(1.0, value / self.maximum))
                 level = int(ratio * max_level)
                 if level < row * bar_levels:
                     yield Segment(" ")
                 else:
                     glyph = "█" if level >= (row + 1) * bar_levels else self.BARS[level % bar_levels]
-                    color = min_color.blend(max_color, ratio).rich_color
+                    band = max(0, min(4, int(ratio * 5)))
+                    color = background.blend(max_color, _BRIGHTNESS_STRENGTHS[band]).rich_color
                     yield Segment(glyph, Style.from_color(color))
             if row:
                 yield Segment.line()
@@ -124,6 +132,7 @@ class FixedScaleSparkline(Sparkline):
     sample_times: tuple[float, ...] = ()
     window_end: float = 0.0
     collection_interval_seconds: float = 0.0
+    maximum: float = 100.0
 
     def render(self) -> RenderResult:
         _, base = self.background_colors
@@ -147,6 +156,8 @@ class FixedScaleSparkline(Sparkline):
             self.data or (), self.sample_times, self.window_end, self.size.width,
             collection_interval_seconds=self.collection_interval_seconds,
         )
+        renderable.background_color = base.rich_color
+        renderable.maximum = self.maximum
         return renderable
 
 
