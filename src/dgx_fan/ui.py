@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from math import ceil
 
 from rich.cells import cell_len
+from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
+from textual.renderables.digits import Digits
 from textual.widget import WidgetError
 from textual.widgets import Button, Footer, Header, Static, TabbedContent, TabPane
 
@@ -23,12 +25,6 @@ MIN_DASHBOARD_WIDTH = 79
 PLOT_HEIGHT = 5
 MAX_LAYOUT_CONVERGENCE_PASSES = 2
 _GRAPH_TWO_METRIC_LABELS = ("TEMP", "MEM", "UTIL", "POWER")
-_LARGE_DIGITS = {
-    "0": ("┌┐", "││", "└┘"), "1": ("┐ ", "│ ", "┘ "), "2": ("┌┐", " ┐", "└┘"),
-    "3": ("┌┐", " ┤", "└┘"), "4": ("││", "└┤", " │"), "5": ("┌┐", "└┐", "└┘"),
-    "6": ("┌┐", "├┐", "└┘"), "7": ("┌┐", " ├", " │"), "8": ("┌┐", "├┤", "└┘"),
-    "9": ("┌┐", "└┤", " ┘"),
-}
 def _safe_display_text(value: object) -> str:
     """Prevent external text from carrying terminal control sequences into Rich."""
     return "".join(
@@ -809,47 +805,73 @@ class FanAppUI(Static):
         self,
         values: tuple[str, str, str, str], card_width: int
     ) -> tuple[list[str], tuple[tuple[tuple[int, int, int], ...], ...]]:
-        """Render four genuine 3-row ASCII values within a two-card console width."""
-        narrow = tuple(value.replace(" C", "C").replace(" / ", "/").replace(" W", "W") for value in values)
-        for rendered_values, preferred_gap in ((values, 1), (narrow, 0)):
-            glyphs = [self._large_value(value) for value in rendered_values]
-            widths = [max(len(glyph[0]), len(label)) for glyph, label in zip(glyphs, _GRAPH_TWO_METRIC_LABELS, strict=True)]
-            if rendered_values == narrow:
-                preferred_gap = min(1, max(0, (card_width - sum(widths)) // (len(widths) - 1)))
-            required = sum(widths) + preferred_gap * (len(widths) - 1)
-            if required > card_width:
-                continue
-            separator = " " * preferred_gap
-            starts: list[tuple[int, int, int]] = []
-            offset = 0
-            for metric_index, width in enumerate(widths):
-                starts.append((metric_index, offset, width))
-                offset += width + preferred_gap
-            labels = separator.join(label.center(width) for label, width in zip(_GRAPH_TWO_METRIC_LABELS, widths, strict=True))
-            rows = [labels]
-            for glyph_row in range(3):
-                rows.append(separator.join(glyph[glyph_row].center(width) for glyph, width in zip(glyphs, widths, strict=True)))
-            spans = tuple(tuple(starts) for _ in rows)
-            return rows, spans
-
-        # At genuinely impossible glyph widths, keep every full value in an
-        # explicit stacked card mode instead of truncating or eliding data.
-        rows = [f"{label} {value}" for label, value in zip(_GRAPH_TWO_METRIC_LABELS, values, strict=True)]
-        spans = tuple(((index, 0, len(row)),) for index, row in enumerate(rows))
-        return rows, spans
+        """Use Textual's native 3x3 Digits renderer in a responsive 2x2 card."""
+        prepared = [self._digit_value(value) for value in values]
+        rows: list[str] = []
+        spans: list[tuple[tuple[int, int, int], ...]] = []
+        for left, right in ((0, 1), (2, 3)):
+            left_value, right_value = prepared[left], prepared[right]
+            if left == 0:
+                # At 79 columns omit only separator spaces around '/', never
+                # either memory count or the GiB unit.
+                right_value = self._digit_value(values[right].replace(" / ", "/"))
+            widths = [
+                max(len(_GRAPH_TWO_METRIC_LABELS[index]), len(value[0]))
+                for index, value in ((left, left_value), (right, right_value))
+            ]
+            if sum(widths) + 1 > card_width:
+                return self._stacked_metric_rows(values)
+            positions = ((left, 0, widths[0]), (right, widths[0] + 1, widths[1]))
+            rows.append(
+                _GRAPH_TWO_METRIC_LABELS[left].center(widths[0])
+                + " "
+                + _GRAPH_TWO_METRIC_LABELS[right].center(widths[1])
+            )
+            spans.append(positions)
+            for row in range(3):
+                rows.append(
+                    left_value[1][row].center(widths[0])
+                    + " "
+                    + right_value[1][row].center(widths[1])
+                )
+                spans.append(positions)
+        return rows, tuple(spans)
 
     @staticmethod
-    def _large_value(value: str) -> tuple[str, str, str]:
-        if value == "N/A":
-            return "N/A", "N/A", "N/A"
-        rows = ["", "", ""]
-        for character in value:
-            glyph = _LARGE_DIGITS.get(character)
-            if glyph is None:
-                glyph = (" ", character, " ") if character in {".", "/"} else (character,) * 3
-            for row, piece in enumerate(glyph):
-                rows[row] += piece
+    def _native_digit_lines(value: str) -> tuple[str, str, str]:
+        """Extract the installed Textual Digits output for Static composition."""
+        rows: list[str] = []
+        line = ""
+        for segment in Digits(value).render(Style()):
+            if not isinstance(segment, Segment):
+                continue
+            if segment.text == "\n":
+                rows.append(line)
+                line = ""
+            else:
+                line += segment.text
         return rows[0], rows[1], rows[2]
+
+    @classmethod
+    def _digit_value(cls, value: str) -> tuple[str, tuple[str, str, str]]:
+        if value == "N/A":
+            return value, ("", value, "")
+        numeric, unit = value, ""
+        for suffix in (" GiB", " C", " W", "%"):
+            if value.endswith(suffix):
+                numeric, unit = value.removesuffix(suffix), suffix
+                break
+        lines = list(cls._native_digit_lines(numeric))
+        lines[-1] += unit
+        width = max(len(line) for line in lines)
+        return " " * width, tuple(line.ljust(width) for line in lines)  # type: ignore[return-value]
+
+    @staticmethod
+    def _stacked_metric_rows(
+        values: tuple[str, str, str, str]
+    ) -> tuple[list[str], tuple[tuple[tuple[int, int, int], ...], ...]]:
+        rows = [f"{label} {value}" for label, value in zip(_GRAPH_TWO_METRIC_LABELS, values, strict=True)]
+        return rows, tuple(((index, 0, len(row)),) for index, row in enumerate(rows))
 
     @staticmethod
     def _chart_lines(metric: str, value: str, chart: list[str]) -> list[str]:

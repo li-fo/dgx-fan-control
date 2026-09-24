@@ -5,8 +5,10 @@ from typing import Literal
 
 import pytest
 from rich.cells import cell_len
+from rich.style import Style
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, VerticalScroll
+from textual.renderables.digits import Digits
 from textual.widgets import Button, Static, TabbedContent
 
 from dgx_fan.app import DGXFanApp
@@ -19,7 +21,7 @@ from dgx_fan.models import (
     MemoryStat,
     NodeMemorySnapshot,
 )
-from dgx_fan.ui import _LARGE_DIGITS, DashboardHistory, FanAppUI, FanGauge, HistoryPoint
+from dgx_fan.ui import DashboardHistory, FanAppUI, FanGauge, HistoryPoint
 
 
 def _fan_snapshot(
@@ -738,7 +740,7 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             )
             ui.update_snapshot(zero_total, 122)
             await pilot.pause()
-            assert next(iter(ui.query(".dgx-panel"))).render().plain.count("N/A") >= 3
+            assert next(iter(ui.query(".dgx-panel"))).render().plain.count("N/A") >= 1
             uma = replace(
                 snapshot,
                 endpoint_snapshots=(
@@ -787,17 +789,29 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
     asyncio.run(exercise())
 
 
-def test_large_metric_glyphs_are_unique_and_fit_wide_and_79_column_cards() -> None:
-    assert len(set(_LARGE_DIGITS.values())) == 10
+def test_native_digits_metric_layout_fits_wide_and_79_column_cards() -> None:
     ui = FanAppUI("config.toml", lambda: None, 75, 2, graph_view="graph-2")
+    expected: list[str] = []
+    line = ""
+    for segment in Digits("50.0").render(Style()):
+        if segment.text == "\n":
+            expected.append(line)
+            line = ""
+        else:
+            line += segment.text
+    assert Digits.get_width("50.0") == sum(3 if character.isdigit() else 1 for character in "50.0")
+    assert ui._native_digit_lines("50.0") == tuple(expected)
     ordinary = ("50.0 C", "111 / 121 GiB", "0%", "12 W")
     rows, _spans = ui._large_metric_rows(ordinary, 50)
-    assert len(rows) == 4 and all(len(row) <= 50 for row in rows)
-    assert rows[0].index("TEMP") < rows[0].index("MEM") < rows[0].index("UTIL") < rows[0].index("POWER")
+    assert len(rows) == 8 and all(len(row) <= 50 for row in rows)
+    assert "TEMP" in rows[0] and "MEM" in rows[0]
+    assert "UTIL" in rows[4] and "POWER" in rows[4]
     assert "GiB" in "\n".join(rows[1:])
 
     narrow_rows, _spans = ui._large_metric_rows(("50.0 C", "111 / 121 GiB", "0%", "12 W"), 39)
-    assert "UTIL POWER" in narrow_rows[0]
+    assert len(narrow_rows) == 8 and all(len(row) <= 39 for row in narrow_rows)
+    assert "TEMP" in narrow_rows[0] and "MEM" in narrow_rows[0]
+    assert "UTIL" in narrow_rows[4] and "POWER" in narrow_rows[4]
 
     extreme = ("150.0 C", "976562500 / 976562500 GiB", "100%", "999999 W")
     rows, _spans = ui._large_metric_rows(extreme, 39)
@@ -831,6 +845,10 @@ def test_documented_ansi_dashboard_colors_render_in_terminal(
             ui.update_snapshot(snapshot, 120)
             await pilot.pause()
             assert ui.query_one("#dashboard-scroll", VerticalScroll).display
+            if graph_view == "graph-2":
+                await pilot.resize_terminal(120, 30)
+                await pilot.pause()
+                assert ui.query_one("#dashboard-scroll", VerticalScroll).max_scroll_y == 0
 
     asyncio.run(exercise())
 
