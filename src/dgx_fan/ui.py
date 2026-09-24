@@ -22,6 +22,13 @@ HISTORY_SECONDS = 120.0
 MIN_DASHBOARD_WIDTH = 79
 PLOT_HEIGHT = 5
 MAX_LAYOUT_CONVERGENCE_PASSES = 2
+_GRAPH_TWO_METRIC_LABELS = ("TEMP", "MEM", "UTIL", "POWER")
+_LARGE_DIGITS = {
+    "0": ("┌┐", "││", "└┘"), "1": ("┐ ", "│ ", "┘ "), "2": ("┌┐", " ┐", "└┘"),
+    "3": ("┌┐", " ┤", "└┘"), "4": ("││", "└┤", " │"), "5": ("┌┐", "└┐", "└┘"),
+    "6": ("┌┐", "├┐", "└┘"), "7": ("┌┐", " ├", " │"), "8": ("┌┐", "├┤", "└┘"),
+    "9": ("┌┐", "└┤", " ┘"),
+}
 def _safe_display_text(value: object) -> str:
     """Prevent external text from carrying terminal control sequences into Rich."""
     return "".join(
@@ -723,13 +730,13 @@ class FanAppUI(Static):
                 del self.panels[key]
         available = max(30, scroll.scrollable_content_region.width)
         card_width = max(30, (available - 1) // max(1, min(2, len(snapshot.endpoint_snapshots))))
-        cards: list[list[str]] = []
+        cards: list[tuple[list[str], tuple[tuple[int, int], ...]]] = []
         for endpoint in snapshot.endpoint_snapshots[:2]:
             gpus = endpoint.gpus if endpoint.healthy and not endpoint.stale and endpoint.error is None else ()
             temperatures = [gpu.temperature_celsius for gpu in gpus if gpu.temperature_celsius is not None]
             utilization = [gpu.utilization_percent for gpu in gpus if gpu.utilization_percent is not None]
             powers = [gpu.power_watts for gpu in gpus]
-            temp = "N/A" if not temperatures else f"{max(temperatures):.1f} C"
+            temp = "N/A" if not temperatures else f"{max(temperatures):.1f}C"
             util = "N/A" if not utilization else f"{max(utilization):.0f}%"
             if endpoint.memory_source == "node-exporter":
                 memory = (
@@ -737,39 +744,47 @@ class FanAppUI(Static):
                     if gpus and endpoint.memory_healthy and not endpoint.memory_stale and endpoint.memory_error is None
                     else None
                 )
-                mem = "N/A" if memory is None or memory.total_mib <= 0 else f"{memory.used_mib:.0f}/{memory.total_mib:.0f} MiB"
+                mem = (
+                    "N/A"
+                    if memory is None or memory.total_mib <= 0
+                    else f"{int(memory.used_mib // 1024)} / {int(memory.total_mib // 1024)} GiB"
+                )
             else:
                 used = sum(gpu.memory_used_mib or 0 for gpu in gpus)
                 total = sum(gpu.memory_total_mib or 0 for gpu in gpus)
-                mem = "N/A" if not gpus or total <= 0 or any(gpu.memory_used_mib is None or gpu.memory_total_mib is None for gpu in gpus) else f"{used:.0f}/{total:.0f} MiB"
+                mem = (
+                    "N/A"
+                    if not gpus or total <= 0 or any(gpu.memory_used_mib is None or gpu.memory_total_mib is None for gpu in gpus)
+                    else f"{int(used // 1024)} / {int(total // 1024)} GiB"
+                )
             power = "N/A" if not gpus or any(value is None for value in powers) else f"{sum(value for value in powers if value is not None):.0f} W"
             util_chart = self.history.endpoint_area(endpoint.endpoint_id, "util", now, max(1, card_width - 7), 100, 2)
             util_box = self._chart_lines("UTIL", util, util_chart)
-            cards.append([
+            metric_rows, metric_spans = self._large_metric_rows((temp, mem, util, power), card_width)
+            cards.append(([
                 _compact_display_text(f"┌ {endpoint.name}", card_width).ljust(card_width, "─"),
-                _compact_display_text(f"TEMP {temp}  MEM {mem}", card_width),
-                _compact_display_text(f"UTIL {util}  POWER {power}", card_width),
+                *metric_rows,
                 *util_box,
-            ])
+            ], metric_spans))
         rendered = Text()
-        height = max((len(card) for card in cards), default=0)
+        height = max((len(card[0]) for card in cards), default=0)
         for row in range(height):
             line = Text(style=Style(bold=row in {1, 2}))
-            for index, card in enumerate(cards):
+            for index, (card, metric_spans) in enumerate(cards):
                 value = card[row].ljust(card_width) if row < len(card) else " " * card_width
                 start = len(line.plain)
                 line.append(value)
-                if row == 1:
-                    split = value.find("  MEM ")
-                    if split >= 0:
-                        line.stylize(Style(color=_rich_color(self.dashboard_colors.temperature)), start, start + split)
-                        line.stylize(Style(color=_rich_color(self.dashboard_colors.memory)), start + split + 2, start + len(value.rstrip()))
-                elif row == 2:
-                    split = value.find("  POWER ")
-                    if split >= 0:
-                        line.stylize(Style(color=_rich_color(self.dashboard_colors.utilization)), start, start + split)
-                        line.stylize(Style(color=_rich_color(self.dashboard_colors.power)), start + split + 2, start + len(value.rstrip()))
-                elif row >= 3:
+                if 1 <= row <= 4:
+                    colors = (
+                        self.dashboard_colors.temperature,
+                        self.dashboard_colors.memory,
+                        self.dashboard_colors.utilization,
+                        self.dashboard_colors.power,
+                    )
+                    for metric_index, (offset, width) in enumerate(metric_spans):
+                        color = colors[metric_index]
+                        line.stylize(Style(color=_rich_color(color)), start + offset, start + offset + width)
+                elif row >= 5:
                     line.stylize(
                         Style(color=_rich_color(self.dashboard_colors.utilization)),
                         start,
@@ -789,6 +804,61 @@ class FanAppUI(Static):
         scroll.move_child(panel, before=0)
         self._dashboard_layout_signature = self._layout_signature(scroll)
         self._schedule_layout_check()
+
+    def _large_metric_rows(
+        self,
+        values: tuple[str, str, str, str], card_width: int
+    ) -> tuple[list[str], tuple[tuple[int, int], ...]]:
+        """Render four genuine 3-row ASCII values within a two-card console width."""
+        wide = values
+        narrow = tuple(
+            value.replace(" C", "C").replace(" / ", "/").replace(" W", "W")
+            for value in values
+        )
+        glyphs = [self._large_value(value) for value in wide]
+        widths = [len(glyph[0]) for glyph in glyphs]
+        gap = 1
+        if sum(widths) + len(widths) - 1 > card_width:
+            glyphs = [self._large_value(value) for value in narrow]
+            widths = [len(glyph[0]) for glyph in glyphs]
+            gap = max(0, (card_width - sum(widths)) // max(1, len(widths) - 1))
+        if sum(widths) > card_width:
+            compact = (narrow[0].split(".", 1)[0] + "C", narrow[1], narrow[2], narrow[3])
+            glyphs = [self._large_value(value) for value in compact]
+            widths = [len(glyph[0]) for glyph in glyphs]
+            gap = max(0, (card_width - sum(widths)) // max(1, len(widths) - 1))
+        if sum(widths) > card_width:
+            # Exceptional telemetry widths retain every character in a
+            # three-row region rather than letting a final cell clip hide it.
+            glyphs = [self._small_value(value) for value in narrow]
+            widths = [len(glyph[0]) for glyph in glyphs]
+            gap = max(0, (card_width - sum(widths)) // max(1, len(widths) - 1))
+        separator = " " * gap
+        starts: list[tuple[int, int]] = []
+        offset = 0
+        for width in widths:
+            starts.append((offset, width))
+            offset += width + gap
+        labels = separator.join(label.center(width) for label, width in zip(_GRAPH_TWO_METRIC_LABELS, widths, strict=True))
+        rows = [labels, *(separator.join(glyph[row] for glyph in glyphs) for row in range(3))]
+        return [_compact_display_text(row, card_width) for row in rows], tuple(starts)
+
+    @staticmethod
+    def _large_value(value: str) -> tuple[str, str, str]:
+        if value == "N/A":
+            return "N/A", "N/A", "N/A"
+        rows = ["", "", ""]
+        for character in value:
+            glyph = _LARGE_DIGITS.get(character)
+            if glyph is None:
+                glyph = (" ", character, " ") if character in {".", "/"} else (character,) * 3
+            for row, piece in enumerate(glyph):
+                rows[row] += piece
+        return rows[0], rows[1], rows[2]
+
+    @staticmethod
+    def _small_value(value: str) -> tuple[str, str, str]:
+        return " " * len(value), value, " " * len(value)
 
     @staticmethod
     def _chart_lines(metric: str, value: str, chart: list[str]) -> list[str]:

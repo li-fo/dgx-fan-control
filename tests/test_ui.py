@@ -19,7 +19,7 @@ from dgx_fan.models import (
     MemoryStat,
     NodeMemorySnapshot,
 )
-from dgx_fan.ui import DashboardHistory, FanAppUI, FanGauge, HistoryPoint
+from dgx_fan.ui import _LARGE_DIGITS, DashboardHistory, FanAppUI, FanGauge, HistoryPoint
 
 
 def _fan_snapshot(
@@ -694,7 +694,7 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
                 DashboardColors("yellow", "cyan", "red", "green"), graph_view="graph-2",
             )
 
-    gpu = GPUStat("GPU-a", "A100", 50, 100, 40, 55, 250)
+    gpu = GPUStat("GPU-a", "A100", 114399, 124546, 40, 55, 250)
     snapshot = _fan_snapshot(
         20, "curve", "AUTO ON", 55, 0,
         (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
@@ -712,7 +712,9 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             await pilot.pause()
             dashboard = next(iter(ui.query(".dgx-panel"))).render()
             text = dashboard.plain
-            assert "POWER 250 W" in text and "TEMP 120s" in text and "X: overlap" in text
+            assert "TEMP" in text and "MEM" in text and "UTIL" in text and "POWER" in text
+            assert text.index("TEMP") < text.index("MEM") < text.index("UTIL") < text.index("POWER")
+            assert "GiB" in text and "TEMP 120s" in text and "X: overlap" in text
             styles = " ".join(str(span.style) for span in dashboard.spans)
             for color in ("ansi_yellow", "ansi_cyan", "ansi_red", "ansi_green"):
                 assert color in styles
@@ -726,7 +728,7 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             ui.update_snapshot(failed, 121)
             await pilot.pause()
             text = next(iter(ui.query(".dgx-panel"))).render().plain
-            assert "TEMP N/A" in text and "POWER N/A" in text
+            assert text.count("N/A") >= 3
             zero_total = replace(
                 snapshot,
                 endpoint_snapshots=(
@@ -736,13 +738,42 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             )
             ui.update_snapshot(zero_total, 122)
             await pilot.pause()
-            assert "TEMP 55.0 C  MEM N/A" in next(iter(ui.query(".dgx-panel"))).render().plain
+            assert next(iter(ui.query(".dgx-panel"))).render().plain.count("N/A") >= 3
+            uma = replace(
+                snapshot,
+                endpoint_snapshots=(
+                    replace(
+                        snapshot.endpoint_snapshots[0],
+                        memory_source="node-exporter",
+                        uma_memory=MemoryStat(114399, 124546),
+                        sample_revision=2,
+                    ),
+                    snapshot.endpoint_snapshots[1],
+                ),
+            )
+            ui.update_snapshot(uma, 123)
+            await pilot.pause()
+            assert "GiB" in next(iter(ui.query(".dgx-panel"))).render().plain
             await pilot.resize_terminal(79, 30)
             await pilot.pause()
             scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
             assert scroll.display and scroll.max_scroll_y == 0
 
     asyncio.run(exercise())
+
+
+def test_large_metric_glyphs_are_unique_and_fit_wide_and_79_column_cards() -> None:
+    assert len(set(_LARGE_DIGITS.values())) == 10
+    ui = FanAppUI("config.toml", lambda: None, 75, 2, graph_view="graph-2")
+    for width, values in (
+        (50, ("50.0 C", "111 / 121 GiB", "0%", "12 W")),
+        (38, ("50.0 C", "111 / 121 GiB", "999%", "999 W")),
+    ):
+        rows, _spans = ui._large_metric_rows(values, width)
+        assert len(rows) == 4
+        assert all(len(row) <= width for row in rows)
+        assert rows[0].index("TEMP") < rows[0].index("MEM") < rows[0].index("UTIL") < rows[0].index("POWER")
+        assert "GiB" in "\n".join(rows[1:])
 
 
 @pytest.mark.parametrize(("graph_view", "size"), [("graph-1", (100, 24)), ("graph-2", (79, 30))])
