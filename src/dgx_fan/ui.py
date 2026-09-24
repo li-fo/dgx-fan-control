@@ -5,7 +5,6 @@ import sys
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
-from itertools import pairwise
 from math import ceil
 
 from rich.cells import cell_len
@@ -18,12 +17,12 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.renderables.digits import Digits
 from textual.widget import WidgetError
-from textual.widgets import Button, Footer, Header, Sparkline, Static, TabbedContent, TabPane
+from textual.widgets import Button, Footer, Header, Static, TabbedContent, TabPane
 
 from .config import DashboardColors, EndpointConfig
 from .history_ui import HistoryPanel, HistoryQuery
 from .models import ControlSnapshot, EndpointSnapshot, GPUStat, MemoryStat
-from .ui_sparkline import FixedScaleSparkline
+from .ui_sparkline import FixedScaleSparkline, UtilTimeAxis
 
 HISTORY_SECONDS = 120.0
 MIN_DASHBOARD_WIDTH = 79
@@ -338,10 +337,12 @@ class FanAppUI(Static):
         border: round $primary;
         content-align: center middle;
     }
-    #graph-two-util-row { height: 2; width: 1fr; }
-    .graph-two-util-card { height: 2; width: 1fr; }
+    #graph-two-util-row { height: 6; width: 1fr; }
+    .graph-two-util-card { height: 6; width: 1fr; }
     .graph-two-util-label { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
-    .graph-two-util-sparkline { height: 1; width: 1fr; }
+    .graph-two-util-sparkline { height: 4; width: 1fr; }
+    .graph-two-util-axis { height: 1; width: 1fr; }
+    .graph-two-util-gutter { width: 2; height: 6; }
     """
 
     def __init__(
@@ -377,7 +378,7 @@ class FanAppUI(Static):
         self.graph_two_util_row: Horizontal | None = None
         self.graph_two_temp_panel: Static | None = None
         self.graph_two_util_labels: dict[str, Static] = {}
-        self.graph_two_sparklines: dict[str, Sparkline] = {}
+        self.graph_two_sparklines: dict[str, FixedScaleSparkline] = {}
         self.graph_two_endpoint_ids: tuple[str, ...] = ()
         self.last_render_time: float | None = None
         self.last_signature: tuple[tuple[object, ...], ...] | None = None
@@ -504,6 +505,10 @@ class FanAppUI(Static):
             self._layout_convergence_passes = 0
             self._render_dashboard(snapshot, now)
             self.last_signature = signature
+        elif self.graph_view == "graph-2":
+            for sparkline in self.graph_two_sparklines.values():
+                sparkline.window_end = now
+                sparkline.refresh()
         def fan_summary(index: int) -> str:
             temperature = snapshot.fan_temperatures_celsius[index]
             stage = snapshot.active_stages[index]
@@ -772,8 +777,9 @@ class FanAppUI(Static):
                 stale_panel.remove()
                 del self.panels[key]
         available = max(30, scroll.scrollable_content_region.width)
-        card_width = max(30, (available - 1) // max(1, min(2, len(snapshot.endpoint_snapshots))))
         endpoints = snapshot.endpoint_snapshots[:2]
+        gap = 2 if len(endpoints) == 2 else 0
+        card_width = max(30, (available - gap) // max(1, len(endpoints)))
         self._ensure_graph_two_widgets(scroll, panel, endpoints)
         cards: list[tuple[list[str], tuple[tuple[tuple[int, int, int], ...], ...]]] = []
         for endpoint in endpoints:
@@ -803,17 +809,16 @@ class FanAppUI(Static):
                 *metric_rows,
             ], metric_spans))
             sparkline = self.graph_two_sparklines[endpoint.endpoint_id]
+            sparkline.collection_interval_seconds = self.collection_interval_seconds
             samples = self.history.endpoint_samples(endpoint.endpoint_id, "util", now) if gpus else ()
-            contiguous = bool(samples) and all(
-                later.at - earlier.at <= self.collection_interval_seconds * 1.5
-                for earlier, later in pairwise(samples)
-            )
-            sparkline.data = tuple(sample.value for sample in samples) if contiguous else ()
+            sparkline.sample_times = tuple(sample.at for sample in samples)
+            sparkline.window_end = now
+            sparkline.data = tuple(sample.value for sample in samples)
             sparkline.min_color = self._sparkline_color(self.dashboard_colors.utilization)
             sparkline.max_color = self._sparkline_color(self.dashboard_colors.utilization)
             sparkline.refresh()
             label = self.graph_two_util_labels[endpoint.endpoint_id]
-            span = f"{samples[-1].at - samples[0].at:.0f}s" if contiguous else "N/A"
+            span = f"{samples[-1].at - samples[0].at:.0f}s" if samples else "N/A"
             label.update(_compact_display_text(
                 f"UTIL {util} · 0–100% · {span} · {endpoint.name}", card_width,
             ))
@@ -837,9 +842,10 @@ class FanAppUI(Static):
                         color = colors[metric_index]
                         line.stylize(Style(color=_rich_color(color)), start + offset, start + offset + width)
                 if index < len(cards) - 1:
-                    line.append(" ")
+                    line.append(" " * gap)
             rendered.append(line)
-            rendered.append("\n")
+            if row < height - 1:
+                rendered.append("\n")
         labels = [f"{index + 1}:{_compact_display_text(endpoint.name, 15)}" for index, endpoint in enumerate(snapshot.endpoint_snapshots[:2])]
         temp_rendered = Text(_compact_display_text("TEMP 120s · " + " · ".join(labels) + " · X: overlap", available) + "\n")
         temp_rendered.append(
@@ -872,8 +878,16 @@ class FanAppUI(Static):
             )
             self.graph_two_util_labels[endpoint.endpoint_id] = label
             self.graph_two_sparklines[endpoint.endpoint_id] = sparkline
-            cards.append(Vertical(label, sparkline, classes="graph-two-util-card"))
-        self.graph_two_util_row = Horizontal(*cards, id="graph-two-util-row")
+            cards.append(Vertical(
+                label, sparkline, UtilTimeAxis(classes="graph-two-util-axis"),
+                classes="graph-two-util-card",
+            ))
+        util_children: list[Vertical | Static] = []
+        for card in cards:
+            if util_children:
+                util_children.append(Static("  ", classes="graph-two-util-gutter", markup=False))
+            util_children.append(card)
+        self.graph_two_util_row = Horizontal(*util_children, id="graph-two-util-row")
         self.graph_two_temp_panel = Static(classes="dgx-panel", markup=False)
         self.graph_two_endpoint_ids = endpoint_ids
         if panel.parent is None:

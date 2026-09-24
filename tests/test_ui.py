@@ -25,7 +25,7 @@ from dgx_fan.models import (
     NodeMemorySnapshot,
 )
 from dgx_fan.ui import DashboardHistory, FanAppUI, FanGauge, HistoryPoint
-from dgx_fan.ui_sparkline import _FixedScaleRenderable
+from dgx_fan.ui_sparkline import UtilTimeAxis, _FixedScaleRenderable, time_axis, time_columns
 
 
 def _fixed_sparkline_rows(data: tuple[float, ...], width: int = 5, height: int = 1) -> list[str]:
@@ -38,13 +38,18 @@ def _fixed_sparkline_rows(data: tuple[float, ...], width: int = 5, height: int =
             console.render_lines(renderable, options=console.options.update(width=width), pad=False)]
 
 
-def _mounted_sparkline_text(sparkline: Sparkline) -> str:
+def _mounted_sparkline_rows(sparkline: Sparkline) -> list[str]:
     console = Console(width=sparkline.size.width)
-    return "".join(
-        segment.text for line in console.render_lines(
+    return [
+        "".join(segment.text for segment in line)
+        for line in console.render_lines(
             sparkline.render(), options=console.options.update(width=sparkline.size.width), pad=False,
-        ) for segment in line
-    )
+        )
+    ]
+
+
+def _mounted_sparkline_text(sparkline: Sparkline) -> str:
+    return "".join(_mounted_sparkline_rows(sparkline))
 
 
 def test_graph_two_fixed_sparkline_renders_absolute_scale_and_absent_data() -> None:
@@ -56,6 +61,85 @@ def test_graph_two_fixed_sparkline_renders_absolute_scale_and_absent_data() -> N
     assert _fixed_sparkline_rows((5, 5)) == ["▁▁▁▁▁"]
     assert _fixed_sparkline_rows(()) == ["     "]
     assert _fixed_sparkline_rows((0, 50, 100), height=2) == ["    █", "▁▁███"]
+
+
+def test_graph_two_timed_columns_and_axis_share_fixed_window() -> None:
+    columns = time_columns((0, 50, 20, 100), (0, 60, 90, 120), 120, 40)
+    assert len(columns) == 40
+    assert tuple(index for index, value in enumerate(columns) if value is not None) == (0, 20, 30, 39)
+    assert (columns[0], columns[20], columns[30], columns[39]) == (0, 50, 20, 100)
+    assert time_columns((20, 80), (60, 60), 120, 40)[20] == 80
+    assert time_columns((0, 100), (-0.1, 120.1), 120, 40) == (None,) * 40
+    assert time_columns((50,), (120,), 120, 40) == (None,) * 39 + (50,)
+    assert time_columns((0, 100), (0, 120), 120, 40)[1:39] == (None,) * 38
+    axis = time_axis(40)
+    assert len(axis) == 40
+    assert axis.index("120s") == 0
+    assert axis.index("60s") <= 20 < axis.index("60s") + 3
+    assert axis.index("30s") <= 30 < axis.index("30s") + 3
+    assert axis.endswith("now")
+
+
+def test_graph_two_timed_columns_hold_only_expected_polling_wait() -> None:
+    for values, times in (((100, 0), (0, 2)), ((0, 100), (2, 0))):
+        coarse = time_columns(
+            values, times, 120, 50, collection_interval_seconds=2,
+        )
+        assert coarse[:4] == (100, 0, None, None)
+    for width in (79, 120):
+        columns = time_columns(
+            (10, 20, 30, 40, 50), (0, 2, 4, 6, 8), 120, width,
+            collection_interval_seconds=2,
+        )
+        through = int(8 / 120 * width)
+        assert all(value is not None for value in columns[:through + 1])
+    gap = time_columns(
+        (0, 100), (0, 4), 120, 120, collection_interval_seconds=2,
+    )
+    assert gap[:5] == (0, 0, 0, None, 100)
+    assert gap[5:7] == (100, 100)
+    assert time_columns((50,), (0,), 241, 120, collection_interval_seconds=2) == (None,) * 120
+    assert time_columns((50,), (121,), 120, 120, collection_interval_seconds=2) == (None,) * 120
+
+
+def test_graph_two_time_window_advances_without_new_revision() -> None:
+    class GraphTwoApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FanAppUI("config.toml", lambda: None, 75, 2, graph_view="graph-2")
+
+    gpu = GPUStat("GPU-a", "A100", utilization_percent=50, temperature_celsius=50)
+    snapshot = _fan_snapshot(
+        20, "curve", "AUTO ON", 50, 0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (EndpointSnapshot("one", "One", True, 0, gpus=(gpu,), sample_revision=1),),
+    )
+    app = GraphTwoApp()
+
+    async def exercise() -> None:
+        async with app.run_test(size=(79, 30)) as pilot:
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 120)
+            await pilot.pause()
+            sparkline = ui.query_one(Sparkline)
+            key = ("one", "GPU-a", "util")
+            assert len(ui.history.points[key]) == 1
+            assert _mounted_sparkline_rows(sparkline)[-1].endswith("█")
+
+            ui.update_snapshot(snapshot, 124)
+            await pilot.pause()
+            assert sparkline is ui.query_one(Sparkline)
+            assert sparkline.window_end == 124
+            assert len(ui.history.points[key]) == 1
+            shifted = _mounted_sparkline_rows(sparkline)[-1]
+            assert shifted.rstrip().endswith("█") and shifted[-1] == " "
+
+            ui.update_snapshot(snapshot, 241)
+            await pilot.pause()
+            assert sparkline.window_end == 241
+            assert set(_mounted_sparkline_text(sparkline)) == {" "}
+            assert not ui.history.points.get(key)
+
+    asyncio.run(exercise())
 
 
 def _fan_snapshot(
@@ -757,8 +841,32 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             sparklines = list(ui.query(Sparkline))
             assert len(sparklines) == 2
             assert all(sparkline.data == (40,) and sparkline.display for sparkline in sparklines)
+            assert ui.query_one("#graph-two-util-row").size.height == 6
+            assert all(sparkline.size.height == 4 for sparkline in sparklines)
+            axes = list(ui.query(UtilTimeAxis))
+            assert len(axes) == 2 and all(axis.size.height == 1 for axis in axes)
+            assert all(axis.region.x == sparkline.region.x and axis.size.width == sparkline.size.width
+                       for axis, sparkline in zip(axes, sparklines, strict=True))
+            assert all(axis.render() == time_axis(axis.size.width) for axis in axes)
+            gutter = ui.query_one(".graph-two-util-gutter")
+            assert gutter.size.width == 2
+            assert sparklines[1].region.x - sparklines[0].region.right == 2
+            assert ui.query_one("#dashboard-scroll", VerticalScroll).max_scroll_y == 0
+            width = sparklines[0].size.width
+            for values, expected in (
+                ((), [" " * width] * 4),
+                ((0,), [" " * width] * 3 + [" " * (width - 1) + "▁"]),
+                ((50,), [" " * width] * 2 + [" " * (width - 1) + "█"] * 2),
+                ((100,), [" " * (width - 1) + "█"] * 4),
+            ):
+                sparklines[0].data = values
+                assert _mounted_sparkline_rows(sparklines[0]) == expected
+            sparklines[0].data = (40,)
             assert all(sparkline.min_color == sparkline.max_color for sparkline in sparklines)
             assert all(sparkline.max_color is not None and sparkline.max_color.hex == "#00FFFF" for sparkline in sparklines)
+            await pilot.resize_terminal(102, 30)
+            await pilot.pause()
+            assert ui.query_one("#dashboard-scroll", VerticalScroll).max_scroll_y == 0
             failed = replace(
                 snapshot,
                 endpoint_snapshots=(
@@ -812,6 +920,14 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             await pilot.pause()
             text = next(iter(ui.query(".dgx-panel"))).render().plain
             assert "GiB" in text and "N/A" not in text
+            await pilot.resize_terminal(85, 25)
+            await pilot.pause()
+            scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
+            assert scroll.display and scroll.max_scroll_y == 0
+            assert all(sparkline.size.height == 4 for sparkline in sparklines)
+            assert all(axis.size.width == sparkline.size.width for axis, sparkline in
+                       zip(axes, sparklines, strict=True))
+            assert all(axis.render() == time_axis(axis.size.width) for axis in axes)
             await pilot.resize_terminal(79, 30)
             await pilot.pause()
             scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
@@ -875,7 +991,10 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
             await pilot.pause()
             sparkline = ui.query_one(Sparkline)
             assert sparkline.data == (5,) and sparkline.display
-            assert set(_mounted_sparkline_text(sparkline)) == {"▁"}
+            assert _mounted_sparkline_rows(sparkline) == (
+                [" " * sparkline.size.width] * 3
+                + [" " * (sparkline.size.width - 1) + "▂"]
+            )
             assert "UTIL 5% · 0–100% · 0s · One" in ui.query_one(".graph-two-util-label", Static).render().plain
 
             zero = replace(snapshot, endpoint_snapshots=(
@@ -884,12 +1003,24 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
             ui.update_snapshot(zero, 121)
             await pilot.pause()
             assert sparkline.data == (5, 0) and sparkline.display
-            assert set(_mounted_sparkline_text(sparkline)) == {"▁"}
+            rows = _mounted_sparkline_rows(sparkline)
+            assert rows[:3] == [" " * sparkline.size.width] * 3
+            assert rows[-1] == " " * (sparkline.size.width - 1) + "▂"
             assert "UTIL 0% · 0–100% · 1s · One" in ui.query_one(".graph-two-util-label", Static).render().plain
 
-            ui.reconfigure_display(75, 2, DashboardColors(utilization="green"), graph_view="graph-2")
+            ui.reconfigure_display(75, 1, DashboardColors(utilization="green"), graph_view="graph-2")
             await pilot.pause()
             assert sparkline.max_color is not None and sparkline.max_color.hex == "#008000"
+            assert sparkline.collection_interval_seconds == 1
+            old_hold = time_columns(
+                sparkline.data, sparkline.sample_times, 123, sparkline.size.width,
+                collection_interval_seconds=2,
+            )
+            new_hold = time_columns(
+                sparkline.data, sparkline.sample_times, 123, sparkline.size.width,
+                collection_interval_seconds=sparkline.collection_interval_seconds,
+            )
+            assert old_hold[-1] is not None and new_hold[-1] is None
             console = Console(width=sparkline.size.width)
             rendered = console.render_lines(
                 sparkline.render(),
@@ -917,7 +1048,9 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
             ))
             ui.update_snapshot(sparse, 130)
             await pilot.pause()
-            assert sparkline.data == () and sparkline.display
+            assert sparkline.data == (5, 0, 0) and sparkline.display
+            columns = time_columns(sparkline.data, (120, 121, 130), 130, sparkline.size.width)
+            assert columns[-3] is None and columns[-1] == 0
 
             ui.graph_view = "graph-1"
             ui.update_snapshot(snapshot, 123)
@@ -992,10 +1125,15 @@ def test_graph_two_sparkline_blanks_empty_and_shows_single_zero_sample() -> None
             await pilot.pause()
             sparkline = ui.query_one(Sparkline)
             assert sparkline.data == () and sparkline.display
+            assert len(ui.query(".graph-two-util-gutter")) == 0
+            assert ui.query_one(UtilTimeAxis).size.width == sparkline.size.width
             ui.update_snapshot(one_zero, 121)
             await pilot.pause()
             assert sparkline.data == (0,) and sparkline.display
-            assert set(_mounted_sparkline_text(sparkline)) == {"▁"}
+            assert _mounted_sparkline_rows(sparkline) == (
+                [" " * sparkline.size.width] * 3
+                + [" " * (sparkline.size.width - 1) + "▁"]
+            )
 
     asyncio.run(exercise())
 

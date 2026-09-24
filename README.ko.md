@@ -160,7 +160,7 @@ clone과 설정을 유지한 채 프로젝트 통합만 제거하려면:
 
 `[dashboard]`는 선택 사항입니다. `graph_view = "graph-1"`은 기존 Dashboard를 그대로 유지하는 기본값입니다. **Fan Control → Setting → UI**에서 `"graph-2"`를 선택하면 두 DGX용 compact view를 사용합니다. Graph #2는 endpoint별 TEMP, MEM, UTIL, POWER, 카드별 120초 UTIL 차트와 공유 120초 TEMP 비교를 표시합니다. 공유 범례에서 `1`/`2`는 DGX series이고 `X`는 두 series가 겹친 위치이며 빈칸은 missing-data gap입니다. Power는 live DCGM `DCGM_FI_DEV_POWER_USAGE`이며 모든 physical GPU의 값이 유효할 때만 표시되고, 하나라도 없으면 **N/A**입니다. `graph_view`와 presentation metadata는 browser monitor에도 전달되지만 `web.allow_control = false`는 browser 저장을 계속 막습니다. `[dashboard.colors]`는 선택 사항입니다. `memory`, `utilization`, `temperature`는 각 차트의 전경색을 개별 지정합니다. Colors 탭은 Default와 Rich의 표준 ANSI 16색(`black`~`white`, `bright_black`~`bright_white`)을 색상 sample과 함께 제공합니다. Default를 선택하면 해당 항목을 생략합니다. 기존의 유효한 custom 색 이름이나 `#RRGGBB` 값은 **Current custom**으로 표시되어 명시적으로 바꾸기 전까지 그대로 유지됩니다. 설정 파일에서는 Rich가 지원하는 다른 전경색 이름이나 정확한 `#RRGGBB`도 계속 사용할 수 있지만 저장값 `"default"`는 허용되지 않습니다. 8색 터미널에서는 bright preset이 해당 기본색과 같게 표시될 수 있습니다.
 
-Graph #2의 UTIL 차트는 고정 0–100% 눈금을 사용합니다. 실제 0은 기준선으로 보이고 사용 불가능한 sample은 빈칸으로 남습니다. 업데이트 후 선택한 display mode를 다시 시작하면 새 눈금이 적용됩니다.
+Graph #2의 UTIL 차트는 고정 0–100% 눈금과 120s, 60s, 30s, now가 표시된 120초 시간축을 사용합니다. Sample은 실제 시간 위치에 표시됩니다. 화면에서는 다음 poll을 기다리는 동안 최대 수집 간격의 1.5배까지만 이전 값을 잠깐 유지하며 더 긴 공백은 빈칸으로 남습니다. 실제 0은 기준선으로 보입니다. 업데이트 후 선택한 display mode를 다시 시작하면 새 차트가 적용됩니다.
 
 Graph #2 이전 버전으로 downgrade하려면 `config.toml`에서 `dashboard.graph_view`를 제거하거나 setting 변경 전 backup을 복원하세요. 이전 버전은 알 수 없는 config key를 거부합니다.
 
