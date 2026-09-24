@@ -750,7 +750,7 @@ class FanAppUI(Static):
             temperatures = [gpu.temperature_celsius for gpu in gpus if gpu.temperature_celsius is not None]
             utilization = [gpu.utilization_percent for gpu in gpus if gpu.utilization_percent is not None]
             powers = [gpu.power_watts for gpu in gpus]
-            temp = "N/A" if not temperatures else f"{max(temperatures):.1f} C"
+            temp = "N/A" if not temperatures else f"{max(temperatures):.0f} C"
             util = "N/A" if not utilization else f"{max(utilization):.0f}%"
             if endpoint.memory_source == "node-exporter":
                 memory = (
@@ -826,37 +826,20 @@ class FanAppUI(Static):
         """
         if _is_linux_virtual_console() and os.environ.get(_TTY8_FONT_MARKER) != "1":
             return self._stacked_metric_rows(values)
+        numeric_values = tuple(self._numeric_value(value) for value in values)
+        if card_width < 39 or any(not value.isdecimal() or len(value) > 3 for value in numeric_values):
+            return self._stacked_metric_rows(values)
         labels = tuple(
             self._metric_label(label, value)
             for label, value in zip(_GRAPH_TWO_METRIC_LABELS, values, strict=True)
         )
-        prepared = [self._digit_value(self._numeric_value(value)) for value in values]
-        widths = [
-            max(len(label), len(value[0]))
-            for label, value in zip(labels, prepared, strict=True)
-        ]
-        spare = card_width - sum(widths)
-        if spare < 0:
-            return self._stacked_metric_rows(values)
-        # A single spare cell still improves scanability.  Allocate it from
-        # left to right instead of dividing it away to zero across all gaps.
-        gaps = [1 if index < min(3, spare) else 0 for index in range(3)]
-        positions: list[tuple[int, int, int]] = []
-        offset = 0
-        for index, width in enumerate(widths):
-            positions.append((index, offset, width))
-            if index < len(gaps):
-                offset += width + gaps[index]
-
-        def joined(parts: list[str]) -> str:
-            return "".join(
-                part + (" " * gaps[index] if index < len(gaps) else "")
-                for index, part in enumerate(parts)
-            )
-
-        rows = [joined([label.center(width) for label, width in zip(labels, widths, strict=True)])]
+        prepared = [self._digit_value(value) for value in numeric_values]
+        gap = max(1, (card_width - 36) // 3)
+        positions = tuple((index, index * (9 + gap), 9) for index in range(4))
+        separator = " " * gap
+        rows = [separator.join(label.center(9) for label in labels)]
         for row in range(len(prepared[0][1])):
-            rows.append(joined([value[1][row].center(width) for value, width in zip(prepared, widths, strict=True)]))
+            rows.append(separator.join(value[1][row].center(9) for value in prepared))
         return rows, tuple(tuple(positions) for _ in rows)
 
     @staticmethod

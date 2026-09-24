@@ -1221,7 +1221,7 @@ def test_tty8_acquisition_marks_native_digits_only_after_font_success(tmp_path: 
     sandbox = _sandbox(tmp_path)
     assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
     log = sandbox / "font.log"
-    font = sandbox / "usr/share/consolefonts/Lat15-TerminusBold20x10.psf.gz"
+    font = sandbox / "usr/share/consolefonts/Lat15-TerminusBold24x12.psf.gz"
     font.parent.mkdir(parents=True)
     font.write_bytes(b"font")
     _fake_command(sandbox / "usr/bin/setfont", 'printf "setfont %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/font.log"\n')
@@ -1266,7 +1266,7 @@ def test_tty8_acquisition_font_failures_warn_and_keep_plain_fallback(tmp_path: P
 
     marker = sandbox / "run/dgx-fan-display-tty8"
     marker.unlink()
-    font = sandbox / "usr/share/consolefonts/Lat15-TerminusBold20x10.psf.gz"
+    font = sandbox / "usr/share/consolefonts/Lat15-TerminusBold24x12.psf.gz"
     font.parent.mkdir(parents=True)
     font.write_bytes(b"font")
     _fake_command(sandbox / "usr/bin/setfont", "exit 1\n")

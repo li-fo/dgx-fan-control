@@ -796,7 +796,7 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             ui.update_snapshot(extreme, 124)
             await pilot.pause()
             text = next(iter(ui.query(".dgx-panel"))).render().plain
-            assert "TEMP 150.0 C" in text and "MEM 976562500 GiB" in text
+            assert "TEMP 150 C" in text and "MEM 976562500 GiB" in text
             assert "UTIL 100%" in text and "POWER 999999 W" in text and "…" not in text
             styles = " ".join(str(span.style) for span in next(iter(ui.query(".dgx-panel"))).render().spans)
             for color in ("ansi_yellow", "ansi_cyan", "ansi_red", "ansi_green"):
@@ -818,15 +818,17 @@ def test_native_digits_metric_layout_fits_wide_and_79_column_cards(monkeypatch: 
             line += segment.text
     assert Digits.get_width("50.0") == sum(3 if character.isdigit() else 1 for character in "50.0")
     assert ui._native_digit_lines("50.0") == tuple(expected)
-    ordinary = ("50.0 C", "111 GiB", "0%", "12 W")
-    rows, _spans = ui._large_metric_rows(ordinary, 39)
-    assert len(rows) == 4 and all(len(row) <= 39 for row in rows)
+    ordinary = ("50 C", "111 GiB", "0%", "12 W")
+    rows, spans = ui._large_metric_rows(ordinary, 39)
+    assert len(rows) == 4 and all(len(row) == 39 for row in rows)
     assert all(label in rows[0] for label in ("TEMP", "MEM", "UTIL", "POWER"))
     assert all(unit in rows[0] for unit in ("C", "GiB", "%", "W"))
     assert any(ord(character) > 127 for row in rows[1:] for character in row)
+    assert spans[0] == ((0, 0, 9), (1, 10, 9), (2, 20, 9), (3, 30, 9))
+    assert "." not in "\n".join(rows)
 
-    normal_power_rows, normal_power_spans = ui._large_metric_rows(("50.0 C", "111 GiB", "55%", "250 W"), 39)
-    assert len(normal_power_rows) == 4 and all(len(row) <= 39 for row in normal_power_rows)
+    normal_power_rows, normal_power_spans = ui._large_metric_rows(("50 C", "111 GiB", "55%", "250 W"), 39)
+    assert len(normal_power_rows) == 4 and all(len(row) == 39 for row in normal_power_rows)
     assert all(label in normal_power_rows[0] for label in ("TEMP", "MEM", "UTIL", "POWER"))
     assert normal_power_spans[0][1][1] > normal_power_spans[0][0][1] + normal_power_spans[0][0][2]
     assert normal_power_spans[0][2][1] > normal_power_spans[0][1][1] + normal_power_spans[0][1][2]
@@ -852,7 +854,7 @@ def test_native_digits_metric_layout_fits_wide_and_79_column_cards(monkeypatch: 
     marked_console, _spans = ui._large_metric_rows(ordinary, 39)
     assert len(marked_console) == 4 and any(ord(character) > 127 for row in marked_console[1:] for character in row)
 
-    extreme = ("150.0 C", "976562500 GiB", "100%", "999999 W")
+    extreme = ("1500 C", "976562500 GiB", "100%", "999999 W")
     rows, _spans = ui._large_metric_rows(extreme, 39)
     assert rows == [f"{label} {value}" for label, value in zip(("TEMP", "MEM", "UTIL", "POWER"), extreme, strict=True)]
     assert all("…" not in row and value in row for row, value in zip(rows, extreme, strict=True))
@@ -889,9 +891,51 @@ def test_graph_two_console_plain_fallback_two_dgx_79_columns_has_no_scroll(monke
             ui.update_snapshot(snapshot, 120)
             await pilot.pause()
             dashboard = next(iter(ui.query(".dgx-panel"))).render().plain
-            assert "TEMP 50.0 C" in dashboard and "MEM 111 GiB" in dashboard
+            assert "TEMP 50 C" in dashboard and "MEM 111 GiB" in dashboard
             assert "# #" not in dashboard and "###" not in dashboard
             scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
+            assert scroll.display and scroll.max_scroll_y == 0
+
+    asyncio.run(exercise())
+
+
+def test_graph_two_marked_tty8_integer_slots_fit_85x25_and_79x30(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeTTY:
+        def isatty(self) -> bool:
+            return True
+
+        def fileno(self) -> int:
+            return 8
+
+    class GraphTwoApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FanAppUI("config.toml", lambda: None, 75, 2, graph_view="graph-2")
+
+    monkeypatch.setattr(ui_module.sys, "stdin", FakeTTY())
+    monkeypatch.setattr(ui_module.os, "ttyname", lambda _fd: "/dev/tty8")
+    monkeypatch.setenv(ui_module._TTY8_FONT_MARKER, "1")
+    gpu = GPUStat("GPU-a", "A100", 114399, 0, 55, 50.4, 250)
+    snapshot = _fan_snapshot(
+        20, "curve", "AUTO ON", 50.4, 0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (
+            EndpointSnapshot("one", "One", True, 0, gpus=(gpu,), sample_revision=1),
+            EndpointSnapshot("two", "Two", True, 0, gpus=(gpu,), sample_revision=1),
+        ),
+    )
+    app = GraphTwoApp()
+
+    async def exercise() -> None:
+        async with app.run_test(size=(85, 25)) as pilot:
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 120)
+            await pilot.pause()
+            panel = next(iter(ui.query(".dgx-panel"))).render().plain
+            assert "TEMP C" in panel and "MEM GiB" in panel and "." not in panel.split("┌ UTIL", 1)[0]
+            scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
+            assert scroll.display and scroll.max_scroll_y == 0
+            await pilot.resize_terminal(79, 30)
+            await pilot.pause()
             assert scroll.display and scroll.max_scroll_y == 0
 
     asyncio.run(exercise())
