@@ -28,7 +28,7 @@ HISTORY_SECONDS = 120.0
 MIN_DASHBOARD_WIDTH = 79
 PLOT_HEIGHT = 5
 MAX_LAYOUT_CONVERGENCE_PASSES = 2
-_GRAPH_TWO_METRIC_LABELS = ("TEMP", "MEM", "UTIL", "POWER")
+_GRAPH_TWO_METRIC_LABELS = ("UTIL", "MEM", "TEMP", "POWER")
 _TTY8_FONT_MARKER = "DGX_FAN_TEXTUAL_TTY8_FONT"
 
 
@@ -843,7 +843,7 @@ class FanAppUI(Static):
                 used = [gpu.memory_used_mib for gpu in gpus if gpu.memory_used_mib is not None]
                 mem = "N/A" if not gpus or len(used) != len(gpus) else f"{int(sum(used) // 1024)} GiB"
             power = "N/A" if not gpus or any(value is None for value in powers) else f"{sum(value for value in powers if value is not None):.0f} W"
-            metric_rows, metric_spans = self._large_metric_rows((temp, mem, util, power), card_width)
+            metric_rows, metric_spans = self._large_metric_rows((util, mem, temp, power), card_width)
             cards.append(([
                 _compact_display_text(f"┌ {endpoint.name}", card_width).ljust(card_width, "─"),
                 *metric_rows,
@@ -860,13 +860,13 @@ class FanAppUI(Static):
             )
             metric_specs = (
                 ("util", 100.0, self.dashboard_colors.utilization, util, "%", bool(gpus)),
-                ("temp", max(100.0, self.emergency_temperature), self.dashboard_colors.temperature, temp, " C", bool(gpus)),
                 ("mem", 100.0, self.dashboard_colors.memory, "", "%", memory_ready and (
                     (
                         endpoint.memory_source == "node-exporter"
                         and endpoint.uma_memory is not None and endpoint.uma_memory.total_mib > 0
                     ) or (endpoint.memory_source == "dcgm" and dcgm_memory_ready)
                 )),
+                ("temp", max(100.0, self.emergency_temperature), self.dashboard_colors.temperature, temp, " C", bool(gpus)),
                 ("power", 240.0, self.dashboard_colors.power, power, " W", bool(gpus) and power != "N/A"),
             )
             for metric, maximum, configured_color, current, unit, available_metric in metric_specs:
@@ -902,9 +902,9 @@ class FanAppUI(Static):
                 line.append(value)
                 if 1 <= row <= len(metric_spans):
                     colors = (
-                        self.dashboard_colors.temperature,
-                        self.dashboard_colors.memory,
                         self.dashboard_colors.utilization,
+                        self.dashboard_colors.memory,
+                        self.dashboard_colors.temperature,
                         self.dashboard_colors.power,
                     )
                     for metric_index, offset, width in metric_spans[row - 1]:
@@ -946,7 +946,7 @@ class FanAppUI(Static):
         endpoint_cards: list[Vertical] = []
         for index, endpoint in enumerate(endpoints):
             metric_cards: list[Vertical] = []
-            for metric in ("util", "temp", "mem", "power"):
+            for metric in ("util", "mem", "temp", "power"):
                 key = (endpoint.endpoint_id, metric)
                 label = Static(
                     classes="graph-two-metric-label" + (" graph-two-util-label" if metric == "util" else ""),

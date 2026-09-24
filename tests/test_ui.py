@@ -881,13 +881,26 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             dashboard = next(iter(ui.query(".dgx-panel"))).render()
             text = "\n".join(panel.render().plain for panel in ui.query(".dgx-panel"))
             assert "TEMP" in text and "MEM" in text and "UTIL" in text and "POWER" in text
-            assert text.index("TEMP") < text.index("MEM") < text.index("UTIL") < text.index("POWER")
+            assert text.index("UTIL") < text.index("MEM") < text.index("TEMP") < text.index("POWER")
             assert "GiB" in text and "TEMP 120s" not in text and "X: overlap" not in text
             styles = " ".join(str(span.style) for span in dashboard.spans)
             for color in ("ansi_yellow", "ansi_cyan", "ansi_red", "ansi_green"):
                 assert color in styles
+            colored_summary = [
+                (dashboard.plain[span.start:span.end].strip(), str(span.style))
+                for span in dashboard.spans if "ansi_" in str(span.style)
+            ]
+            for (label, style), expected_label, expected_color in zip(
+                colored_summary[:4], ("UTIL", "MEM", "TEMP", "POWER"),
+                ("ansi_cyan", "ansi_yellow", "ansi_red", "ansi_green"), strict=True,
+            ):
+                assert label.startswith(expected_label) and expected_color in style
             sparklines = list(ui.query(Sparkline))
             assert len(sparklines) == 8
+            assert [sparkline.id for sparkline in sparklines] == [
+                f"graph-two-{metric}-{index}"
+                for index in (0, 1) for metric in ("util", "mem", "temp", "power")
+            ]
             for endpoint_id in ("one", "two"):
                 assert ui.graph_two_sparklines[(endpoint_id, "util")].data == (40,)
                 assert ui.graph_two_sparklines[(endpoint_id, "temp")].data == (55,)
@@ -1332,19 +1345,19 @@ def test_native_digits_metric_layout_fits_wide_and_79_column_cards(monkeypatch: 
             line += segment.text
     assert Digits.get_width("50.0") == sum(3 if character.isdigit() else 1 for character in "50.0")
     assert ui._native_digit_lines("50.0") == tuple(expected)
-    ordinary = ("50 C", "111 GiB", "0%", "12 W")
+    ordinary = ("0%", "111 GiB", "50 C", "12 W")
     rows, spans = ui._large_metric_rows(ordinary, 39)
     assert len(rows) == 4 and all(len(row) == 39 for row in rows)
-    assert all(label in rows[0] for label in ("TEMP", "MEM", "UTIL", "POWER"))
+    assert rows[0].index("UTIL") < rows[0].index("MEM") < rows[0].index("TEMP") < rows[0].index("POWER")
     assert all(unit in rows[0] for unit in ("C", "GiB", "%", "W"))
     assert any(ord(character) > 127 for row in rows[1:] for character in row)
     assert spans[0] == ((0, 0, 9), (1, 10, 9), (2, 20, 9), (3, 30, 9))
     assert "." not in "\n".join(rows)
-    assert len(rows[1:]) == len(ui._native_digit_lines("50"))
+    assert len(rows[1:]) == len(ui._native_digit_lines("0"))
 
-    normal_power_rows, normal_power_spans = ui._large_metric_rows(("50 C", "111 GiB", "55%", "250 W"), 39)
+    normal_power_rows, normal_power_spans = ui._large_metric_rows(("55%", "111 GiB", "50 C", "250 W"), 39)
     assert len(normal_power_rows) == 4 and all(len(row) == 39 for row in normal_power_rows)
-    assert all(label in normal_power_rows[0] for label in ("TEMP", "MEM", "UTIL", "POWER"))
+    assert normal_power_rows[0].index("UTIL") < normal_power_rows[0].index("MEM") < normal_power_rows[0].index("TEMP") < normal_power_rows[0].index("POWER")
     assert normal_power_spans[0][1][1] > normal_power_spans[0][0][1] + normal_power_spans[0][0][2]
     assert normal_power_spans[0][2][1] > normal_power_spans[0][1][1] + normal_power_spans[0][1][2]
 
@@ -1363,16 +1376,16 @@ def test_native_digits_metric_layout_fits_wide_and_79_column_cards(monkeypatch: 
     monkeypatch.delenv("TERM")
     assert ui_module._is_linux_virtual_console()
     plain_console, _spans = ui._large_metric_rows(ordinary, 39)
-    assert plain_console == [f"{label} {value}" for label, value in zip(("TEMP", "MEM", "UTIL", "POWER"), ordinary, strict=True)]
+    assert plain_console == [f"{label} {value}" for label, value in zip(("UTIL", "MEM", "TEMP", "POWER"), ordinary, strict=True)]
     assert "#" not in "\n".join(plain_console)
     monkeypatch.setenv(ui_module._TTY8_FONT_MARKER, "1")
     marked_console, _spans = ui._large_metric_rows(ordinary, 39)
     assert len(marked_console) == 4
     assert any(ord(character) > 127 for row in marked_console[1:] for character in row)
 
-    extreme = ("1500 C", "976562500 GiB", "100%", "999999 W")
+    extreme = ("100%", "976562500 GiB", "1500 C", "999999 W")
     rows, _spans = ui._large_metric_rows(extreme, 39)
-    assert rows == [f"{label} {value}" for label, value in zip(("TEMP", "MEM", "UTIL", "POWER"), extreme, strict=True)]
+    assert rows == [f"{label} {value}" for label, value in zip(("UTIL", "MEM", "TEMP", "POWER"), extreme, strict=True)]
     assert all("…" not in row and value in row for row, value in zip(rows, extreme, strict=True))
 
 
@@ -1407,7 +1420,13 @@ def test_graph_two_console_plain_fallback_two_dgx_79_columns_has_no_scroll(monke
             ui.update_snapshot(snapshot, 120)
             await pilot.pause()
             dashboard = next(iter(ui.query(".dgx-panel"))).render().plain
-            assert "TEMP 50 C" in dashboard and "MEM 111 GiB" in dashboard
+            assert all(value in dashboard for value in
+                       ("UTIL 55%", "MEM 111 GiB", "TEMP 50 C", "POWER 250 W"))
+            lines = dashboard.splitlines()
+            assert lines[1].startswith("UTIL 55%")
+            assert lines[2].startswith("MEM 111 GiB")
+            assert lines[3].startswith("TEMP 50 C")
+            assert lines[4].startswith("POWER 250 W")
             assert "# #" not in dashboard and "###" not in dashboard
             scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
             assert scroll.display and scroll.max_scroll_y == 0
