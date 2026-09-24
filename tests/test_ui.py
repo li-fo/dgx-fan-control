@@ -925,8 +925,9 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             assert all(sparkline.data == (40,) and sparkline.display for sparkline in util_lines)
             assert _mounted_sparkline_ink(util_lines[0])
             assert _mounted_sparkline_ink(util_lines[0]) == _mounted_sparkline_ink(util_lines[1])
-            assert ui.query_one("#graph-two-metric-row").size.height == 16
-            assert all(sparkline.size.height == 2 for sparkline in sparklines)
+            assert ui.query_one("#graph-two-metric-row").size.height == 19
+            assert [ui.graph_two_sparklines[("one", metric)].size.height for metric in
+                    ("util", "mem", "temp", "power")] == [3, 3, 3, 2]
             axes = list(ui.query(UtilTimeAxis))
             assert len(axes) == 8 and all(axis.size.height == 1 for axis in axes)
             assert all(axis.region.x == sparkline.region.x and axis.size.width == sparkline.size.width
@@ -939,22 +940,34 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             assert scroll.max_scroll_y == 0
             assert all(axis.region.bottom <= scroll.region.bottom for axis in axes)
             metric_row = ui.query_one("#graph-two-metric-row")
-            assert 0 <= scroll.region.bottom - metric_row.region.bottom < 4
+            assert scroll.region.bottom == metric_row.region.bottom
             width = util_lines[0].size.width
+            util_height = util_lines[0].size.height
             for values, expected in (
-                ((), [" " * width] * 2),
-                ((0,), [" " * width, " " * (width - 1) + "▁"]),
-                ((50,), [" " * width, " " * (width - 1) + "█"]),
-                ((100,), [" " * (width - 1) + "█"] * 2),
+                ((), [" " * width] * util_height),
+                ((0,), [" " * width] * (util_height - 1) + [" " * (width - 1) + "▁"]),
+                ((50,), [" " * width, " " * (width - 1) + "▄", " " * (width - 1) + "█"]),
+                ((100,), [" " * (width - 1) + "█"] * util_height),
             ):
                 util_lines[0].data = values
                 assert _mounted_sparkline_rows(util_lines[0]) == expected
             util_lines[0].data = (40,)
             assert all(sparkline.max_color is not None for sparkline in sparklines)
             assert all(sparkline.max_color is not None and sparkline.max_color.hex == "#00FFFF" for sparkline in util_lines)
-            await pilot.resize_terminal(102, 30)
-            await pilot.pause()
-            assert ui.query_one("#dashboard-scroll", VerticalScroll).max_scroll_y == 0
+            for screen_height, expected_heights in (
+                (27, [2, 2, 2, 2]), (28, [3, 2, 2, 2]),
+                (29, [3, 3, 2, 2]), (30, [3, 3, 3, 2]),
+            ):
+                await pilot.resize_terminal(102, screen_height)
+                await pilot.pause()
+                scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
+                assert scroll.max_scroll_y == 0
+                assert scroll.region.bottom == metric_row.region.bottom
+                for index, metric in enumerate(("util", "mem", "temp", "power")):
+                    assert all(ui.graph_two_sparklines[(endpoint, metric)].size.height == expected_heights[index]
+                               for endpoint in ("one", "two"))
+                assert max(expected_heights) - min(expected_heights) <= 1
+                assert all(axis.region.bottom <= scroll.region.bottom for axis in axes)
             failed = replace(
                 snapshot,
                 endpoint_snapshots=(
@@ -1012,8 +1025,9 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             await pilot.pause()
             scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
             assert scroll.display and scroll.max_scroll_y == 0
-            assert all(sparkline.size.height == 1 for sparkline in sparklines)
-            assert 0 <= scroll.region.bottom - metric_row.region.bottom < 4
+            assert [ui.graph_two_sparklines[("one", metric)].size.height for metric in
+                    ("util", "mem", "temp", "power")] == [2, 2, 1, 1]
+            assert scroll.region.bottom == metric_row.region.bottom
             assert all(axis.size.height == 1 and axis.region.bottom <= scroll.region.bottom
                        for axis in axes)
             assert all(axis.size.width == sparkline.size.width for axis, sparkline in
@@ -1023,24 +1037,30 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             await pilot.pause()
             scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
             assert scroll.display and scroll.max_scroll_y == 0
-            assert all(sparkline.size.height == 2 for sparkline in sparklines)
-            assert 0 <= scroll.region.bottom - metric_row.region.bottom < 4
+            assert [ui.graph_two_sparklines[("one", metric)].size.height for metric in
+                    ("util", "mem", "temp", "power")] == [3, 3, 3, 2]
+            assert scroll.region.bottom == metric_row.region.bottom
             assert all(axis.size.height == 1 and axis.region.bottom <= scroll.region.bottom
                        for axis in axes)
             await pilot.resize_terminal(102, 46)
             await pilot.pause()
             scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
             assert scroll.max_scroll_y == 0
-            tall_height = sparklines[0].size.height
-            assert tall_height > 4
-            assert all(sparkline.size.height == tall_height for sparkline in sparklines)
-            assert 0 <= scroll.region.bottom - metric_row.region.bottom < 4
+            tall_heights = [ui.graph_two_sparklines[("one", metric)].size.height for metric in
+                            ("util", "mem", "temp", "power")]
+            assert tall_heights == [7, 7, 7, 6]
+            assert all(ui.graph_two_sparklines[(endpoint, metric)].size.height == tall_heights[index]
+                       for endpoint in ("one", "two")
+                       for index, metric in enumerate(("util", "mem", "temp", "power")))
+            assert scroll.region.bottom == metric_row.region.bottom
             await pilot.pause()
-            assert all(sparkline.size.height == tall_height for sparkline in sparklines)
+            assert [ui.graph_two_sparklines[("one", metric)].size.height for metric in
+                    ("util", "mem", "temp", "power")] == tall_heights
             assert scroll.max_scroll_y == 0
             await pilot.resize_terminal(102, 30)
             await pilot.pause()
-            assert all(sparkline.size.height == 2 for sparkline in sparklines)
+            assert [ui.graph_two_sparklines[("one", metric)].size.height for metric in
+                    ("util", "mem", "temp", "power")] == [3, 3, 3, 2]
             assert ui.query_one("#dashboard-scroll", VerticalScroll).max_scroll_y == 0
             high = GPUStat(
                 "GPU-high",
@@ -1067,6 +1087,11 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             for color in ("ansi_yellow", "ansi_cyan", "ansi_red", "ansi_green"):
                 assert color in styles
             assert scroll.max_scroll_y == 0
+            await pilot.resize_terminal(79, 20)
+            await pilot.pause()
+            scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
+            assert all(sparkline.size.height >= 1 for sparkline in sparklines)
+            assert scroll.max_scroll_y > 0
 
     asyncio.run(exercise())
 
@@ -1189,8 +1214,8 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
             sparkline = ui.graph_two_sparklines[("one", "util")]
             assert sparkline.data == (5,) and sparkline.display
             assert _mounted_sparkline_rows(sparkline) == (
-                [" " * sparkline.size.width]
-                + [" " * (sparkline.size.width - 1) + "▁"]
+                [" " * sparkline.size.width] * (sparkline.size.height - 1)
+                + [" " * (sparkline.size.width - 1) + "▂"]
             )
             assert ui.query_one(".graph-two-util-label", Static).render().plain == "UTIL 5% · 0–100%"
 
@@ -1202,7 +1227,7 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
             assert sparkline.data == (5, 0) and sparkline.display
             rows = _mounted_sparkline_rows(sparkline)
             assert rows[:1] == [" " * sparkline.size.width]
-            assert rows[-1] == " " * (sparkline.size.width - 1) + "▁"
+            assert rows[-1] == " " * (sparkline.size.width - 1) + "▂"
             assert ui.query_one(".graph-two-util-label", Static).render().plain == "UTIL 0% · 0–100%"
             before_ink = _mounted_sparkline_ink(sparkline)
 
@@ -1326,7 +1351,7 @@ def test_graph_two_sparkline_blanks_empty_and_shows_single_zero_sample() -> None
             await pilot.pause()
             assert sparkline.data == (0,) and sparkline.display
             assert _mounted_sparkline_rows(sparkline) == (
-                [" " * sparkline.size.width]
+                [" " * sparkline.size.width] * (sparkline.size.height - 1)
                 + [" " * (sparkline.size.width - 1) + "▁"]
             )
 
@@ -1428,8 +1453,22 @@ def test_graph_two_console_plain_fallback_two_dgx_79_columns_has_no_scroll(monke
             assert lines[3].startswith("TEMP 50 C")
             assert lines[4].startswith("POWER 250 W")
             assert "# #" not in dashboard and "###" not in dashboard
-            scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
-            assert scroll.display and scroll.max_scroll_y == 0
+            for size, expected in (
+                ((79, 30), (3, 3, 3, 2)), ((102, 30), (3, 3, 3, 2)),
+                ((85, 25), (2, 2, 1, 1)), ((102, 46), (7, 7, 7, 6)),
+                ((102, 27), (2, 2, 2, 2)), ((102, 28), (3, 2, 2, 2)),
+                ((102, 29), (3, 3, 2, 2)),
+            ):
+                await pilot.resize_terminal(*size)
+                await pilot.pause()
+                scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
+                assert scroll.display and scroll.max_scroll_y == 0
+                assert ui.query_one("#graph-two-metric-row").region.bottom == scroll.region.bottom
+                assert max(expected) - min(expected) <= 1
+                for endpoint_id in ("one", "two"):
+                    assert tuple(ui.graph_two_sparklines[(endpoint_id, metric)].size.height for metric in
+                                 ("util", "mem", "temp", "power")) == expected
+                    assert ui.graph_two_metric_cards[(endpoint_id, "power")].query_one(UtilTimeAxis).region.bottom == scroll.region.bottom
 
     asyncio.run(exercise())
 
@@ -1467,17 +1506,24 @@ def test_graph_two_marked_tty8_integer_slots_fit_85x25_and_79x30(monkeypatch: py
             await pilot.pause()
             panel = next(iter(ui.query(".dgx-panel"))).render().plain
             assert "TEMP C" in panel and "MEM GiB" in panel and "." not in panel.split("┌ UTIL", 1)[0]
-            scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
-            assert scroll.display and scroll.max_scroll_y == 0
             assert len(ui.query(Sparkline)) == 8
-            await pilot.resize_terminal(85, 25)
-            await pilot.pause()
-            assert scroll.display and scroll.max_scroll_y == 0
-            assert len(ui.query(Sparkline)) == 8
-            await pilot.resize_terminal(79, 30)
-            await pilot.pause()
-            assert scroll.display and scroll.max_scroll_y == 0
-            assert len(ui.query(Sparkline)) == 8
+            for size, expected in (
+                ((102, 30), (3, 3, 3, 2)), ((85, 25), (2, 2, 1, 1)),
+                ((79, 30), (3, 3, 3, 2)), ((102, 46), (7, 7, 7, 6)),
+                ((102, 27), (2, 2, 2, 2)), ((102, 28), (3, 2, 2, 2)),
+                ((102, 29), (3, 3, 2, 2)),
+            ):
+                await pilot.resize_terminal(*size)
+                await pilot.pause()
+                scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
+                assert scroll.display and scroll.max_scroll_y == 0
+                assert ui.query_one("#graph-two-metric-row").region.bottom == scroll.region.bottom
+                assert max(expected) - min(expected) <= 1
+                for endpoint_id in ("one", "two"):
+                    assert tuple(ui.graph_two_sparklines[(endpoint_id, metric)].size.height for metric in
+                                 ("util", "mem", "temp", "power")) == expected
+                    assert ui.graph_two_metric_cards[(endpoint_id, "power")].query_one(UtilTimeAxis).region.bottom == scroll.region.bottom
+                assert len(ui.query(Sparkline)) == 8
 
     asyncio.run(exercise())
 

@@ -916,20 +916,24 @@ class FanAppUI(Static):
             if row < height - 1:
                 rendered.append("\n")
         panel.update(rendered)
-        # The summary is already rendered above the four label/plot/axis cards.
-        # Allocate the remaining dashboard viewport evenly to their plots.
+        # The summary is above four label/plot/axis cards. Give any leftover
+        # viewport rows to the first plots instead of leaving a bottom gap.
         viewport_height = scroll.scrollable_content_region.height
-        plot_height = max(1, (viewport_height - height - 4 * 2) // 4)
-        metric_height = plot_height + 2
-        row_height = 4 * metric_height
+        plot_rows = max(0, viewport_height - height - 4 * 2)
+        base_height, extra_rows = divmod(plot_rows, 4)
+        plot_heights = {
+            metric: max(1, base_height + (index < extra_rows))
+            for index, metric in enumerate(("util", "mem", "temp", "power"))
+        }
+        row_height = sum(plot_heights.values()) + 4 * 2
         assert self.graph_two_metric_row is not None
         self.graph_two_metric_row.styles.height = row_height
         for endpoint_card in self.graph_two_endpoint_cards.values():
             endpoint_card.styles.height = row_height
-        for metric_card in self.graph_two_metric_cards.values():
-            metric_card.styles.height = metric_height
-        for sparkline in self.graph_two_sparklines.values():
-            sparkline.styles.height = plot_height
+        for (_endpoint_id, metric), metric_card in self.graph_two_metric_cards.items():
+            metric_card.styles.height = plot_heights[metric] + 2
+        for (_endpoint_id, metric), sparkline in self.graph_two_sparklines.items():
+            sparkline.styles.height = plot_heights[metric]
         for gutter in self.graph_two_metric_row.query(".graph-two-metric-gutter"):
             gutter.styles.height = row_height
         self._dashboard_layout_signature = self._layout_signature(scroll)
