@@ -244,7 +244,7 @@ EOF
 }
 
 write_display_helpers() {
-    local manager session acquired cleanup rendered project_quoted user_quoted marker_quoted tty_active_quoted return_console_prefix_quoted openvt_quoted runuser_quoted chvt_quoted deallocvt_quoted fuser_quoted python3_quoted systemctl_quoted systemd_run_quoted acquired_quoted cleanup_quoted session_quoted
+    local manager session acquired cleanup rendered project_quoted user_quoted marker_quoted tty_active_quoted return_console_prefix_quoted openvt_quoted runuser_quoted setfont_quoted font_quoted chvt_quoted deallocvt_quoted fuser_quoted python3_quoted systemctl_quoted systemd_run_quoted acquired_quoted cleanup_quoted session_quoted
     manager=$(target_path "/usr/local/libexec/$DISPLAY_MANAGER_NAME")
     session=$(target_path "/usr/local/libexec/$DISPLAY_SESSION_NAME")
     acquired=$(target_path "/usr/local/libexec/$DISPLAY_TTY_ACQUIRED_NAME")
@@ -256,6 +256,8 @@ write_display_helpers() {
     return_console_prefix_quoted=$(posix_quote "$(target_path /dev/tty)")
     openvt_quoted=$(posix_quote "$(target_path /usr/bin/openvt)")
     runuser_quoted=$(posix_quote "$(target_path /usr/sbin/runuser)")
+    setfont_quoted=$(posix_quote "$(target_path /usr/bin/setfont)")
+    font_quoted=$(posix_quote "$(target_path /usr/share/consolefonts/Lat15-TerminusBold20x10.psf.gz)")
     chvt_quoted=$(posix_quote "$(target_path /usr/bin/chvt)")
     deallocvt_quoted=$(posix_quote "$(target_path /usr/bin/deallocvt)")
     fuser_quoted=$(posix_quote "$(target_path /usr/bin/fuser)")
@@ -293,6 +295,8 @@ $HELPER_MARKER
 set -eu
 marker=$marker_quoted
 runuser=$runuser_quoted
+setfont=$setfont_quoted
+font=$font_quoted
 [ "\$#" -eq 3 ] || exit 64
 case "\$1" in *[!A-Za-z0-9._-]*|'') exit 64;; esac
 [ -x "\$2" ] || exit 1
@@ -301,6 +305,18 @@ case "\$3" in tty[1-9]|tty[1-9][0-9]*) ;; *) exit 64;; esac
 umask 077
 : >"\$marker"
 printf '%s\n' "\$3" >"\$marker"
+# The marker is authoritative only for this successful tty8 font probe.
+unset DGX_FAN_TEXTUAL_TTY8_FONT
+if [ ! -x "\$setfont" ]; then
+    echo 'dgx-fan display: setfont unavailable; using plain Graph #2 values' >&2
+elif [ ! -r "\$font" ]; then
+    echo 'dgx-fan display: Terminus console font unavailable; using plain Graph #2 values' >&2
+elif "\$setfont" -C /dev/tty8 "\$font"; then
+    # runuser without --login preserves this display-only marker for the app.
+    export DGX_FAN_TEXTUAL_TTY8_FONT=1
+else
+    echo 'dgx-fan display: unable to set tty8 font; using plain Graph #2 values' >&2
+fi
 exec "\$runuser" -u "\$1" -- "\$2"
 EOF
     } >"$rendered"

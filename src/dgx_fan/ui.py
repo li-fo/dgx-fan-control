@@ -27,19 +27,7 @@ MIN_DASHBOARD_WIDTH = 79
 PLOT_HEIGHT = 5
 MAX_LAYOUT_CONVERGENCE_PASSES = 2
 _GRAPH_TWO_METRIC_LABELS = ("TEMP", "MEM", "UTIL", "POWER")
-_ASCII_DIGITS = {
-    "0": ("###", "# #", "# #", "# #", "###"),
-    "1": (" ##", "  #", "  #", "  #", "###"),
-    "2": ("###", "  #", "###", "#  ", "###"),
-    "3": ("###", "  #", "###", "  #", "###"),
-    "4": ("# #", "# #", "###", "  #", "  #"),
-    "5": ("###", "#  ", "###", "  #", "###"),
-    "6": ("###", "#  ", "###", "# #", "###"),
-    "7": ("###", "  #", "  #", "  #", "  #"),
-    "8": ("###", "# #", "###", "# #", "###"),
-    "9": ("###", "# #", "###", "  #", "###"),
-    ".": (" ", " ", " ", " ", "#"),
-}
+_TTY8_FONT_MARKER = "DGX_FAN_TEXTUAL_TTY8_FONT"
 
 
 def _is_linux_virtual_console(stream: object | None = None) -> bool:
@@ -832,18 +820,17 @@ class FanAppUI(Static):
     ) -> tuple[list[str], tuple[tuple[tuple[int, int, int], ...], ...]]:
         """Render a compact four-metric group, falling back before clipping.
 
-        Native Textual digits are crisp in capable terminals.  At a physical
-        Linux console the ASCII form is deterministic and narrow enough to
-        keep all four metrics on one horizontal group.
+        Native Textual digits are used in capable terminals and in managed
+        tty8 only after its compatible font was activated.  An unmarked Linux
+        virtual console gets plain full values instead of unreliable glyphs.
         """
-        # Only a real Linux VT needs the ASCII form.  Modern terminals and the
-        # browser retain Textual's native renderer even for 39-cell cards.
-        ascii_digits = _is_linux_virtual_console()
+        if _is_linux_virtual_console() and os.environ.get(_TTY8_FONT_MARKER) != "1":
+            return self._stacked_metric_rows(values)
         labels = tuple(
             self._metric_label(label, value)
             for label, value in zip(_GRAPH_TWO_METRIC_LABELS, values, strict=True)
         )
-        prepared = [self._digit_value(self._numeric_value(value), ascii_digits) for value in values]
+        prepared = [self._digit_value(self._numeric_value(value)) for value in values]
         widths = [
             max(len(label), len(value[0]))
             for label, value in zip(labels, prepared, strict=True)
@@ -888,16 +875,6 @@ class FanAppUI(Static):
         return rows[0], rows[1], rows[2]
 
     @staticmethod
-    def _ascii_digit_lines(value: str) -> tuple[str, ...]:
-        """Render clear portable 3x5 pixel numerals for the Linux console."""
-        rows = ["", "", "", "", ""]
-        for character in value:
-            glyph = _ASCII_DIGITS.get(character, ("   ", "   ", "   ", "   ", character.ljust(3)))
-            for index, part in enumerate(glyph):
-                rows[index] += part
-        return tuple(rows)
-
-    @staticmethod
     def _numeric_value(value: str) -> str:
         for suffix in (" GiB", " C", " W", "%"):
             if value.endswith(suffix):
@@ -918,12 +895,12 @@ class FanAppUI(Static):
         return label
 
     @classmethod
-    def _digit_value(cls, value: str, ascii_digits: bool) -> tuple[str, tuple[str, ...]]:
+    def _digit_value(cls, value: str) -> tuple[str, tuple[str, ...]]:
         if value == "N/A":
-            blank = ("",) * (5 if ascii_digits else 3)
+            blank = ("",) * 3
             middle = len(blank) // 2
             return value, (*blank[:middle], value, *blank[middle + 1:])
-        lines = list(cls._ascii_digit_lines(value) if ascii_digits else cls._native_digit_lines(value))
+        lines = list(cls._native_digit_lines(value))
         width = max(len(line) for line in lines)
         return " " * width, tuple(line.ljust(width) for line in lines)
 

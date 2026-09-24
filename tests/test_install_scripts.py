@@ -1216,6 +1216,68 @@ def test_fake_vt_lifecycle_runs_cleanup_only_after_tty_marker(tmp_path: Path) ->
     assert not marker.exists()
 
 
+def test_tty8_acquisition_marks_native_digits_only_after_font_success(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    log = sandbox / "font.log"
+    font = sandbox / "usr/share/consolefonts/Lat15-TerminusBold20x10.psf.gz"
+    font.parent.mkdir(parents=True)
+    font.write_bytes(b"font")
+    _fake_command(sandbox / "usr/bin/setfont", 'printf "setfont %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/font.log"\n')
+    _fake_command(
+        sandbox / "usr/sbin/runuser",
+        'printf "runuser marker=%s %s\\n" "${DGX_FAN_TEXTUAL_TTY8_FONT:-}" "$*" >> "$DGX_FAN_TEST_ROOT/font.log"\n',
+    )
+    (sandbox / "run").mkdir()
+    acquired = sandbox / "usr/local/libexec/dgx-fan-display-tty-acquired"
+
+    result = subprocess.run(
+        ["sh", str(acquired), "operator", str(clone / "scripts/start.sh"), "tty3"],
+        env=_environment(sandbox), text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert log.read_text().splitlines() == [
+        f"setfont -C /dev/tty8 {font}",
+        f"runuser marker=1 -u operator -- {clone / 'scripts/start.sh'}",
+    ]
+
+
+def test_tty8_acquisition_font_failures_warn_and_keep_plain_fallback(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    log = sandbox / "font-fallback.log"
+    _fake_command(
+        sandbox / "usr/sbin/runuser",
+        'printf "marker=%s\\n" "${DGX_FAN_TEXTUAL_TTY8_FONT:-}" >> "$DGX_FAN_TEST_ROOT/font-fallback.log"\n',
+    )
+    (sandbox / "run").mkdir()
+    acquired = sandbox / "usr/local/libexec/dgx-fan-display-tty-acquired"
+    inherited = _environment(sandbox)
+    inherited["DGX_FAN_TEXTUAL_TTY8_FONT"] = "1"
+    missing = subprocess.run(
+        ["sh", str(acquired), "operator", str(clone / "scripts/start.sh"), "tty3"],
+        env=inherited, text=True, capture_output=True, check=False,
+    )
+    assert missing.returncode == 0 and "setfont unavailable" in missing.stderr
+    assert log.read_text() == "marker=\n"
+
+    marker = sandbox / "run/dgx-fan-display-tty8"
+    marker.unlink()
+    font = sandbox / "usr/share/consolefonts/Lat15-TerminusBold20x10.psf.gz"
+    font.parent.mkdir(parents=True)
+    font.write_bytes(b"font")
+    _fake_command(sandbox / "usr/bin/setfont", "exit 1\n")
+    failed = subprocess.run(
+        ["sh", str(acquired), "operator", str(clone / "scripts/start.sh"), "tty3"],
+        env=_environment(sandbox), text=True, capture_output=True, check=False,
+    )
+    assert failed.returncode == 0 and "unable to set tty8 font" in failed.stderr
+    assert log.read_text().splitlines() == ["marker=", "marker="]
+
+
 def test_cleanup_recovers_selection_after_failed_normal_dealloc(tmp_path: Path) -> None:
     clone = _clone(tmp_path)
     sandbox = _sandbox(tmp_path)
