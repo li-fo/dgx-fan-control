@@ -28,10 +28,17 @@ PLOT_HEIGHT = 5
 MAX_LAYOUT_CONVERGENCE_PASSES = 2
 _GRAPH_TWO_METRIC_LABELS = ("TEMP", "MEM", "UTIL", "POWER")
 _ASCII_DIGITS = {
-    "0": ("[]", "||", "[]"), "1": (" .", " |", "_|"), "2": ("[]", " _", "[_"),
-    "3": ("[]", " _", "_]"), "4": ("||", "[_", " |"), "5": ("[ ", "[_", "_]"),
-    "6": ("[ ", "[_", "[]"), "7": ("[]", " |", " |"), "8": ("[]", "[_", "[]"),
-    "9": ("[]", "[_", " |"),
+    "0": ("###", "# #", "# #", "# #", "###"),
+    "1": (" ##", "  #", "  #", "  #", "###"),
+    "2": ("###", "  #", "###", "#  ", "###"),
+    "3": ("###", "  #", "###", "  #", "###"),
+    "4": ("# #", "# #", "###", "  #", "  #"),
+    "5": ("###", "#  ", "###", "  #", "###"),
+    "6": ("###", "#  ", "###", "# #", "###"),
+    "7": ("###", "  #", "  #", "  #", "  #"),
+    "8": ("###", "# #", "###", "# #", "###"),
+    "9": ("###", "# #", "###", "  #", "###"),
+    ".": (" ", " ", " ", " ", "#"),
 }
 
 
@@ -782,7 +789,8 @@ class FanAppUI(Static):
         rendered = Text()
         height = max((len(card[0]) for card in cards), default=0)
         for row in range(height):
-            line = Text(style=Style(bold=row in {1, 2}))
+            metric_height = max((len(spans) for _card, spans in cards), default=0)
+            line = Text(style=Style(bold=1 <= row <= metric_height))
             for index, (card, metric_spans) in enumerate(cards):
                 value = card[row].ljust(card_width) if row < len(card) else " " * card_width
                 start = len(line.plain)
@@ -860,7 +868,7 @@ class FanAppUI(Static):
             )
 
         rows = [joined([label.center(width) for label, width in zip(labels, widths, strict=True)])]
-        for row in range(3):
+        for row in range(len(prepared[0][1])):
             rows.append(joined([value[1][row].center(width) for value, width in zip(prepared, widths, strict=True)]))
         return rows, tuple(tuple(positions) for _ in rows)
 
@@ -880,14 +888,14 @@ class FanAppUI(Static):
         return rows[0], rows[1], rows[2]
 
     @staticmethod
-    def _ascii_digit_lines(value: str) -> tuple[str, str, str]:
-        """Render only portable ASCII for the Linux virtual console."""
-        rows = ["", "", ""]
+    def _ascii_digit_lines(value: str) -> tuple[str, ...]:
+        """Render clear portable 3x5 pixel numerals for the Linux console."""
+        rows = ["", "", "", "", ""]
         for character in value:
-            glyph = _ASCII_DIGITS.get(character, ("  ", "  ", character.ljust(2)))
+            glyph = _ASCII_DIGITS.get(character, ("   ", "   ", "   ", "   ", character.ljust(3)))
             for index, part in enumerate(glyph):
                 rows[index] += part
-        return rows[0], rows[1], rows[2]
+        return tuple(rows)
 
     @staticmethod
     def _numeric_value(value: str) -> str:
@@ -910,12 +918,14 @@ class FanAppUI(Static):
         return label
 
     @classmethod
-    def _digit_value(cls, value: str, ascii_digits: bool) -> tuple[str, tuple[str, str, str]]:
+    def _digit_value(cls, value: str, ascii_digits: bool) -> tuple[str, tuple[str, ...]]:
         if value == "N/A":
-            return value, ("", value, "")
+            blank = ("",) * (5 if ascii_digits else 3)
+            middle = len(blank) // 2
+            return value, (*blank[:middle], value, *blank[middle + 1:])
         lines = list(cls._ascii_digit_lines(value) if ascii_digits else cls._native_digit_lines(value))
         width = max(len(line) for line in lines)
-        return " " * width, tuple(line.ljust(width) for line in lines)  # type: ignore[return-value]
+        return " " * width, tuple(line.ljust(width) for line in lines)
 
     @staticmethod
     def _stacked_metric_rows(

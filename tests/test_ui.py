@@ -808,7 +808,13 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
 
 def test_native_digits_metric_layout_fits_wide_and_79_column_cards(monkeypatch: pytest.MonkeyPatch) -> None:
     ui = FanAppUI("config.toml", lambda: None, 75, 2, graph_view="graph-2")
-    assert len(set(ui_module._ASCII_DIGITS.values())) == 10
+    assert ui_module._ASCII_DIGITS["0"] == ("###", "# #", "# #", "# #", "###")
+    assert ui_module._ASCII_DIGITS["1"] == (" ##", "  #", "  #", "  #", "###")
+    assert ui_module._ASCII_DIGITS["2"] == ("###", "  #", "###", "#  ", "###")
+    assert ui_module._ASCII_DIGITS["5"] == ("###", "#  ", "###", "  #", "###")
+    assert ui_module._ASCII_DIGITS["8"] == ("###", "# #", "###", "# #", "###")
+    assert ui_module._ASCII_DIGITS["."] == (" ", " ", " ", " ", "#")
+    assert len({ui_module._ASCII_DIGITS[digit] for digit in "0123456789"}) == 10
     expected: list[str] = []
     line = ""
     for segment in Digits("50.0").render(Style()):
@@ -847,13 +853,52 @@ def test_native_digits_metric_layout_fits_wide_and_79_column_cards(monkeypatch: 
     monkeypatch.delenv("TERM")
     assert ui_module._is_linux_virtual_console()
     forced_ascii, _spans = ui._large_metric_rows(ordinary, 39)
-    assert len(forced_ascii) == 4 and all(len(row) <= 39 for row in forced_ascii)
+    assert len(forced_ascii) == 6 and all(len(row) <= 39 for row in forced_ascii)
     assert all(ord(character) < 128 for row in forced_ascii for character in row)
+    assert "###" in "\n".join(forced_ascii) and "# #" in "\n".join(forced_ascii)
 
     extreme = ("150.0 C", "976562500 GiB", "100%", "999999 W")
     rows, _spans = ui._large_metric_rows(extreme, 39)
     assert rows == [f"{label} {value}" for label, value in zip(("TEMP", "MEM", "UTIL", "POWER"), extreme, strict=True)]
     assert all("…" not in row and value in row for row, value in zip(rows, extreme, strict=True))
+
+
+def test_graph_two_console_ascii_two_dgx_79_columns_has_no_scroll(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeTTY:
+        def isatty(self) -> bool:
+            return True
+
+        def fileno(self) -> int:
+            return 8
+
+    class GraphTwoApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FanAppUI("config.toml", lambda: None, 75, 2, graph_view="graph-2")
+
+    monkeypatch.setattr(ui_module.sys, "stdin", FakeTTY())
+    monkeypatch.setattr(ui_module.os, "ttyname", lambda _fd: "/dev/tty8")
+    gpu = GPUStat("GPU-a", "A100", 114399, 0, 55, 50, 250)
+    snapshot = _fan_snapshot(
+        20, "curve", "AUTO ON", 50, 0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (
+            EndpointSnapshot("one", "One", True, 0, gpus=(gpu,), sample_revision=1),
+            EndpointSnapshot("two", "Two", True, 0, gpus=(gpu,), sample_revision=1),
+        ),
+    )
+    app = GraphTwoApp()
+
+    async def exercise() -> None:
+        async with app.run_test(size=(79, 30)) as pilot:
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 120)
+            await pilot.pause()
+            dashboard = next(iter(ui.query(".dgx-panel"))).render().plain
+            assert "###" in dashboard and all(character.isascii() for character in dashboard if character not in "┌┐└┘─│·")
+            scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
+            assert scroll.display and scroll.max_scroll_y == 0
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize(("graph_view", "size"), [("graph-1", (100, 24)), ("graph-2", (79, 30))])
