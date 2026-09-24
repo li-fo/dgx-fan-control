@@ -4,12 +4,15 @@ import asyncio
 import os
 import stat
 import threading
+from dataclasses import replace
+from itertools import pairwise
 
 import pytest
 
-from dgx_fan.models import ControlSnapshot, EndpointSnapshot, FanReading, GPUStat
+from dgx_fan.models import ControlSnapshot, EndpointSnapshot, FanReading, GPUStat, MemoryStat
 from dgx_fan.monitor import (
     MAX_HISTORY_POINTS,
+    MAX_PENDING_HISTORY_INPUTS,
     MonitorProtocolError,
     MonitorPublisher,
     MonitorState,
@@ -17,6 +20,7 @@ from dgx_fan.monitor import (
     encode_state,
 )
 from dgx_fan.ui import DashboardHistory, HistoryPoint
+from dgx_fan.ui_sparkline import time_columns
 
 
 def _state(revision: int = 1) -> MonitorState:
@@ -235,6 +239,155 @@ def test_monitor_publisher_bounds_subsecond_publish_cadence(tmp_path) -> None:
     assert publisher.publish(state.snapshot, 11.0) is True
 
 
+@pytest.mark.parametrize(
+    ("interval", "phase", "base", "outage"),
+    ((2.0, 0.0, 0.0, False), (2.0, 0.125, 1_700_000_000.0, False),
+     (1.0, 0.125, 0.0, False), (2.0, 0.0, 0.0, True)),
+)
+def test_web_history_captures_every_observed_revision_despite_frame_throttle(
+    tmp_path, interval: float, phase: float, base: float, outage: bool,
+) -> None:
+    async def exercise() -> None:
+        publisher = MonitorPublisher(tmp_path / "cadence.sock", interval)
+        local = DashboardHistory(interval)
+        initial = _state().snapshot
+        assert initial is not None
+        gpu = initial.endpoint_snapshots[0].gpus[0]
+        endpoint = replace(initial.endpoint_snapshots[0], gpus=(), sample_revision=0)
+        snapshot = replace(initial, endpoint_snapshots=(endpoint,))
+        revision = 0
+        next_completion = base + phase
+        accepted: list[float] = []
+        await publisher.start()
+        writer: asyncio.StreamWriter | None = None
+        try:
+            _reader, writer = await asyncio.open_unix_connection(str(publisher.socket_path))
+            async with asyncio.timeout(2):
+                while not publisher._clients:
+                    await asyncio.sleep(0.01)
+            for step in range(481):
+                now = base + step * 0.25
+                if now + 1e-8 >= next_completion:
+                    if not outage or not base + 40 <= next_completion <= base + 48:
+                        revision += 1
+                        endpoint = replace(endpoint, gpus=(gpu,), sample_revision=revision)
+                        snapshot = replace(snapshot, endpoint_snapshots=(endpoint,))
+                    next_completion += interval + 0.25
+                local.append(endpoint.endpoint_id, revision, endpoint.gpus, now)
+                if publisher.publish(snapshot, now):
+                    accepted.append(now)
+            assert all(right - left >= max(1.0, interval)
+                       for left, right in pairwise(accepted))
+            async with asyncio.timeout(3):
+                while publisher._processed_generation != publisher._accepted_generation:
+                    await asyncio.sleep(0.01)
+            frame = publisher._frame
+            assert frame is not None
+            decoded = decode_state(frame.encoded, interval)
+            assert decoded.history is not None
+            key = (endpoint.endpoint_id, endpoint.gpus[0].key, "util")
+            local_points = local.points[key]
+            web_points = decoded.history.points[key]
+            assert [point.at for point in web_points] == [point.at for point in local_points]
+            assert [point.value for point in web_points] == [point.value for point in local_points]
+            for width in (40, 50, 100, 200):
+                columns = time_columns(
+                    tuple(point.value for point in web_points),
+                    tuple(point.at for point in web_points), base + 120, width,
+                    collection_interval_seconds=interval,
+                )
+                observed = [index for index, value in enumerate(columns) if value is not None]
+                assert (None in columns[observed[0]:observed[-1]]) is outage
+        finally:
+            if writer is not None:
+                writer.close()
+                await writer.wait_closed()
+            await publisher.close()
+        assert not publisher.socket_path.exists()
+
+    asyncio.run(exercise())
+
+
+def test_publisher_captures_node_memory_revision_separately(tmp_path) -> None:
+    async def exercise() -> None:
+        publisher = MonitorPublisher(tmp_path / "memory.sock", 2)
+        initial = _state().snapshot
+        assert initial is not None
+        endpoint = replace(
+            initial.endpoint_snapshots[0], memory_source="node-exporter",
+            uma_memory=MemoryStat(10, 100), memory_sample_revision=1,
+        )
+        other = replace(initial.endpoint_snapshots[0], endpoint_id="other")
+        snapshot = replace(initial, endpoint_snapshots=(endpoint, other))
+        await publisher.start()
+        try:
+            assert publisher.publish(snapshot, 0) is True
+            changed_memory = replace(endpoint, uma_memory=MemoryStat(20, 100), memory_sample_revision=2)
+            snapshot = replace(initial, endpoint_snapshots=(changed_memory, other))
+            assert publisher.publish(snapshot, 0.25) is False
+            assert publisher.publish(snapshot, 0.5) is False
+            other = replace(other, sample_revision=2)
+            snapshot = replace(initial, endpoint_snapshots=(changed_memory, other))
+            assert publisher.publish(snapshot, 1) is False
+            assert publisher.publish(snapshot, 2) is True
+            async with asyncio.timeout(2):
+                while publisher._processed_generation != 2:
+                    await asyncio.sleep(0.01)
+            assert [point.value for point in publisher._history.points[(endpoint.endpoint_id, "__uma__", "mem")]] == [10, 20]
+            assert len(publisher._history.points[(endpoint.endpoint_id, endpoint.gpus[0].key, "util")]) == 1
+            assert [point.at for point in publisher._history.points[("other", other.gpus[0].key, "util")]] == [0, 1]
+        finally:
+            await publisher.close()
+        assert not publisher.socket_path.exists()
+
+    asyncio.run(exercise())
+
+
+def test_publisher_history_capture_backlog_is_bounded(tmp_path) -> None:
+    publisher = MonitorPublisher(tmp_path / "unused.sock", 2)
+    initial = _state().snapshot
+    assert initial is not None
+    endpoint = initial.endpoint_snapshots[0]
+    publisher.publish(initial, 0)
+    for revision in range(3, MAX_PENDING_HISTORY_INPUTS + 3):
+        newer = replace(endpoint, sample_revision=revision)
+        publisher.publish(replace(initial, endpoint_snapshots=(newer,)), revision * 0.01)
+    assert len(publisher._history_inputs) == MAX_PENDING_HISTORY_INPUTS
+    assert publisher._dropped_history_inputs == 1
+
+
+def test_publisher_expires_history_without_new_revisions_and_hydrates_empty(tmp_path) -> None:
+    async def exercise() -> None:
+        publisher = MonitorPublisher(tmp_path / "expiry.sock", 2)
+        snapshot = _state().snapshot
+        assert snapshot is not None
+        await publisher.start()
+        writer: asyncio.StreamWriter | None = None
+        try:
+            assert publisher.publish(snapshot, 0) is True
+            async with asyncio.timeout(2):
+                while publisher._processed_generation != 1:
+                    await asyncio.sleep(0.01)
+            assert publisher._history.points
+            assert publisher.publish(snapshot, 121) is True
+            async with asyncio.timeout(2):
+                while publisher._processed_generation != 2:
+                    await asyncio.sleep(0.01)
+            assert not publisher._history.points
+            reader, writer = await asyncio.open_unix_connection(str(publisher.socket_path))
+            state = decode_state(await asyncio.wait_for(reader.readline(), 2), 2)
+            assert state.history is not None and not state.history.points
+            assert state.snapshot is not None and state.snapshot.endpoint_snapshots[0].sample_revision == 1
+        finally:
+            if writer is not None:
+                writer.close()
+                await writer.wait_closed()
+            await publisher.close()
+        assert not publisher.socket_path.exists()
+
+    asyncio.run(exercise())
+
+
 def test_monitor_publisher_publish_does_not_encode_on_caller_path(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -294,6 +447,54 @@ def test_monitor_publisher_keeps_delayed_frame_identity_and_makes_forward_progre
             writer.close()
             await writer.wait_closed()
             await publisher.close()
+
+    asyncio.run(exercise())
+
+
+def test_slow_frame_worker_keeps_intermediate_observation_from_throttled_tick(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exercise() -> None:
+        publisher = MonitorPublisher(tmp_path / "slow-history.sock")
+        entered = threading.Event()
+        release = threading.Event()
+        original = publisher._build_frame
+
+        def delayed(item, revision, encode):
+            if item.generation == 1:
+                entered.set()
+                assert release.wait(2)
+            return original(item, revision, encode)
+
+        monkeypatch.setattr(publisher, "_build_frame", delayed)
+        await publisher.start()
+        writer: asyncio.StreamWriter | None = None
+        try:
+            _reader, writer = await asyncio.open_unix_connection(str(publisher.socket_path))
+            async with asyncio.timeout(2):
+                while not publisher._clients:
+                    await asyncio.sleep(0.01)
+            assert publisher.publish(_state(1).snapshot, 100) is True
+            assert await asyncio.to_thread(entered.wait, 1)
+            assert publisher.publish(_state(2).snapshot, 100.25) is False
+            assert publisher.publish(_state(3).snapshot, 101) is True
+            release.set()
+            async with asyncio.timeout(2):
+                while publisher._processed_generation != 2:
+                    await asyncio.sleep(0.01)
+            assert publisher._frame is not None
+            second = decode_state(publisher._frame.encoded, 2)
+            assert second.revision == 2
+            assert second.snapshot is not None and second.snapshot.endpoint_snapshots[0].sample_revision == 3
+            assert second.history is not None
+            assert [point.at for point in second.history.points[("dgx-1", "gpu-0", "util")]] == [100, 100.25, 101]
+        finally:
+            release.set()
+            if writer is not None:
+                writer.close()
+                await writer.wait_closed()
+            await publisher.close()
+        assert not publisher.socket_path.exists()
 
     asyncio.run(exercise())
 

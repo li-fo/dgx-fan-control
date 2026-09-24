@@ -11,8 +11,9 @@ import json
 import os
 import stat
 import uuid
+from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from socket import AF_UNIX, SOCK_STREAM, socket
 
@@ -30,6 +31,9 @@ MAX_MESSAGE_BYTES = 8 * 1024 * 1024
 # rates.  A one-second replacement frame still carries the complete history
 # and every visible state field.
 MIN_PUBLISH_INTERVAL_SECONDS = 1.0
+# At the 0.25-second control tick this holds more than two full 120-second
+# windows of distinct observations while bounding a stalled worker's backlog.
+MAX_PENDING_HISTORY_INPUTS = 1024
 
 
 class MonitorProtocolError(ValueError):
@@ -55,12 +59,21 @@ class MonitorState:
 
 
 @dataclass(frozen=True)
+class _HistoryInput:
+    """One observed revision change, stamped when the control tick saw it."""
+
+    endpoints: tuple[EndpointSnapshot, ...]
+    captured_at: float
+
+
+@dataclass(frozen=True)
 class _MonitorInput:
     """An immutable controller-state hand-off to the serializer worker."""
 
     generation: int
     snapshot: ControlSnapshot
     captured_at: float
+    history_inputs: tuple[_HistoryInput, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -402,6 +415,9 @@ class MonitorPublisher:
         self._publish_interval_seconds = max(MIN_PUBLISH_INTERVAL_SECONDS, collection_interval_seconds)
         self._next_publish_at = float("-inf")
         self._history = DashboardHistory(collection_interval_seconds)
+        self._history_inputs: deque[_HistoryInput] = deque(maxlen=MAX_PENDING_HISTORY_INPUTS)
+        self._captured_revisions: dict[str, tuple[int, int]] = {}
+        self._dropped_history_inputs = 0
         self._pending: _MonitorInput | None = None
         self._latest_input: _MonitorInput | None = None
         self._work_event = asyncio.Event()
@@ -447,6 +463,16 @@ class MonitorPublisher:
 
     def publish(self, snapshot: ControlSnapshot, now: float) -> bool:
         """Coalesce immutable state for the private off-loop serializer."""
+        revisions = {
+            endpoint.endpoint_id: (endpoint.sample_revision, endpoint.memory_sample_revision)
+            for endpoint in snapshot.endpoint_snapshots
+        }
+        if any(self._captured_revisions.get(endpoint_id) != revision
+               for endpoint_id, revision in revisions.items()):
+            self._captured_revisions.update(revisions)
+            if len(self._history_inputs) == MAX_PENDING_HISTORY_INPUTS:
+                self._dropped_history_inputs += 1
+            self._history_inputs.append(_HistoryInput(snapshot.endpoint_snapshots, now))
         if now < self._next_publish_at:
             return False
         self._next_publish_at = now + self._publish_interval_seconds
@@ -476,8 +502,13 @@ class MonitorPublisher:
                 # A reconnect may request hydration while this same
                 # generation is encoding. Once a frame exists, do not let
                 # that queued duplicate advance the public revision again.
-                # A history-only generation still needs its first hydration.
+                # Keep observations newer than this completed frame queued
+                # for the next accepted generation, not stale hydration.
                 continue
+            history_inputs: list[_HistoryInput] = []
+            while self._history_inputs and self._history_inputs[0].captured_at <= item.captured_at:
+                history_inputs.append(self._history_inputs.popleft())
+            item = replace(item, history_inputs=tuple(history_inputs))
             # Revisions belong to the event loop.  The worker receives the
             # proposed revision as immutable input and cannot advance it.
             proposed_revision = self._next_revision + 1
@@ -499,16 +530,9 @@ class MonitorPublisher:
         self, item: _MonitorInput, revision: int, encode: bool
     ) -> _MonitorFrame | None:
         """Build a candidate using publisher-private history off the event loop."""
-        for endpoint in item.snapshot.endpoint_snapshots:
-            self._history.append(
-                endpoint.endpoint_id,
-                endpoint.sample_revision,
-                endpoint.gpus,
-                item.captured_at,
-                endpoint.memory_source,
-                endpoint.uma_memory,
-                endpoint.memory_sample_revision,
-            )
+        self._append_history_inputs(item.history_inputs)
+        # A frame with no new revision must still expire the 120-second window.
+        self._history.prune(item.captured_at)
         if not encode:
             return None
         try:
@@ -541,6 +565,20 @@ class MonitorPublisher:
                 )
             )
         return _MonitorFrame(item.generation, revision, encoded)
+
+    def _append_history_inputs(self, inputs: tuple[_HistoryInput, ...]) -> None:
+        """The worker alone mutates history, including history-only generations."""
+        for observed in inputs:
+            for endpoint in observed.endpoints:
+                self._history.append(
+                    endpoint.endpoint_id,
+                    endpoint.sample_revision,
+                    endpoint.gpus,
+                    observed.captured_at,
+                    endpoint.memory_source,
+                    endpoint.uma_memory,
+                    endpoint.memory_sample_revision,
+                )
 
     async def close(self) -> None:
         for writer in tuple(self._clients):
