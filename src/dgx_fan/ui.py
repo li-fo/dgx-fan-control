@@ -5,7 +5,8 @@ import sys
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
-from math import ceil
+from functools import lru_cache
+from math import atan2, ceil, pi, sqrt
 
 from rich.cells import cell_len
 from rich.segment import Segment
@@ -306,10 +307,13 @@ class DashboardHistory:
 
 
 class FanGauge(Static):
-    """A compact terminal-safe ring for one fan's independent PWM and tach state."""
+    """Display independent PWM demand and measured fan tach state."""
 
     SEGMENTS = 12
     RING_WIDTH = 15
+    DENSE_WIDTH = 17
+    DENSE_HEIGHT = 9
+    _BRAILLE_BITS = ((0x01, 0x02, 0x04, 0x40), (0x08, 0x10, 0x20, 0x80))
     RING_POSITIONS = (
         (0, 6),
         (0, 7),
@@ -327,10 +331,18 @@ class FanGauge(Static):
 
     def __init__(self, number: int) -> None:
         self.number = number
+        self.duty_percent: int | None = None
+        self.rpm: float | None = None
+        self.fan_state = "WAITING"
+        self.overall_state: str | None = None
         super().__init__(self._content(number, None, None, "WAITING"), id=f"fan-{number}-gauge")
 
     @classmethod
-    def _content(cls, number: int, duty_percent: int | None, rpm: float | None, state: str) -> Text:
+    def _content(
+        cls, number: int, duty_percent: int | None, rpm: float | None, state: str,
+        *, override: bool = False,
+    ) -> Text:
+        """Keep the original simple ring for a real Linux virtual console."""
         percentage = "--" if duty_percent is None else f"{duty_percent}%"
         filled = (
             0
@@ -345,11 +357,114 @@ class FanGauge(Static):
         return Text(
             f"Fan {number}\n"
             + "\n".join("".join(row) for row in ring)
-            + f"\nRPM: {rpm_text} | {state}"
+            + f"\nRPM: {rpm_text} | {state}{' | OVERRIDE' if override else ''}"
         )
 
-    def set_reading(self, duty_percent: int, rpm: float | None, state: str) -> None:
-        self.update(self._content(self.number, duty_percent, rpm, state))
+    @classmethod
+    @lru_cache(maxsize=1)
+    def _dense_geometry(cls) -> tuple[tuple[int, int, int, float], ...]:
+        """Raster one bounded ellipse into Braille dots, ordered from 12 o'clock."""
+        dots: list[tuple[int, int, int, float]] = []
+        for row in range(cls.DENSE_HEIGHT):
+            for column in range(cls.DENSE_WIDTH):
+                for dot_x in range(2):
+                    for dot_y in range(4):
+                        x = (column * 2 + dot_x + 0.5 - cls.DENSE_WIDTH) / (cls.DENSE_WIDTH - 1)
+                        y = (row * 4 + dot_y + 0.5 - cls.DENSE_HEIGHT * 2) / (cls.DENSE_HEIGHT * 2 - 1)
+                        radius = sqrt(x * x + y * y)
+                        if not 0.79 <= radius <= 1.13:
+                            continue
+                        progress = (atan2(x, -y) % (2 * pi)) / (2 * pi)
+                        dots.append((row, column, cls._BRAILLE_BITS[dot_x][dot_y], progress))
+        return tuple(dots)
+
+    @classmethod
+    def _dense_content(
+        cls, number: int, duty_percent: int | None, rpm: float | None, state: str,
+        *, override: bool = False,
+    ) -> Text:
+        """A nine-row ring with native digits, retaining separate measured RPM."""
+        percentage = "--" if duty_percent is None else f"{duty_percent}%"
+        level = None if duty_percent is None else max(0, min(100, duty_percent)) / 100
+        accent = (
+            "red" if state == "STALLED" else "yellow" if state == "NO TACH"
+            else "bright_black" if state in ("WAITING", "STOPPED") else "cyan"
+        )
+        track = [[0] * cls.DENSE_WIDTH for _ in range(cls.DENSE_HEIGHT)]
+        filled = [[False] * cls.DENSE_WIDTH for _ in range(cls.DENSE_HEIGHT)]
+        center = [[False] * cls.DENSE_WIDTH for _ in range(cls.DENSE_HEIGHT)]
+        for row, column, bit, progress in cls._dense_geometry():
+            track[row][column] |= bit
+            if level is not None and progress < level:
+                filled[row][column] = True
+        glyphs = [[chr(0x2800 | mask) if mask else " " for mask in row] for row in track]
+        if duty_percent is None:
+            digit_lines = ("", "--", "")
+        else:
+            digit_lines = FanAppUI._native_digit_lines(str(duty_percent))
+        digit_start = (cls.DENSE_HEIGHT - len(digit_lines)) // 2
+        for digit_row, line in enumerate(digit_lines):
+            row = digit_start + digit_row
+            value = line + ("%" if digit_row == 1 and duty_percent is not None else "")
+            start = (cls.DENSE_WIDTH - len(value)) // 2
+            for offset, character in enumerate(value):
+                glyphs[row][start + offset] = character
+                filled[row][start + offset] = False
+                center[row][start + offset] = character != " "
+        result = Text(f"Fan {number} · PWM {percentage}\n")
+        for row in range(cls.DENSE_HEIGHT):
+            for column, glyph in enumerate(glyphs[row]):
+                color = accent if filled[row][column] or center[row][column] else "bright_black"
+                result.append(glyph, style=Style(color=color))
+            result.append("\n")
+        rpm_text = "N/A" if rpm is None else f"{rpm:.0f} RPM"
+        result.append(f"RPM: {rpm_text} | ")
+        result.append(state, style=Style(color=accent))
+        if override:
+            result.append(" | OVERRIDE", style=Style(color="red"))
+        return result
+
+    @staticmethod
+    def _compact_content(
+        number: int, duty_percent: int | None, rpm: float | None, state: str,
+        *, override: bool = False,
+    ) -> Text:
+        percentage = "--" if duty_percent is None else f"{duty_percent}%"
+        rpm_text = "N/A" if rpm is None else f"{rpm:.0f} RPM"
+        return Text(
+            f"F{number} PWM {percentage}\nRPM {rpm_text}\n"
+            + state + (" OVR" if override else "")
+        )
+
+    def _refresh_display(self) -> None:
+        override = self.overall_state == "SAFETY OVERRIDE"
+        if self.content_size.width < self.RING_WIDTH or self.content_size.height < 7:
+            content = self._compact_content
+        elif (
+            _is_linux_virtual_console()
+            or self.content_size.width < self.DENSE_WIDTH
+            or self.content_size.height < self.DENSE_HEIGHT + 2
+        ):
+            content = self._content
+        else:
+            content = self._dense_content
+        self.update(content(self.number, self.duty_percent, self.rpm, self.fan_state, override=override))
+
+    def on_mount(self) -> None:
+        self._refresh_display()
+
+    def on_resize(self) -> None:
+        self._refresh_display()
+
+    def set_reading(
+        self, duty_percent: int | None, rpm: float | None, state: str,
+        overall_state: str | None = None,
+    ) -> None:
+        reading = (duty_percent, rpm, state, overall_state)
+        if reading == (self.duty_percent, self.rpm, self.fan_state, self.overall_state):
+            return
+        self.duty_percent, self.rpm, self.fan_state, self.overall_state = reading
+        self._refresh_display()
 
 
 class FanAppUI(Static):
@@ -420,6 +535,7 @@ class FanAppUI(Static):
         self.graph_two_metric_labels: dict[tuple[str, str], Static] = {}
         self.graph_two_sparklines: dict[tuple[str, str], FixedScaleSparkline] = {}
         self.graph_two_endpoint_ids: tuple[str, ...] = ()
+        self._fan_gauge_height = 9
         self.last_render_time: float | None = None
         self.last_signature: tuple[tuple[object, ...], ...] | None = None
         self.monitor_transport_status: str | None = None
@@ -565,7 +681,7 @@ class FanAppUI(Static):
         for number in (1, 2):
             fan = snapshot.fans[number - 1]
             self.query_one(f"#fan-{number}-gauge", FanGauge).set_reading(
-                snapshot.duty_percents[number - 1], fan.rpm, fan.state
+                snapshot.duty_percents[number - 1], fan.rpm, fan.state, snapshot.state,
             )
 
     def update_monitor_snapshot(
@@ -632,6 +748,8 @@ class FanAppUI(Static):
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         """Load history only while its pane is selected; cancel it on other tabs."""
+        if event.pane.id == "fan-control":
+            self.call_after_refresh(self._size_fan_gauges)
         try:
             panel = self.query_one(HistoryPanel)
         except NoMatches:
@@ -651,6 +769,36 @@ class FanAppUI(Static):
             indicator.display = not available
         except NoMatches:
             pass
+
+    def _size_fan_gauges(self) -> None:
+        """Use the taller graphical ring only when the fan pane can show it all."""
+        try:
+            active = self.query_one(TabbedContent).active
+        except NoMatches:
+            return
+        if active != "fan-control":
+            return
+        pane = self.query_one("#fan-control", TabPane)
+        top = self.query_one("#fan-top-row", Horizontal)
+        row = self.query_one("#fan-gauge-row", Horizontal)
+        gauges = tuple(row.query(FanGauge))
+        if len(gauges) != 2:
+            return
+        height = 13 if (
+            not _is_linux_virtual_console()
+            and pane.content_size.height - top.size.height >= 13
+            and all(gauge.content_size.width >= FanGauge.DENSE_WIDTH for gauge in gauges)
+        ) else 9
+        if self._fan_gauge_height != height:
+            self._fan_gauge_height = height
+            row.styles.height = height
+            for gauge in gauges:
+                gauge.styles.height = height
+        self.call_after_refresh(self._refresh_fan_gauges)
+
+    def _refresh_fan_gauges(self) -> None:
+        for gauge in self.query(FanGauge):
+            gauge._refresh_display()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button = event.button
@@ -1166,6 +1314,7 @@ class FanAppUI(Static):
             rendered.append(value, style=Style(color=_rich_color(color)))
 
     def on_resize(self) -> None:
+        self._size_fan_gauges()
         if self.snapshot is None or self.last_render_time is None:
             return
         self._layout_convergence_passes = 0

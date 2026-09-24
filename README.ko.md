@@ -98,6 +98,8 @@ sudo journalctl -u dgx-fan-graphical.service --no-pager
 
 콘솔 모드의 Graph #2에서는 관리된 tty8 시작이 10x20 pixel `Lat15-TerminusBold20x10` console font를 유지하므로 Graph #1, History, Fan Control의 일반 terminal geometry가 보존됩니다. Graph #2는 Textual의 native 3-row digit renderer를 로컬로 사용합니다. 정상 TEMP, MEM, UTIL, POWER는 같은 slot의 반올림된 display integer이고 control temperature는 원래 정밀도를 유지합니다. `setfont` 또는 로컬 font가 없으면 display는 계속 시작되고 Graph #2는 전체 plain metric 값으로 대체합니다. 그래픽 모드는 별도 `DejaVu Sans Mono 12` 터미널 글꼴을 사용하고 콘솔 글꼴 표지를 설정하지 않습니다. 업데이트 뒤 `./install.sh --no-launch`를 실행한 다음 선택한 display 모드를 재시작하고 HDMI 화면을 직접 확인하세요.
 
+Fan Control의 퍼센트는 명령한 PWM duty이고 RPM은 별도로 측정한 tach 값입니다. RPM의 `N/A`는 측정값 없음이며 0 RPM을 뜻하지 않습니다. 그래픽 터미널과 브라우저는 화면에 여유가 있으면 촘촘한 링과 큰 PWM 숫자를 표시하고, 높이가 부족하면 단순한 원형 링으로 돌아갑니다. Linux 콘솔은 관리된 font가 있어도 항상 단순한 링을 유지합니다. 팬별 상태와 안전 override는 텍스트로 계속 표시됩니다.
+
 관리된 tty8 cleanup이 busy이면 설치된 helper는 먼저 기록된 tty8 이외 콘솔로 돌아가 일반 deallocation을 다시 시도합니다. 자체 유효 marker, 안전한 active console 확인, 비어 있는 tty8이 모두 충족될 때만 bounded no-reboot selection recovery를 수행합니다. 실패는 표시되고 marker는 보존됩니다. recovery는 return console의 text selection을 잠시 바꾼 뒤 숨길 수 있으며 tty holder를 종료하지 않습니다. 재시도 전 올바른 clone에서 helper를 적용하세요:
 
 ```bash

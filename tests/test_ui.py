@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import replace
+from itertools import pairwise
 from pathlib import Path
 from typing import Literal
 
@@ -263,6 +264,81 @@ def test_fan_gauge_ring_fill_boundaries_are_monotonic() -> None:
     assert sum(line.count("●") for line in waiting.splitlines()[1:6]) == 0
 
 
+def test_fan_gauge_dense_ring_distinguishes_pwm_rpm_and_states() -> None:
+    dot_offsets = {
+        bit: (dot_x, dot_y)
+        for dot_x, column in enumerate(FanGauge._BRAILLE_BITS)
+        for dot_y, bit in enumerate(column)
+    }
+    dots = FanGauge._dense_geometry()
+    x_positions = [column * 2 + dot_offsets[bit][0] for _row, column, bit, _progress in dots]
+    y_positions = [row * 4 + dot_offsets[bit][1] for row, _column, bit, _progress in dots]
+    dot_aspect = (max(x_positions) - min(x_positions) + 1) / (max(y_positions) - min(y_positions) + 1)
+    assert 0.85 <= dot_aspect <= 1.15  # 2x4 Braille dots correct typical 1:2 cell aspect.
+    assert not any(row in (3, 4, 5) and 3 <= column <= 13 for row, column, _bit, _progress in dots)
+    filled_counts: list[int] = []
+    for duty in (0, 20, 50, 80, 100):
+        rendered = FanGauge._dense_content(1, duty, 1234, "RUNNING")
+        lines = rendered.plain.splitlines()
+        assert len(lines) == 11 and lines[0] == f"Fan 1 · PWM {duty}%"
+        assert all(cell_len(line) == FanGauge.DENSE_WIDTH for line in lines[1:10])
+        assert lines[-1] == "RPM: 1234 RPM | RUNNING"
+        braille = [
+            span for span in rendered.spans
+            if any("\u2800" <= character <= "\u28ff" for character in
+                   rendered.plain[span.start:span.end])
+        ]
+        assert braille
+        filled_counts.append(sum(str(span.style) == "cyan" for span in braille))
+        assert all(str(span.style) != "red" for span in braille)
+        ring_start = len(lines[0]) + 1
+        ring_end = ring_start + sum(len(line) + 1 for line in lines[1:10])
+        center = [span for span in rendered.spans if ring_start <= span.start < ring_end
+                  and any(character not in " \n" and not "\u2800" <= character <= "\u28ff"
+                          for character in rendered.plain[span.start:span.end])]
+        assert center and all(str(span.style) == "cyan" for span in center)
+    assert filled_counts[0] == 0
+    assert all(left < right for left, right in pairwise(filled_counts))
+
+    unknown = FanGauge._dense_content(1, None, None, "WAITING")
+    assert "PWM --" in unknown.plain and "RPM: N/A | WAITING" in unknown.plain
+    assert "0%" not in unknown.plain
+    assert any(unknown.plain[span.start:span.end] == "-" and str(span.style) == "bright_black"
+               for span in unknown.spans)
+    stalled = FanGauge._dense_content(1, 100, 0, "STALLED", override=True)
+    assert "RPM: 0 RPM | STALLED | OVERRIDE" in stalled.plain
+    assert any(str(span.style) == "red" for span in stalled.spans)
+    no_tach = FanGauge._dense_content(2, 80, None, "NO TACH")
+    assert "RPM: N/A | NO TACH" in no_tach.plain
+    assert any(str(span.style) == "yellow" for span in no_tach.spans)
+    stopped = FanGauge._dense_content(2, 0, None, "STOPPED")
+    assert "STOPPED" in stopped.plain
+    assert all(str(span.style) != "red" for span in stopped.spans)
+
+
+def test_fan_gauge_compact_fallback_keeps_status_visible() -> None:
+    class CompactApp(App[None]):
+        def compose(self) -> ComposeResult:
+            gauge = FanGauge(1)
+            gauge.styles.width = 14
+            gauge.styles.height = 3
+            yield gauge
+
+    app = CompactApp()
+
+    async def exercise() -> None:
+        async with app.run_test(size=(20, 8)) as pilot:
+            gauge = app.query_one(FanGauge)
+            gauge.set_reading(20, None, "NO TACH", "SAFETY OVERRIDE")
+            await pilot.pause()
+            assert gauge.content_size.width == 14 and gauge.content_size.height == 3
+            assert gauge.render().plain.splitlines() == ["F1 PWM 20%", "RPM N/A", "NO TACH OVR"]
+            assert all(cell_len(line) <= gauge.content_size.width for line in
+                       gauge.render().plain.splitlines())
+
+    asyncio.run(exercise())
+
+
 def test_fan_control_panel_updates_gauges_and_buttons_without_side_effects() -> None:
     calls: list[str] = []
 
@@ -301,6 +377,9 @@ def test_fan_control_panel_updates_gauges_and_buttons_without_side_effects() -> 
             assert "F1 dgx-1 20%" in status and "F2 dgx-2 80%" in status
             assert "20%" in one and "RPM: 1234 RPM" in one and "RUNNING" in one
             assert "80%" in two and "RPM: N/A" in two and "NO TACH" in two
+            assert "Fan 1 · PWM 20%" in one and "Fan 2 · PWM 80%" in two
+            assert any("\u2800" <= character <= "\u28ff" for character in one)
+            assert one != two
             refreshed = ControlSnapshot(
                 (50, 80),
                 "curve",
@@ -389,7 +468,10 @@ def test_fan_status_header_states_fit_actual_widget_width(
 
     snapshot = ControlSnapshot(
         (100, 100), "safety recovery temperature", state, 74, (2, 2), (74, 74),
-        ("dgx-1", "dgx-2"), (FanReading(1200, "RUNNING"), FanReading(1200, "RUNNING")), (),
+        ("dgx-1", "dgx-2"),
+        ((FanReading(1200, "STALLED"), FanReading(None, "NO TACH"))
+         if state == "SAFETY OVERRIDE" else
+         (FanReading(1200, "RUNNING"), FanReading(1200, "RUNNING"))), (),
     )
     app = FanPanelApp()
 
@@ -400,6 +482,59 @@ def test_fan_status_header_states_fit_actual_widget_width(
             await pilot.pause()
             status = app.query_one("#fan-status", Static)
             assert cell_len(status.render().plain.splitlines()[0]) <= status.content_size.width
+            for gauge in app.query(FanGauge):
+                _assert_gauge_content_fits(gauge)
+                assert ("OVERRIDE" in gauge.render().plain) == (state == "SAFETY OVERRIDE")
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("font_marker", (False, True))
+def test_fan_gauge_uses_simple_ring_on_linux_vt_even_with_font_marker(
+    monkeypatch: pytest.MonkeyPatch, font_marker: bool,
+) -> None:
+    class FakeTTY:
+        def isatty(self) -> bool:
+            return True
+
+        def fileno(self) -> int:
+            return 8
+
+    monkeypatch.setattr(ui_module.sys, "stdin", FakeTTY())
+    monkeypatch.setattr(ui_module.os, "ttyname", lambda _fd: "/dev/tty8")
+    if font_marker:
+        monkeypatch.setenv(ui_module._TTY8_FONT_MARKER, "1")
+    else:
+        monkeypatch.delenv(ui_module._TTY8_FONT_MARKER, raising=False)
+    app = _DashboardApp()
+    snapshot = ControlSnapshot(
+        (100, 20), "curve", "SAFETY OVERRIDE", 75, (3, 0), (75, 40),
+        ("dgx-1", "dgx-2"),
+        (FanReading(0, "STALLED"), FanReading(None, "NO TACH")), (),
+    )
+
+    async def exercise() -> None:
+        async with app.run_test(size=(102, 30)) as pilot:
+            app.query_one(TabbedContent).active = "fan-control"
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 1)
+            await pilot.pause()
+            for size in ((102, 30), (85, 25), (79, 30)):
+                await pilot.resize_terminal(*size)
+                await pilot.pause()
+                one = app.query_one("#fan-1-gauge", FanGauge)
+                two = app.query_one("#fan-2-gauge", FanGauge)
+                for gauge in (one, two):
+                    content = gauge.render().plain
+                    assert "●" in content or "○" in content
+                    assert not any("\u2800" <= character <= "\u28ff" for character in content)
+                    assert "OVERRIDE" in content
+                    _assert_gauge_content_fits(gauge)
+                assert "100%" in one.render().plain and "STALLED" in one.render().plain
+                assert "20%" in two.render().plain and "NO TACH" in two.render().plain
+                assert "○" not in one.render().plain and "○" in two.render().plain
+                assert "RPM: 0 RPM" in one.render().plain
+                assert "RPM: N/A" in two.render().plain
 
     asyncio.run(exercise())
 
@@ -418,7 +553,7 @@ def test_fan_control_two_row_geometry_survives_resize() -> None:
             two = app.query_one("#fan-2-gauge", FanGauge)
             status = app.query_one("#fan-status", Static)
             assert top.region.bottom <= gauges.region.y
-            assert one.region.right <= two.region.x and one.region.height == two.region.height == 9
+            assert one.region.right <= two.region.x and one.region.height == two.region.height == 13
             assert _contained_in(pane, top) and _contained_in(pane, gauges)
             assert _contained_in(pane, status) and _contained_in(pane, one) and _contained_in(pane, two)
             _assert_complete_fan_panel_borders(status, one, two)
@@ -427,12 +562,30 @@ def test_fan_control_two_row_geometry_survives_resize() -> None:
             await pilot.resize_terminal(100, 30)
             await pilot.pause()
             assert top.region.bottom <= gauges.region.y
-            assert one.region.right <= two.region.x and one.region.height == two.region.height == 9
+            assert one.region.right <= two.region.x and one.region.height == two.region.height == 13
             assert _contained_in(pane, top) and _contained_in(pane, gauges)
             assert _contained_in(pane, status) and _contained_in(pane, one) and _contained_in(pane, two)
             _assert_complete_fan_panel_borders(status, one, two)
             _assert_gauge_content_fits(one)
             _assert_gauge_content_fits(two)
+            await pilot.resize_terminal(79, 20)
+            await pilot.pause()
+            assert gauges.region.height == one.region.height == two.region.height == 9
+            assert "●" in one.render().plain or "○" in one.render().plain
+            assert not any("\u2800" <= character <= "\u28ff" for character in one.render().plain)
+            await pilot.resize_terminal(85, 25)
+            await pilot.pause()
+            assert gauges.region.height == one.region.height == two.region.height == 13
+            _assert_gauge_content_fits(one)
+            _assert_gauge_content_fits(two)
+            for size in ((85, 25), (102, 30)):
+                await pilot.resize_terminal(*size)
+                await pilot.pause()
+                assert _contained_in(pane, top) and _contained_in(pane, gauges)
+                assert _contained_in(pane, status) and _contained_in(pane, one) and _contained_in(pane, two)
+                _assert_complete_fan_panel_borders(status, one, two)
+                _assert_gauge_content_fits(one)
+                _assert_gauge_content_fits(two)
             await pilot.resize_terminal(79, 25)
             await pilot.pause()
             assert _contained_in(pane, top) and _contained_in(pane, gauges)
@@ -542,11 +695,14 @@ def _assert_complete_fan_panel_borders(*widgets: Static) -> None:
 
 def _assert_gauge_content_fits(gauge: FanGauge) -> None:
     lines = gauge.render().plain.splitlines()
-    assert len(lines) == 7
+    dense = any("\u2800" <= character <= "\u28ff" for line in lines for character in line)
+    assert len(lines) == (11 if dense else 7)
     assert lines[0].startswith("Fan ")
-    assert all(cell_len(line) == FanGauge.RING_WIDTH for line in lines[1:6])
+    ring_width = FanGauge.DENSE_WIDTH if dense else FanGauge.RING_WIDTH
+    assert all(cell_len(line) == ring_width for line in lines[1:-1])
     assert lines[-1].startswith("RPM: ")
     assert gauge.content_region.height >= len(lines)
+    assert all(cell_len(line) <= gauge.content_region.width for line in lines)
 
 
 def test_poll_exception_is_supervised_per_endpoint_and_unmount_cancels_tasks(monkeypatch) -> None:
