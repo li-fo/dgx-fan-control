@@ -334,6 +334,13 @@ class DGXFanApp(App[None]):
                 # prevent or alter the fan controller's safety lifecycle.
                 self.monitor_publisher = None
         self.control_tick()
+        mounted_fd = os.environ.get("DGX_FAN_MOUNTED_READY_FD")
+        if mounted_fd is not None:
+            fd = int(mounted_fd)
+            try:
+                os.write(fd, b"M")
+            finally:
+                os.close(fd)
 
     async def _poll_loop(self, endpoint: EndpointConfig) -> None:
         while True:
@@ -573,6 +580,15 @@ def main(argv: list[str] | None = None) -> None:
 
             def restore_signal_handlers() -> None:
                 signal.signal(signal.SIGTERM, previous_sigterm_handler)
+    ready_fd = os.environ.get("DGX_FAN_SIGNAL_READY_FD")
+    if ready_fd is not None:
+        # The graphical launcher may request a clean stop during startup. Its
+        # controller wrapper waits for this acknowledgement before SIGUSR1.
+        fd = int(ready_fd)
+        try:
+            os.write(fd, b"1")
+        finally:
+            os.close(fd)
     try:
         app.run()
         # Textual catches some internal fatal exceptions and returns with a

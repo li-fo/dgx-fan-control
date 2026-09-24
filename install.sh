@@ -8,6 +8,7 @@ readonly DISPLAY_MANAGER_NAME='dgx-fan-display-manager'
 readonly DISPLAY_SESSION_NAME='dgx-fan-display-session'
 readonly DISPLAY_TTY_ACQUIRED_NAME='dgx-fan-display-tty-acquired'
 readonly DISPLAY_CLEANUP_NAME='dgx-fan-display-cleanup'
+readonly GRAPHICAL_ACQUIRE_NAME='dgx-fan-graphical-acquire'
 readonly PROFILE_NAME='dgx-fan-autostart.sh'
 readonly SUDOERS_NAME='dgx-fan'
 readonly INSTALL_RECORD_NAME='dgx-fan-installation'
@@ -244,11 +245,12 @@ EOF
 }
 
 write_display_helpers() {
-    local manager session acquired cleanup rendered project_quoted user_quoted marker_quoted tty_active_quoted return_console_prefix_quoted openvt_quoted runuser_quoted setfont_quoted font_quoted chvt_quoted deallocvt_quoted fuser_quoted python3_quoted systemctl_quoted systemd_run_quoted acquired_quoted cleanup_quoted session_quoted
+    local manager session acquired cleanup graphical_acquire rendered project_quoted user_quoted marker_quoted tty_active_quoted return_console_prefix_quoted openvt_quoted runuser_quoted setfont_quoted font_quoted chvt_quoted deallocvt_quoted fuser_quoted python3_quoted systemctl_quoted systemd_run_quoted acquired_quoted cleanup_quoted session_quoted graphical_acquire_quoted graphical_session_quoted
     manager=$(target_path "/usr/local/libexec/$DISPLAY_MANAGER_NAME")
     session=$(target_path "/usr/local/libexec/$DISPLAY_SESSION_NAME")
     acquired=$(target_path "/usr/local/libexec/$DISPLAY_TTY_ACQUIRED_NAME")
     cleanup=$(target_path "/usr/local/libexec/$DISPLAY_CLEANUP_NAME")
+    graphical_acquire=$(target_path "/usr/local/libexec/$GRAPHICAL_ACQUIRE_NAME")
     project_quoted=$(posix_quote "$PROJECT_ROOT")
     user_quoted=$(posix_quote "$INSTALL_USER")
     marker_quoted=$(posix_quote "$(target_path /run/dgx-fan-display-tty8)")
@@ -267,6 +269,8 @@ write_display_helpers() {
     acquired_quoted=$(posix_quote "$acquired")
     cleanup_quoted=$(posix_quote "$cleanup")
     session_quoted=$(posix_quote "$session")
+    graphical_acquire_quoted=$(posix_quote "$graphical_acquire")
+    graphical_session_quoted=$(posix_quote "$PROJECT_ROOT/scripts/graphical_session.py")
     rendered=$(mktemp)
     trap 'rm -f -- "$rendered"' RETURN
     {
@@ -403,11 +407,44 @@ EOF
 #!/bin/sh
 $HELPER_MARKER
 set -eu
+marker=$marker_quoted
+tty_active=$tty_active_quoted
+chvt=$chvt_quoted
+fuser=$fuser_quoted
+[ "\$#" -eq 0 ] || exit 64
+[ ! -e "\$marker" ] && [ ! -L "\$marker" ] || { echo 'tty8 ownership marker already exists' >&2; exit 1; }
+previous_vt=\$(cat "\$tty_active" 2>/dev/null || true)
+case "\$previous_vt" in tty[1-9]|tty[1-5][0-9]|tty6[0-3]) ;; *) echo 'cannot validate active VT' >&2; exit 1;; esac
+[ "\$previous_vt" != tty8 ] || { echo 'tty8 already active without our marker' >&2; exit 1; }
+if "\$fuser" "$(target_path /dev/tty8)" >/dev/null 2>&1; then
+    echo 'tty8 is occupied' >&2; exit 1
+else
+    fuser_status=\$?
+    [ "\$fuser_status" -eq 1 ] || { echo 'cannot inspect tty8 occupancy' >&2; exit 1; }
+fi
+umask 077
+printf '%s\\n' "\$previous_vt" >"\$marker"
+if ! "\$chvt" 8; then rm -f -- "\$marker"; exit 1; fi
+EOF
+    } >"$rendered"
+    install_managed_file "$rendered" "$graphical_acquire" "$HELPER_MARKER" 0755
+    rm -f -- "$rendered"
+    rendered=$(mktemp)
+    trap 'rm -f -- "$rendered"' RETURN
+    {
+        cat <<EOF
+#!/bin/sh
+$HELPER_MARKER
+set -eu
 unit=dgx-fan-display.service
 session=$session_quoted
 cleanup=$cleanup_quoted
 systemctl=$systemctl_quoted
 systemd_run=$systemd_run_quoted
+graphical_acquire=$graphical_acquire_quoted
+graphical_session=$graphical_session_quoted
+install_user=$user_quoted
+graphical_unit=dgx-fan-graphical.service
 load_state() {
   state=\$("\$systemctl" show --property=LoadState --value "\$unit") || {
     echo "cannot inspect \$unit load state" >&2; return 1
@@ -424,6 +461,18 @@ wait_unloaded() {
   echo "timed out waiting for \$unit to unload" >&2; return 1
 }
 stop_display() {
+  graphical_state=\$("\$systemctl" show --property=LoadState --value "\$graphical_unit") || return 1
+  if [ "\$graphical_state" != not-found ]; then
+    "\$systemctl" stop "\$graphical_unit" || return 1
+    count=0
+    while [ "\$count" -lt 20 ]; do
+      graphical_state=\$("\$systemctl" show --property=LoadState --value "\$graphical_unit") || return 1
+      [ "\$graphical_state" = not-found ] && break
+      sleep 0.1
+      count=\$((count + 1))
+    done
+    [ "\$graphical_state" = not-found ] || { echo 'timed out waiting for graphical unit to unload' >&2; return 1; }
+  fi
   state=\$(load_state) || return 1
   [ "\$state" = not-found ] && return 0
   "\$systemctl" stop "\$unit"
@@ -432,22 +481,49 @@ stop_display() {
 run_cleanup() {
   "\$cleanup"
 }
+start_graphical() {
+  [ -x "\$graphical_session" ] || { echo 'graphical session missing; reinstall this clone' >&2; return 1; }
+  for dependency in labwc lxterminal; do
+    command -v "\$dependency" >/dev/null 2>&1 || {
+      echo "\$dependency missing; use ./scripts/display.sh start-console" >&2; return 1;
+    }
+  done
+  "\$graphical_acquire" || return 1
+  if ! "\$systemd_run" --quiet --collect --service-type=notify --unit=dgx-fan-graphical \
+    --property="User=\$install_user" --property=PAMName=login \
+    --property=TTYPath=/dev/tty8 --property=StandardInput=tty-force \
+    --property=StandardOutput=journal --property=StandardError=journal \
+    --property=NotifyAccess=main --property=TimeoutStartSec=20s \
+    --property=KillMode=mixed --property=KillSignal=SIGTERM \
+    --property=TimeoutStopSec=12s --property="ExecStopPost=+\$cleanup" \
+    "\$graphical_session" session; then
+    stop_display || { echo 'graphical startup failed; display unit is still stopping' >&2; return 1; }
+    "\$cleanup" || return 1
+    return 1
+  fi
+}
 case "\${1:-}" in
-  start)
+  start|start-console)
     [ "\$#" -eq 1 ] || exit 64
     state=\$("\$systemctl" is-active "\$unit" 2>/dev/null || true)
     case "\$state" in active|activating|deactivating|reloading) echo "dgx-fan display is already \$state" >&2; exit 1;; esac
+    state=\$("\$systemctl" is-active "\$graphical_unit" 2>/dev/null || true)
+    case "\$state" in active|activating|deactivating|reloading) echo "dgx-fan graphical display is already \$state" >&2; exit 1;; esac
     "\$systemctl" reset-failed "\$unit" >/dev/null 2>&1 || true
     stop_display
     run_cleanup
-    exec "\$systemd_run" --quiet --collect --service-type=exec --unit=dgx-fan-display --property=KillSignal=SIGUSR1 --property=TimeoutStopSec=10s --property=ExecStopPost="\$cleanup" "\$session"
+    if [ "\$1" = start ]; then start_graphical; else
+      exec "\$systemd_run" --quiet --collect --service-type=exec --unit=dgx-fan-display --property=KillSignal=SIGUSR1 --property=TimeoutStopSec=10s --property=ExecStopPost="\$cleanup" "\$session"
+    fi
     ;;
-  restart)
+  restart|restart-console)
     [ "\$#" -eq 1 ] || exit 64
     stop_display
     run_cleanup
     "\$systemctl" reset-failed "\$unit" >/dev/null 2>&1 || true
-    exec "\$systemd_run" --quiet --collect --service-type=exec --unit=dgx-fan-display --property=KillSignal=SIGUSR1 --property=TimeoutStopSec=10s --property=ExecStopPost="\$cleanup" "\$session"
+    if [ "\$1" = restart ]; then start_graphical; else
+      exec "\$systemd_run" --quiet --collect --service-type=exec --unit=dgx-fan-display --property=KillSignal=SIGUSR1 --property=TimeoutStopSec=10s --property=ExecStopPost="\$cleanup" "\$session"
+    fi
     ;;
   stop)
     [ "\$#" -eq 1 ] || exit 64
@@ -456,9 +532,13 @@ case "\${1:-}" in
     ;;
   status)
     [ "\$#" -eq 1 ] || exit 64
+    graphical_state=\$("\$systemctl" show --property=LoadState --value "\$graphical_unit") || exit 1
+    if [ "\$graphical_state" != not-found ]; then
+      exec "\$systemctl" status --no-pager "\$graphical_unit"
+    fi
     exec "\$systemctl" status --no-pager "\$unit"
     ;;
-  *) echo "Usage: dgx-fan-display-manager {start|restart|stop|status}" >&2; exit 64 ;;
+  *) echo "Usage: dgx-fan-display-manager {start|restart|start-console|restart-console|stop|status}" >&2; exit 64 ;;
 esac
 EOF
     } >"$rendered"
@@ -503,7 +583,7 @@ if [ "${USER:-}" = "$DGX_FAN_INSTALL_USER" ] && [ -z "${SSH_CONNECTION:-}" ] \
     && [ "$(tty 2>/dev/null || true)" = "/dev/tty1" ]; then
     DGX_FAN_AUTOSTART_ATTEMPTED=1
     export DGX_FAN_AUTOSTART_ATTEMPTED
-    "$DGX_FAN_PROJECT_ROOT/scripts/display.sh" start || printf '%s\n' 'dgx-fan physical display did not start; see the message above.' >&2
+    "$DGX_FAN_PROJECT_ROOT/scripts/display.sh" start-console || printf '%s\n' 'dgx-fan physical display did not start; see the message above.' >&2
 fi
 unset DGX_FAN_PROJECT_ROOT DGX_FAN_INSTALL_USER
 EOF
@@ -546,12 +626,13 @@ install_managed_file() {
 }
 
 preflight_managed_destinations() {
-    local helper manager session acquired cleanup sudoers hook install_record
+    local helper manager session acquired cleanup graphical_acquire sudoers hook install_record
     helper=$(target_path "/usr/local/libexec/$HELPER_NAME")
     manager=$(target_path "/usr/local/libexec/$DISPLAY_MANAGER_NAME")
     session=$(target_path "/usr/local/libexec/$DISPLAY_SESSION_NAME")
     acquired=$(target_path "/usr/local/libexec/$DISPLAY_TTY_ACQUIRED_NAME")
     cleanup=$(target_path "/usr/local/libexec/$DISPLAY_CLEANUP_NAME")
+    graphical_acquire=$(target_path "/usr/local/libexec/$GRAPHICAL_ACQUIRE_NAME")
     sudoers=$(target_path "/etc/sudoers.d/$SUDOERS_NAME")
     hook=$(target_path "/etc/profile.d/$PROFILE_NAME")
     install_record=$(target_path "/etc/$INSTALL_RECORD_NAME")
@@ -560,6 +641,7 @@ preflight_managed_destinations() {
     ensure_destination_parent "$session"
     ensure_destination_parent "$acquired"
     ensure_destination_parent "$cleanup"
+    ensure_destination_parent "$graphical_acquire"
     ensure_destination_parent "$sudoers"
     ensure_destination_parent "$hook"
     ensure_destination_parent "$install_record"
@@ -568,6 +650,7 @@ preflight_managed_destinations() {
     ensure_managed_destination "$session" "$HELPER_MARKER"
     ensure_managed_destination "$acquired" "$HELPER_MARKER"
     ensure_managed_destination "$cleanup" "$HELPER_MARKER"
+    ensure_managed_destination "$graphical_acquire" "$HELPER_MARKER"
     ensure_managed_destination "$sudoers" "$SUDOERS_MARKER"
     ensure_managed_destination "$hook" "$PROFILE_MARKER"
     ensure_managed_destination "$install_record" "$INSTALL_RECORD_MARKER"
@@ -647,6 +730,7 @@ main() {
     [[ -x "$PROJECT_ROOT/scripts/start.sh" ]] || fail 'scripts/start.sh must be executable in this clone'
     [[ -x "$PROJECT_ROOT/scripts/display.sh" ]] || fail 'scripts/display.sh must be executable in this clone'
     [[ -x "$PROJECT_ROOT/scripts/web.sh" ]] || fail 'scripts/web.sh must be executable in this clone'
+    [[ -x "$PROJECT_ROOT/scripts/graphical_session.py" ]] || fail 'scripts/graphical_session.py must be executable in this clone'
     [[ -x "$PROJECT_ROOT/dgx-fan-control.sh" ]] || fail 'dgx-fan-control.sh must be executable in this clone'
     INSTALL_USER=$(id -un)
     if [[ -n "$TEST_ROOT" && -n "${DGX_FAN_TEST_INSTALL_USER:-}" ]]; then

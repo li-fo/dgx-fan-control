@@ -72,7 +72,8 @@ display_manager=$(target_path /usr/local/libexec/dgx-fan-display-manager)
 display_session=$(target_path /usr/local/libexec/dgx-fan-display-session)
 display_acquired=$(target_path /usr/local/libexec/dgx-fan-display-tty-acquired)
 display_cleanup=$(target_path /usr/local/libexec/dgx-fan-display-cleanup)
-for display_path in "$display_manager" "$display_session" "$display_acquired" "$display_cleanup"; do
+display_graphical=$(target_path /usr/local/libexec/dgx-fan-graphical-acquire)
+for display_path in "$display_manager" "$display_session" "$display_acquired" "$display_cleanup" "$display_graphical"; do
     [[ -e "$display_path" || -L "$display_path" ]] && display_helpers_present=true
 done
 if [[ -f "$display_manager" && ! -L "$display_manager" \
@@ -88,6 +89,13 @@ if [[ -f "$display_manager" && ! -L "$display_manager" \
     && run_root grep -Fxq "$MARKER" "$display_acquired" \
     && run_root grep -Fxq "$MARKER" "$display_cleanup"; then
     display_helpers_managed=true
+fi
+if [[ -e "$display_graphical" || -L "$display_graphical" ]]; then
+    if [[ ! -f "$display_graphical" || -L "$display_graphical" \
+        || $(run_root stat -c '%h' -- "$display_graphical") != 1 ]] \
+        || ! run_root grep -Fxq "$MARKER" "$display_graphical"; then
+        display_helpers_managed=false
+    fi
 fi
 stop_status=0
 if [[ ! -x "$WEB_SCRIPT" ]]; then
@@ -125,6 +133,7 @@ managed_paths=( \
     "$(target_path /usr/local/libexec/dgx-fan-display-session)" \
     "$(target_path /usr/local/libexec/dgx-fan-display-tty-acquired)" \
     "$(target_path /usr/local/libexec/dgx-fan-display-cleanup)" \
+    "$(target_path /usr/local/libexec/dgx-fan-graphical-acquire)" \
 )
 preflight_status=0
 for path in "${managed_paths[@]}"; do

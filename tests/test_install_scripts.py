@@ -23,7 +23,7 @@ def _clone(tmp_path: Path, *, config: bool = True, name: str = "clone with space
         )
     scripts = clone / "scripts"
     scripts.mkdir()
-    for file_name in ("start.sh", "display.sh", "web.sh"):
+    for file_name in ("start.sh", "display.sh", "web.sh", "graphical_session.py"):
         shutil.copy2(ROOT / "scripts" / file_name, scripts / file_name)
     virtual_bin = clone / ".venv/bin"
     virtual_bin.mkdir(parents=True)
@@ -105,6 +105,7 @@ def _launcher_clone(tmp_path: Path) -> tuple[Path, Path]:
         "usr/local/libexec/dgx-fan-display-session",
         "usr/local/libexec/dgx-fan-display-tty-acquired",
         "usr/local/libexec/dgx-fan-display-cleanup",
+        "usr/local/libexec/dgx-fan-graphical-acquire",
         "etc/profile.d/dgx-fan-autostart.sh",
         "etc/sudoers.d/dgx-fan",
     ):
@@ -292,7 +293,7 @@ def test_interactive_launcher_hdmi_default_web_no_and_web_failure_keeps_display(
     no_web = _run_launcher(launcher, command_log, "2\n\n")
 
     assert no_web.returncode == 0, no_web.stderr
-    assert command_log.read_text().splitlines() == ["display.sh start"]
+    assert command_log.read_text().splitlines() == ["display.sh restart"]
 
     command_log.unlink()
     web_failure = _run_launcher(
@@ -303,8 +304,17 @@ def test_interactive_launcher_hdmi_default_web_no_and_web_failure_keeps_display(
     )
 
     assert web_failure.returncode == 0, web_failure.stderr
-    assert command_log.read_text().splitlines() == ["display.sh start", "web.sh start"]
+    assert command_log.read_text().splitlines() == ["display.sh restart", "web.sh start"]
     assert "continuing with the selected primary display" in web_failure.stderr
+
+
+def test_interactive_launcher_console_choice_transitions_existing_hdmi(tmp_path: Path) -> None:
+    launcher, command_log = _launcher_clone(tmp_path)
+
+    result = _run_launcher(launcher, command_log, "3\n\n")
+
+    assert result.returncode == 0, result.stderr
+    assert command_log.read_text().splitlines() == ["display.sh restart-console"]
 
 
 def test_interactive_launcher_display_failure_blocks_web_and_cancel_has_no_side_effects(tmp_path: Path) -> None:
@@ -318,7 +328,7 @@ def test_interactive_launcher_display_failure_blocks_web_and_cancel_has_no_side_
     )
 
     assert display_failure.returncode == 5
-    assert command_log.read_text().splitlines() == ["display.sh start"]
+    assert command_log.read_text().splitlines() == ["display.sh restart"]
 
     command_log.unlink()
     cancelled = _run_launcher(launcher, command_log, "h\nnot-a-choice\nq\n")
@@ -372,6 +382,7 @@ def _remove_launcher_installation(command_log: Path) -> None:
         "usr/local/libexec/dgx-fan-display-session",
         "usr/local/libexec/dgx-fan-display-tty-acquired",
         "usr/local/libexec/dgx-fan-display-cleanup",
+        "usr/local/libexec/dgx-fan-graphical-acquire",
     ):
         (sandbox / relative).unlink(missing_ok=True)
 
@@ -976,7 +987,8 @@ def test_uninstall_stops_web_then_display_and_preserves_everything_on_web_failur
     assert result.returncode == 1
     entries = (sandbox / "stop-order.log").read_text().splitlines()
     assert entries[0].startswith("--user show")
-    assert entries[1] == "show --property=LoadState --value dgx-fan-display.service"
+    assert entries[1] == "show --property=LoadState --value dgx-fan-graphical.service"
+    assert entries[2] == "show --property=LoadState --value dgx-fan-display.service"
     assert not any("stop dgx-fan-display.service" in entry for entry in entries[1:])
     assert all(path.exists() for path in _managed_artifacts(sandbox))
 
@@ -1091,6 +1103,19 @@ def test_uninstall_uses_root_marker_inspection_for_production_sudoers() -> None:
     assert 'run_root "$display_manager" stop' in source
 
 
+def test_uninstall_accepts_legacy_install_without_graphical_helper(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    graphical = sandbox / "usr/local/libexec/dgx-fan-graphical-acquire"
+    graphical.unlink()
+
+    result = _run(clone / "uninstall.sh", "--yes", sandbox=sandbox)
+
+    assert result.returncode == 0, result.stderr
+    assert all(not path.exists() for path in _managed_artifacts(sandbox))
+
+
 def test_start_dry_run_uses_fixed_helper_and_clone_local_configuration() -> None:
     result = subprocess.run(
         ["bash", str(ROOT / "scripts/start.sh"), "--dry-run"],
@@ -1130,7 +1155,7 @@ def test_direct_runtime_scripts_live_only_under_scripts_and_resolve_clone_from_a
 
 def test_display_launcher_has_closed_actions_and_fixed_bridge() -> None:
     source = (ROOT / "scripts/display.sh").read_text()
-    assert "start|restart|stop|status" in source
+    assert "start|restart|start-console|restart-console|stop|status" in source
     assert "sudo -n \"$MANAGER\" \"$1\"" in source
     assert "systemd-run" not in source
     result = subprocess.run(["bash", str(ROOT / "scripts/display.sh"), "unknown"], text=True, capture_output=True, check=False)
@@ -1160,6 +1185,62 @@ def test_display_bridge_uses_transient_no_force_tty8_and_no_restart_policy(tmp_p
     assert '"$openvt" -c 8 -s -w' in session
     assert "-c 8 -s -w -f" not in session
     assert "dgx-fan-display-tty-acquired" in session
+
+
+def test_graphical_manager_uses_unprivileged_pam_session_and_root_cleanup(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    _fake_command(sandbox / "usr/bin/systemctl", 'case "$1" in show) printf "not-found\\n";; is-active) printf "inactive\\n";; esac\n')
+    _fake_command(sandbox / "usr/bin/systemd-run", 'printf "%s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/graphical-unit.log"\n')
+    _fake_command(sandbox / "usr/bin/chvt", 'printf "%s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/graphical-vt.log"\n')
+    _fake_command(sandbox / "usr/bin/labwc", "exit 0\n")
+    _fake_command(sandbox / "usr/bin/lxterminal", "exit 0\n")
+    (sandbox / "run").mkdir()
+    active = sandbox / "sys/class/tty/tty0/active"
+    active.parent.mkdir(parents=True)
+    active.write_text("tty3\n")
+    manager = sandbox / "usr/local/libexec/dgx-fan-display-manager"
+
+    result = subprocess.run(["sh", str(manager), "start"], env=_environment(sandbox), text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert (sandbox / "run/dgx-fan-display-tty8").read_text() == "tty3\n"
+    assert (sandbox / "graphical-vt.log").read_text().strip() == "8"
+    unit = (sandbox / "graphical-unit.log").read_text()
+    assert "--unit=dgx-fan-graphical" in unit
+    assert "--service-type=notify" in unit
+    assert "--property=NotifyAccess=main" in unit
+    assert "--property=TimeoutStartSec=20s" in unit
+    assert "--property=User=operator" in unit
+    assert "--property=PAMName=login" in unit
+    assert "--property=TTYPath=/dev/tty8" in unit
+    assert "--property=StandardInput=tty-force" in unit
+    assert "--property=KillMode=mixed" in unit
+    assert "--property=ExecStopPost=+" + str(sandbox / "usr/local/libexec/dgx-fan-display-cleanup") in unit
+    assert str(clone / "scripts/graphical_session.py") in unit
+
+
+def test_graphical_startup_failure_reports_error_and_releases_own_vt(tmp_path: Path) -> None:
+    clone = _clone(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
+    _fake_command(sandbox / "usr/bin/systemctl", 'case "$1" in show) printf "not-found\\n";; is-active) printf "inactive\\n";; esac\n')
+    _fake_command(sandbox / "usr/bin/systemd-run", "exit 7\n")
+    _fake_command(sandbox / "usr/bin/chvt", "exit 0\n")
+    _fake_command(sandbox / "usr/bin/deallocvt", "exit 0\n")
+    _fake_command(sandbox / "usr/bin/labwc", "exit 0\n")
+    _fake_command(sandbox / "usr/bin/lxterminal", "exit 0\n")
+    (sandbox / "run").mkdir()
+    active = sandbox / "sys/class/tty/tty0/active"
+    active.parent.mkdir(parents=True)
+    active.write_text("tty3\n")
+    manager = sandbox / "usr/local/libexec/dgx-fan-display-manager"
+
+    result = subprocess.run(["sh", str(manager), "start"], env=_environment(sandbox), text=True, capture_output=True, check=False)
+
+    assert result.returncode != 0
+    assert not (sandbox / "run/dgx-fan-display-tty8").exists()
 
 
 def _fake_command(path: Path, body: str) -> None:
@@ -1395,7 +1476,7 @@ def test_fake_manager_refuses_active_and_orders_restart(tmp_path: Path) -> None:
     clone = _clone(tmp_path)
     sandbox = _sandbox(tmp_path)
     assert _run(clone / "install.sh", sandbox=sandbox).returncode == 0
-    _fake_command(sandbox / "usr/bin/systemctl", 'printf "systemctl %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/manager.log"\ncase "$1" in is-active) printf "%s\\n" "${DGX_TEST_UNIT_STATE:-inactive}";; show) if [ ! -e "$DGX_FAN_TEST_ROOT/show-seen" ]; then : > "$DGX_FAN_TEST_ROOT/show-seen"; printf "loaded\\n"; else printf "not-found\\n"; fi;; esac\n')
+    _fake_command(sandbox / "usr/bin/systemctl", 'printf "systemctl %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/manager.log"\ncase "$1" in is-active) printf "%s\\n" "${DGX_TEST_UNIT_STATE:-inactive}";; show) if [ "$4" = dgx-fan-graphical.service ]; then printf "not-found\\n"; elif [ ! -e "$DGX_FAN_TEST_ROOT/show-seen" ]; then : > "$DGX_FAN_TEST_ROOT/show-seen"; printf "loaded\\n"; else printf "not-found\\n"; fi;; esac\n')
     _fake_command(sandbox / "usr/bin/systemd-run", 'printf "systemd-run %s\\n" "$*" >> "$DGX_FAN_TEST_ROOT/manager.log"\n')
     manager = sandbox / "usr/local/libexec/dgx-fan-display-manager"
     environment = _environment(sandbox)
@@ -1404,15 +1485,16 @@ def test_fake_manager_refuses_active_and_orders_restart(tmp_path: Path) -> None:
     assert active.returncode == 1 and "already active" in active.stderr
     (sandbox / "manager.log").unlink()
     environment["DGX_TEST_UNIT_STATE"] = "inactive"
-    restarted = subprocess.run(["sh", str(manager), "restart"], env=environment, text=True, capture_output=True, check=False)
+    restarted = subprocess.run(["sh", str(manager), "restart-console"], env=environment, text=True, capture_output=True, check=False)
     assert restarted.returncode == 0, restarted.stderr
     entries = (sandbox / "manager.log").read_text().splitlines()
-    assert entries[:3] == [
+    assert entries[:4] == [
+        "systemctl show --property=LoadState --value dgx-fan-graphical.service",
         "systemctl show --property=LoadState --value dgx-fan-display.service",
         "systemctl stop dgx-fan-display.service",
         "systemctl show --property=LoadState --value dgx-fan-display.service",
     ]
-    assert entries[3] == "systemctl reset-failed dgx-fan-display.service"
+    assert entries[4] == "systemctl reset-failed dgx-fan-display.service"
     assert "--property=TimeoutStopSec=10s" in entries[-1]
     assert "--property=KillSignal=SIGUSR1" in entries[-1]
     assert "--property=ExecStopPost=" + str(sandbox / "usr/local/libexec/dgx-fan-display-cleanup") in entries[-1]
@@ -1428,11 +1510,11 @@ def test_fake_manager_covers_stale_start_refusals_stop_and_status(tmp_path: Path
     environment = _environment(sandbox)
     for state in ("inactive", "failed"):
         environment["DGX_TEST_UNIT_STATE"] = state
-        result = subprocess.run(["sh", str(manager), "start"], env=environment, text=True, capture_output=True, check=False)
+        result = subprocess.run(["sh", str(manager), "start-console"], env=environment, text=True, capture_output=True, check=False)
         assert result.returncode == 0, result.stderr
     for state in ("activating", "deactivating", "reloading"):
         environment["DGX_TEST_UNIT_STATE"] = state
-        result = subprocess.run(["sh", str(manager), "start"], env=environment, text=True, capture_output=True, check=False)
+        result = subprocess.run(["sh", str(manager), "start-console"], env=environment, text=True, capture_output=True, check=False)
         assert result.returncode == 1
         assert f"already {state}" in result.stderr
     for action in ("stop", "status"):
@@ -1470,7 +1552,7 @@ def test_fake_manager_restart_cleans_stale_marker_in_one_action(tmp_path: Path) 
     active_tty.parent.mkdir(parents=True)
     active_tty.write_text("tty2\n")
     manager = sandbox / "usr/local/libexec/dgx-fan-display-manager"
-    result = subprocess.run(["sh", str(manager), "restart"], env=_environment(sandbox), text=True, capture_output=True, check=False)
+    result = subprocess.run(["sh", str(manager), "restart-console"], env=_environment(sandbox), text=True, capture_output=True, check=False)
     assert result.returncode == 0, result.stderr
     assert not marker.exists()
 

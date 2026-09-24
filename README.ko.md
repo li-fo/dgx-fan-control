@@ -68,7 +68,7 @@ cp config.example.toml config.toml
 ./dgx-fan-control.sh
 ```
 
-현재 터미널 또는 연결된 HDMI 디스플레이를 선택한 뒤, 선택적 브라우저 화면의 실행 여부를 고릅니다. 시작 전에 launcher는 이 clone이 완전한 설치를 소유하는지 확인합니다. 설치가 없거나 일부만 존재하거나 다른 clone을 가리키면 기본값 No인 명시적 확인을 받은 뒤 `install.sh --no-launch`를 실행하고 준비 상태를 다시 확인해 이어갑니다. 기본은 읽기 전용이며 아래 설명처럼 신뢰된 LAN 제어를 명시적으로 활성화할 수 있습니다. 현재 터미널 모드는 foreground로 실행되고 HDMI 모드는 SSH 연결이 끊겨도 tty8 display service가 유지됩니다. 터미널에서 **Ctrl+Q**로 정상 종료하면 launcher가 선택해 시작한 web monitor는 계속 실행됩니다. 반대로 primary terminal 시작이 실패한 경우에는 launcher가 이번 실행에서 시작한 web monitor만 중지합니다.
+1번은 현재 터미널, 2번은 labwc와 전체 화면 LXTerminal을 사용하는 HDMI, 3번은 기존 tty8 콘솔 화면입니다. 이후 선택적 브라우저 화면의 실행 여부를 고릅니다. 시작 전에 launcher는 이 clone이 완전한 설치를 소유하는지 확인합니다. 설치가 없거나 일부만 존재하거나 다른 clone을 가리키면 기본값 No인 명시적 확인을 받은 뒤 `install.sh --no-launch`를 실행하고 준비 상태를 다시 확인해 이어갑니다. 웹 화면은 기본적으로 읽기 전용이며 아래 설명처럼 신뢰된 LAN 제어를 명시적으로 활성화할 수 있습니다. 현재 터미널 모드는 foreground로 실행되고 두 HDMI 모드는 SSH 연결이 끊겨도 유지됩니다. **Ctrl+Q**로 정상 종료하면 launcher가 선택해 시작한 web monitor는 계속 실행됩니다. 현재 터미널 시작이 실패한 경우에는 launcher가 이번 실행에서 시작한 web monitor만 중지합니다.
 
 관리 중인 HDMI display와 선택적 브라우저 모니터를 함께, 질문 없이 중지하려면 다음을 실행합니다.
 
@@ -89,19 +89,21 @@ SSH에서 연결된 HDMI 디스플레이로 표시하려면:
 ```bash
 ./scripts/display.sh restart
 ./scripts/display.sh status
-sudo journalctl -u dgx-fan-display.service --no-pager
+sudo journalctl -u dgx-fan-graphical.service --no-pager
 ```
 
-transient display 프로세스는 tty8에서 동작하므로 SSH가 끊겨도 유지됩니다. `shutdown_mode = "off"`에서는 **Ctrl+Q**, `./scripts/display.sh stop`, `./scripts/display.sh restart`의 stop 단계가 clean-stop 경로를 사용해 0% duty를 명령합니다. 처리 가능한 비정상 종료에는 full-duty fail-safe가 적용되고, SIGKILL과 전원 손실은 cleanup을 실행할 수 없어 마지막 duty가 유지될 수 있습니다. display가 실행 중일 때 두 번째 `./scripts/start.sh`를 실행하지 마세요. hardware-owner lock이 기존 앱을 멈추지 않고 두 번째 실행을 거부합니다. `uv run dgx-fan --config config.toml`과 `uvx`는 현재 터미널의 foreground 명령입니다.
+`restart`는 그래픽 HDMI 모드입니다. 메뉴 2번과 3번은 선택한 모드로 의도적으로 재시작하므로 자동 시작된 콘솔에서도 전환할 수 있습니다. 직접 실행한 `start`는 이미 실행 중인 화면을 교체하지 않습니다. `start-console`, `restart-console`은 기존 tty8 콘솔 모드를 선택하고 `stop`은 두 모드 중 실행 중인 화면을 중지합니다. 실제 화면에서 그래픽 모드를 검증하기 전까지 tty1 자동 로그인은 기존 콘솔 모드를 시작합니다. `labwc`와 `lxterminal`이 없다면 Raspberry Pi OS 패키지로 설치하세요. 앱 설치 스크립트는 이 선택 패키지나 콘솔 부팅 대상을 변경하지 않습니다. 그래픽 서비스는 tty8에 로컬 PAM/logind 세션과 별도 설정을 만들고 일반 사용자로 compositor와 TUI를 실행합니다. 팬 제어가 초기화된 뒤에만 그래픽 시작 성공을 보고하며, 실패하면 오류를 반환하고 소유한 VT를 정리합니다. 콘솔 모드 로그는 `sudo journalctl -u dgx-fan-display.service --no-pager`로 확인합니다.
 
-Graph #2에서는 관리된 tty8 시작이 10x20 pixel `Lat15-TerminusBold20x10` console font를 유지하므로 Graph #1, History, Fan Control의 일반 terminal geometry가 보존됩니다. Graph #2는 Textual의 native 3-row digit renderer를 로컬로 사용합니다. 정상 TEMP, MEM, UTIL, POWER는 같은 slot의 반올림된 display integer이고 control temperature는 원래 정밀도를 유지합니다. `setfont` 또는 로컬 font가 없으면 display는 계속 시작되고 Graph #2는 전체 plain metric 값으로 대체합니다. 업데이트 뒤 `./install.sh --no-launch`를 실행한 다음 display를 restart하고, 자동 검사는 실제 console font 픽셀을 확인할 수 없으므로 HDMI 화면을 직접 확인하세요.
+두 transient HDMI 모드 모두 SSH 종료 뒤에도 유지됩니다. `shutdown_mode = "off"`에서는 **Ctrl+Q**, `./scripts/display.sh stop`, 두 restart 동작의 stop 단계가 정상 종료 경로로 0% duty를 명령합니다. 처리 가능한 비정상 종료에는 full-duty fail-safe가 적용되고, SIGKILL과 전원 손실은 cleanup을 실행할 수 없어 마지막 duty가 유지될 수 있습니다. display 실행 중 두 번째 `./scripts/start.sh`를 실행하지 마세요. hardware-owner lock이 두 번째 실행을 거부합니다. `uv run dgx-fan --config config.toml`과 `uvx`는 현재 터미널의 foreground 명령입니다. 실제 글리프, 터치 드래그, PAM seat 접근과 CPU·RAM 부담은 Pi 4 HDMI에서 검증해야 합니다.
+
+콘솔 모드의 Graph #2에서는 관리된 tty8 시작이 10x20 pixel `Lat15-TerminusBold20x10` console font를 유지하므로 Graph #1, History, Fan Control의 일반 terminal geometry가 보존됩니다. Graph #2는 Textual의 native 3-row digit renderer를 로컬로 사용합니다. 정상 TEMP, MEM, UTIL, POWER는 같은 slot의 반올림된 display integer이고 control temperature는 원래 정밀도를 유지합니다. `setfont` 또는 로컬 font가 없으면 display는 계속 시작되고 Graph #2는 전체 plain metric 값으로 대체합니다. 그래픽 모드는 별도 `DejaVu Sans Mono 12` 터미널 글꼴을 사용하고 콘솔 글꼴 표지를 설정하지 않습니다. 업데이트 뒤 `./install.sh --no-launch`를 실행한 다음 선택한 display 모드를 재시작하고 HDMI 화면을 직접 확인하세요.
 
 관리된 tty8 cleanup이 busy이면 설치된 helper는 먼저 기록된 tty8 이외 콘솔로 돌아가 일반 deallocation을 다시 시도합니다. 자체 유효 marker, 안전한 active console 확인, 비어 있는 tty8이 모두 충족될 때만 bounded no-reboot selection recovery를 수행합니다. 실패는 표시되고 marker는 보존됩니다. recovery는 return console의 text selection을 잠시 바꾼 뒤 숨길 수 있으며 tty holder를 종료하지 않습니다. 재시도 전 올바른 clone에서 helper를 적용하세요:
 
 ```bash
 ./install.sh --no-launch
 ./scripts/display.sh stop
-./scripts/display.sh start
+./scripts/display.sh start-console
 ```
 
 ## 브라우저 모니터와 신뢰된 LAN 제어

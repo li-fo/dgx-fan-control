@@ -68,7 +68,7 @@ The app itself runs as the regular user, never as root. For the usual interactiv
 ./dgx-fan-control.sh
 ```
 
-Choose the current terminal or the attached HDMI display, then choose whether to start the optional browser view. Before starting, the launcher checks whether this clone owns a complete installation. Missing, partial, or another-clone installations require an explicit default-No confirmation before the launcher runs `install.sh --no-launch`, rechecks readiness, and resumes. It is read-only by default; control is an explicit trusted-LAN opt-in described below. In current-terminal mode the app stays in the foreground; in HDMI mode the tty8 display service continues after SSH disconnects. A normal **Ctrl+Q** exit from the terminal leaves a web monitor selected by the launcher running. If the primary terminal startup fails, the launcher stops only a web monitor that it itself started.
+Choose 1 for the current terminal, 2 for HDMI with labwc and fullscreen LXTerminal, or 3 for the original tty8 console renderer. Then choose whether to start the optional browser view. Before starting, the launcher checks whether this clone owns a complete installation. Missing, partial, or another-clone installations require an explicit default-No confirmation before the launcher runs `install.sh --no-launch`, rechecks readiness, and resumes. The browser is read-only by default; control is an explicit trusted-LAN opt-in described below. In current-terminal mode the app stays in the foreground; either HDMI mode continues after SSH disconnects. A normal **Ctrl+Q** exit leaves a web monitor selected by the launcher running. If current-terminal startup fails, the launcher stops only a web monitor that it itself started.
 
 To stop the managed HDMI display and optional browser monitor together, without prompts:
 
@@ -89,19 +89,21 @@ To place the TUI on the connected HDMI display from SSH:
 ```bash
 ./scripts/display.sh restart
 ./scripts/display.sh status
-sudo journalctl -u dgx-fan-display.service --no-pager
+sudo journalctl -u dgx-fan-graphical.service --no-pager
 ```
 
-The transient display process runs on tty8 and continues after SSH disconnects. With `shutdown_mode = "off"`, **Ctrl+Q**, `./scripts/display.sh stop`, and the stop phase of `./scripts/display.sh restart` use the clean-stop path and command 0% duty. Handled abnormal termination uses the full-duty fail-safe; SIGKILL and power loss cannot run cleanup and may preserve the last duty. Do not start a second foreground `./scripts/start.sh` while the display is active; the hardware-owner lock rejects it without stopping the running app. `uv run dgx-fan --config config.toml` and `uvx` remain foreground terminal commands.
+`restart` selects the graphical HDMI mode. Menu choices 2 and 3 intentionally restart the selected display mode, so they can switch away from an auto-started console. Direct `start` refuses to replace an active display; `start-console` and `restart-console` select the original tty8 console renderer, and `stop` stops either managed mode. Console auto-login still starts the original console renderer until graphical operation is verified on the physical screen. Install `labwc` and `lxterminal` from your Raspberry Pi OS packages if they are absent; the installer does not install those optional packages or change the console boot target. The graphical service creates a local PAM/logind seat on tty8 and isolated session settings, and runs the compositor and TUI as the login user. Graphical startup reports success only after the controller mounts and starts fan control; startup failure returns an error and cleans up its VT. Use `sudo journalctl -u dgx-fan-display.service --no-pager` for console mode.
 
-For Graph #2, the managed tty8 launch keeps the 10x20-pixel `Lat15-TerminusBold20x10` console font so Graph #1, History, and Fan Control retain their normal terminal geometry. Graph #2 uses Textual's native three-row digit renderer locally. Normal TEMP, MEM, UTIL, and POWER values are rounded display integers in equal slots; control temperatures keep their original precision. If `setfont` or that local font is unavailable, the display still starts and Graph #2 uses full plain metric values instead. After updating, run `./install.sh --no-launch`, then restart the display; confirm the actual HDMI pixels yourself because automated checks cannot verify the physical console font.
+Both transient display modes continue after SSH disconnects. With `shutdown_mode = "off"`, **Ctrl+Q**, `./scripts/display.sh stop`, and the stop phase of either restart action use the clean-stop path and command 0% duty. Handled abnormal termination uses the full-duty fail-safe; SIGKILL and power loss cannot run cleanup and may preserve the last duty. Do not start a second foreground `./scripts/start.sh` while the display is active; the hardware-owner lock rejects it without stopping the running app. `uv run dgx-fan --config config.toml` and `uvx` remain foreground terminal commands. Physical glyph quality, touch dragging, PAM seat access, and CPU/RAM overhead require validation on the Pi 4.
+
+In console mode, the managed tty8 launch keeps the 10x20-pixel `Lat15-TerminusBold20x10` console font so Graph #1, History, and Fan Control retain their normal terminal geometry. Graph #2 uses Textual's native three-row digit renderer locally. Normal TEMP, MEM, UTIL, and POWER values are rounded display integers in equal slots; control temperatures keep their original precision. If `setfont` or that local font is unavailable, the display still starts and Graph #2 uses full plain metric values instead. The graphical mode uses an isolated `DejaVu Sans Mono 12` terminal font and does not set the console-font marker. After updating, run `./install.sh --no-launch`, then restart the chosen display mode; confirm the actual HDMI pixels yourself because automated checks cannot verify physical font rendering.
 
 If a managed tty8 cleanup is busy, the installed helper first returns to the recorded non-tty8 console and retries normal deallocation. Only its own valid marker, a confirmed safe active console, and an unoccupied tty8 permit bounded no-reboot selection recovery; failure remains visible and preserves the marker. Recovery can briefly change and then hide text selection on the return console; it never kills tty holders. Apply the updated helper from the correct clone before retrying:
 
 ```bash
 ./install.sh --no-launch
 ./scripts/display.sh stop
-./scripts/display.sh start
+./scripts/display.sh start-console
 ```
 
 ## Browser monitor and trusted-LAN control

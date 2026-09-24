@@ -6,10 +6,11 @@ readonly MANAGER=/usr/local/libexec/dgx-fan-display-manager
 
 usage() {
     cat <<'EOF'
-Usage: ./scripts/display.sh {start|restart|stop|status}
+Usage: ./scripts/display.sh {start|restart|start-console|restart-console|stop|status}
 
-Controls the transient dgx-fan-display.service on tty8. This script does not
-accept a project path or arbitrary systemd arguments.
+start/restart use labwc and fullscreen LXTerminal on tty8. start-console and
+restart-console retain the Linux console renderer. Both modes use one managed
+HDMI display at a time. No project path or systemd arguments are accepted.
 EOF
 }
 
@@ -19,7 +20,7 @@ EOF
 }
 [[ $# -eq 1 ]] || { usage >&2; exit 64; }
 case "$1" in
-    start|restart|stop|status) ;;
+    start|restart|start-console|restart-console|stop|status) ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 64 ;;
 esac

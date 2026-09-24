@@ -79,15 +79,17 @@ managed_file_ready() {
 }
 
 installation_prerequisites_ready() {
-    local helper=$1 manager=$2 session=$3 acquired=$4 cleanup=$5 profile=$6 sudoers=$7
+    local helper=$1 manager=$2 session=$3 acquired=$4 cleanup=$5 graphical=$6 profile=$7 sudoers=$8
     [[ -f "$PROJECT_ROOT/config.toml" && -x "$PROJECT_ROOT/.venv/bin/dgx-fan" \
         && -x "$START_SCRIPT" && -x "$DISPLAY_SCRIPT" && -x "$WEB_SCRIPT" \
-        && -x "$helper" && -x "$manager" && -x "$session" && -x "$acquired" && -x "$cleanup" ]] \
+        && -x "$helper" && -x "$manager" && -x "$session" && -x "$acquired" && -x "$cleanup" && -x "$graphical" \
+        && -x "$PROJECT_ROOT/scripts/graphical_session.py" ]] \
         && managed_file_ready "$helper" \
         && managed_file_ready "$manager" \
         && managed_file_ready "$session" \
         && managed_file_ready "$acquired" \
         && managed_file_ready "$cleanup" \
+        && managed_file_ready "$graphical" \
         && managed_file_ready "$profile" \
         && sudoers_metadata_ready "$sudoers" \
         && sudo_authorizations_ready "$helper" "$manager" \
@@ -122,16 +124,17 @@ operator_prerequisites_ready() {
 }
 
 probe_installation() {
-    local record helper manager session acquired cleanup profile sudoers any=false
+    local record helper manager session acquired cleanup graphical profile sudoers any=false
     record=$(target_path /etc/dgx-fan-installation)
     helper=$(target_path /usr/local/libexec/dgx-fan-prepare-hardware)
     manager=$(target_path /usr/local/libexec/dgx-fan-display-manager)
     session=$(target_path /usr/local/libexec/dgx-fan-display-session)
     acquired=$(target_path /usr/local/libexec/dgx-fan-display-tty-acquired)
     cleanup=$(target_path /usr/local/libexec/dgx-fan-display-cleanup)
+    graphical=$(target_path /usr/local/libexec/dgx-fan-graphical-acquire)
     profile=$(target_path /etc/profile.d/dgx-fan-autostart.sh)
     sudoers=$(target_path /etc/sudoers.d/dgx-fan)
-    for path in "$record" "$helper" "$manager" "$session" "$acquired" "$cleanup" "$profile" "$sudoers"; do
+    for path in "$record" "$helper" "$manager" "$session" "$acquired" "$cleanup" "$graphical" "$profile" "$sudoers"; do
         [[ -e "$path" || -L "$path" ]] && any=true
     done
     INSTALLED_ROOT=''
@@ -140,7 +143,7 @@ probe_installation() {
             INSTALL_STATE=other
             return
         fi
-        if installation_prerequisites_ready "$helper" "$manager" "$session" "$acquired" "$cleanup" "$profile" "$sudoers"; then
+        if installation_prerequisites_ready "$helper" "$manager" "$session" "$acquired" "$cleanup" "$graphical" "$profile" "$sudoers"; then
             INSTALL_STATE=current
             return
         fi
@@ -188,18 +191,20 @@ choose_primary() {
     while true; do
         printf '\nChoose the primary TUI display:\n'
         printf '  1) Current terminal\n'
-        printf '  2) HDMI display (tty8)\n'
+        printf '  2) HDMI: labwc + fullscreen LXTerminal\n'
+        printf '  3) HDMI: Linux console (tty8 fallback)\n'
         printf '  h) Help\n'
         printf '  q) Cancel\n'
-        read -r -p 'Choice [1/2]: ' choice || return 1
+        read -r -p 'Choice [1/2/3]: ' choice || return 1
         case "${choice,,}" in
             1|terminal|t) PRIMARY=terminal; return 0 ;;
             2|hdmi|d) PRIMARY=hdmi; return 0 ;;
+            3|console|c) PRIMARY=console; return 0 ;;
             h|help)
-                printf 'Current terminal stays in the foreground. HDMI starts the installed tty8 display service.\n'
+                printf 'Current terminal stays in the foreground. HDMI uses LXTerminal; console retains the older tty8 renderer.\n'
                 ;;
             q|quit|cancel) return 1 ;;
-            *) printf 'Invalid choice. Enter 1, 2, h, or q.\n' >&2 ;;
+            *) printf 'Invalid choice. Enter 1, 2, 3, h, or q.\n' >&2 ;;
         esac
     done
 }
@@ -307,7 +312,11 @@ case "$PRIMARY" in
         exit "$primary_status"
         ;;
     hdmi)
-        "$DISPLAY_SCRIPT" start
+        "$DISPLAY_SCRIPT" restart
+        start_web_if_requested
+        ;;
+    console)
+        "$DISPLAY_SCRIPT" restart-console
         start_web_if_requested
         ;;
 esac
