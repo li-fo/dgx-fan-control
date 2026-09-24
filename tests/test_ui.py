@@ -689,7 +689,10 @@ class _DashboardApp(App[None]):
 def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
     class GraphTwoApp(App[None]):
         def compose(self) -> ComposeResult:
-            yield FanAppUI("config.toml", lambda: None, 75, 2, graph_view="graph-2")
+            yield FanAppUI(
+                "config.toml", lambda: None, 75, 2,
+                DashboardColors("yellow", "cyan", "red", "green"), graph_view="graph-2",
+            )
 
     gpu = GPUStat("GPU-a", "A100", 50, 100, 40, 55, 250)
     snapshot = _fan_snapshot(
@@ -707,8 +710,12 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             ui = app.query_one(FanAppUI)
             ui.update_snapshot(snapshot, 120)
             await pilot.pause()
-            text = next(iter(ui.query(".dgx-panel"))).render().plain
+            dashboard = next(iter(ui.query(".dgx-panel"))).render()
+            text = dashboard.plain
             assert "POWER 250 W" in text and "TEMP 120s" in text and "X: overlap" in text
+            styles = " ".join(str(span.style) for span in dashboard.spans)
+            for color in ("ansi_yellow", "ansi_cyan", "ansi_red", "ansi_green"):
+                assert color in styles
             failed = replace(
                 snapshot,
                 endpoint_snapshots=(

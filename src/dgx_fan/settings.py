@@ -605,20 +605,21 @@ class SettingsService:
                                 )
                     target[key] = value
                 continue
-            colors = _as_mapping(values.get("colors", {}), "dashboard.colors")
-            unknown_colors = set(colors) - {"memory", "utilization", "temperature", "power"}
-            if unknown_colors:
-                raise ConfigError(
-                    f"unknown settings key: dashboard.colors.{min(unknown_colors)}"
-                )
-            if "colors" not in target:
-                target["colors"] = tomlkit.table()
-            color_table = target["colors"]
-            for key in ("memory", "utilization", "temperature", "power"):
-                if key in colors:
-                    color_table[key] = colors[key]
-                elif key in color_table:
-                    del color_table[key]
+            if "colors" in values:
+                colors = _as_mapping(values["colors"], "dashboard.colors")
+                unknown_colors = set(colors) - {"memory", "utilization", "temperature", "power"}
+                if unknown_colors:
+                    raise ConfigError(
+                        f"unknown settings key: dashboard.colors.{min(unknown_colors)}"
+                    )
+                if "colors" not in target:
+                    target["colors"] = tomlkit.table()
+                color_table = target["colors"]
+                for key in ("memory", "utilization", "temperature", "power"):
+                    if key in colors:
+                        color_table[key] = colors[key]
+                    elif key in color_table:
+                        del color_table[key]
             if "graph_view" in values:
                 target["graph_view"] = values["graph_view"]
 

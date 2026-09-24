@@ -511,6 +511,31 @@ def test_command_socket_end_to_end_opt_in_power_save_and_duplicate_scope(
             )
             assert saved["ok"] is True and saved["revision"] == 1
             assert load_config(path).collection.interval_seconds == 2.0
+            color_saved = await _request(
+                socket_path,
+                {
+                    "version": 1,
+                    "operation": "save-settings",
+                    "request_id": "colors",
+                    "source_id": "controller-one",
+                    "revision": 1,
+                    "patch": {"dashboard": {"colors": {"memory": "yellow"}}},
+                },
+            )
+            graph_saved = await _request(
+                socket_path,
+                {
+                    "version": 1,
+                    "operation": "save-settings",
+                    "request_id": "graph-view",
+                    "source_id": "controller-one",
+                    "revision": color_saved["revision"],
+                    "patch": {"dashboard": {"graph_view": "graph-2"}},
+                },
+            )
+            assert graph_saved["ok"] is True
+            assert load_config(path).dashboard_colors.memory == "yellow"
+            assert load_config(path).graph_view == "graph-2"
         finally:
             await server.close()
         assert not socket_path.exists()

@@ -59,11 +59,14 @@ def parse_metrics(endpoint_id: str, name: str, text: str) -> tuple[GPUStat, ...]
                 values[raw_key][field] = value
                 labels_by_key[raw_key] = labels
     result: list[GPUStat] = []
+    has_legacy_metric = any(set(item) - {"power_watts"} for item in values.values())
+    if not has_legacy_metric:
+        return ()
     for key, item in values.items():
-        # Power augments an otherwise usable DCGM GPU sample; it must not turn
-        # a power-only scrape into a healthy temperature/control sample.
-        if set(item) == {"power_watts"}:
-            continue
+        # Power augments an otherwise usable scrape but cannot, by itself,
+        # make the entire endpoint a healthy temperature/control sample.
+        # Once a legacy metric exists, retain power-only physical GPUs so a
+        # dashboard power sum cannot falsely claim completeness.
         labels = labels_by_key[key]
         used, free, reserved = item.get("memory_used_mib"), item.get("memory_free_mib"), item.get("memory_reserved_mib")
         total = used + free + reserved if used is not None and free is not None and reserved is not None else None

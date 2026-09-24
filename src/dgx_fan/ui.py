@@ -749,12 +749,33 @@ class FanAppUI(Static):
         rendered = Text()
         height = max((len(card) for card in cards), default=0)
         for row in range(height):
-            line = " ".join(card[row].ljust(card_width) if row < len(card) else " " * card_width for card in cards).rstrip()
-            rendered.append(line, style=Style(bold=row in {1, 2}))
+            line = Text(style=Style(bold=row in {1, 2}))
+            for index, card in enumerate(cards):
+                value = card[row].ljust(card_width) if row < len(card) else " " * card_width
+                start = len(line.plain)
+                line.append(value)
+                if row == 1:
+                    split = value.find("  MEM ")
+                    if split >= 0:
+                        line.stylize(Style(color=self.dashboard_colors.temperature), start, start + split)
+                        line.stylize(Style(color=self.dashboard_colors.memory), start + split + 2, start + len(value.rstrip()))
+                elif row == 2:
+                    split = value.find("  POWER ")
+                    if split >= 0:
+                        line.stylize(Style(color=self.dashboard_colors.utilization), start, start + split)
+                        line.stylize(Style(color=self.dashboard_colors.power), start + split + 2, start + len(value.rstrip()))
+                elif row >= 3:
+                    line.stylize(Style(color=self.dashboard_colors.utilization), start, start + len(value.rstrip()))
+                if index < len(cards) - 1:
+                    line.append(" ")
+            rendered.append(line)
             rendered.append("\n")
         labels = [f"{index + 1}:{_compact_display_text(endpoint.name, 15)}" for index, endpoint in enumerate(snapshot.endpoint_snapshots[:2])]
         rendered.append(_compact_display_text("TEMP 120s · " + " · ".join(labels) + " · X: overlap", available) + "\n")
-        rendered.append("\n".join(self._shared_temperature_lines(snapshot.endpoint_snapshots[:2], now, available)) + "\n")
+        rendered.append(
+            "\n".join(self._shared_temperature_lines(snapshot.endpoint_snapshots[:2], now, available)) + "\n",
+            style=Style(color=self.dashboard_colors.temperature),
+        )
         panel.update(rendered)
         scroll.move_child(panel, before=0)
         self._dashboard_layout_signature = self._layout_signature(scroll)

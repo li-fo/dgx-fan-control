@@ -36,6 +36,17 @@ def test_parse_optional_physical_gpu_power() -> None:
     assert gpus[0].power_watts == 321.5
 
 
+def test_mixed_scrape_retains_power_only_physical_gpu_for_completeness() -> None:
+    gpus = parse_metrics(
+        "one",
+        "One",
+        METRICS
+        + 'DCGM_FI_DEV_POWER_USAGE{UUID="GPU-a"} 321.5\n'
+        + 'DCGM_FI_DEV_POWER_USAGE{UUID="GPU-b"} 300\n',
+    )
+    assert [(gpu.key, gpu.power_watts) for gpu in gpus] == [("GPU-a", 321.5), ("GPU-b", 300)]
+
+
 @pytest.mark.asyncio
 async def test_power_only_scrape_remains_unusable_and_retries(
     monkeypatch: pytest.MonkeyPatch,
