@@ -337,6 +337,25 @@ class FanGauge(Static):
         self.overall_state: str | None = None
         super().__init__(self._content(number, None, None, "WAITING"), id=f"fan-{number}-gauge")
 
+    @staticmethod
+    def _accent(duty_percent: int | None, state: str, *, linux_vt: bool = False) -> str:
+        """Keep fault/unknown priorities above normal PWM display bands."""
+        if state == "STALLED":
+            return "red"
+        if state == "NO TACH":
+            return "yellow"
+        if state in ("WAITING", "STOPPED") or duty_percent is None:
+            return "bright_black"
+        if state != "RUNNING":
+            return "cyan"
+        if duty_percent <= 40:
+            return "blue"
+        if duty_percent < 80:
+            return "yellow"
+        if duty_percent < 90:
+            return "yellow" if linux_vt else "#ff8700"
+        return "red"
+
     @classmethod
     def _content(
         cls, number: int, duty_percent: int | None, rpm: float | None, state: str,
@@ -354,11 +373,22 @@ class FanGauge(Static):
             ring[row][column] = "●" if index < filled else "○"
         ring[2][5:10] = list(f"{percentage:^5}")
         rpm_text = "N/A" if rpm is None else f"{rpm:.0f} RPM"
-        return Text(
-            f"Fan {number}\n"
-            + "\n".join("".join(row) for row in ring)
-            + f"\nRPM: {rpm_text} | {state}{' | OVERRIDE' if override else ''}"
-        )
+        accent = cls._accent(duty_percent, state, linux_vt=_is_linux_virtual_console())
+        result = Text(f"Fan {number}\n")
+        for row_index, row in enumerate(ring):
+            for column, glyph in enumerate(row):
+                color = (
+                    accent if glyph == "●" or (row_index == 2 and 5 <= column < 10 and glyph != " ")
+                    else "bright_black" if glyph == "○" else None
+                )
+                result.append(glyph, style=Style(color=color) if color else None)
+            if row_index < len(ring) - 1:
+                result.append("\n")
+        result.append(f"\nRPM: {rpm_text} | ")
+        result.append(state, style=Style(color=accent))
+        if override:
+            result.append(" | OVERRIDE", style=Style(color="red"))
+        return result
 
     @classmethod
     @lru_cache(maxsize=1)
@@ -386,10 +416,7 @@ class FanGauge(Static):
         """A nine-row ring with native digits, retaining separate measured RPM."""
         percentage = "--" if duty_percent is None else f"{duty_percent}%"
         level = None if duty_percent is None else max(0, min(100, duty_percent)) / 100
-        accent = (
-            "red" if state == "STALLED" else "yellow" if state == "NO TACH"
-            else "bright_black" if state in ("WAITING", "STOPPED") else "cyan"
-        )
+        accent = cls._accent(duty_percent, state)
         track = [[0] * cls.DENSE_WIDTH for _ in range(cls.DENSE_HEIGHT)]
         filled = [[False] * cls.DENSE_WIDTH for _ in range(cls.DENSE_HEIGHT)]
         center = [[False] * cls.DENSE_WIDTH for _ in range(cls.DENSE_HEIGHT)]
@@ -424,17 +451,21 @@ class FanGauge(Static):
             result.append(" | OVERRIDE", style=Style(color="red"))
         return result
 
-    @staticmethod
+    @classmethod
     def _compact_content(
-        number: int, duty_percent: int | None, rpm: float | None, state: str,
+        cls, number: int, duty_percent: int | None, rpm: float | None, state: str,
         *, override: bool = False,
     ) -> Text:
         percentage = "--" if duty_percent is None else f"{duty_percent}%"
         rpm_text = "N/A" if rpm is None else f"{rpm:.0f} RPM"
-        return Text(
-            f"F{number} PWM {percentage}\nRPM {rpm_text}\n"
-            + state + (" OVR" if override else "")
-        )
+        accent = cls._accent(duty_percent, state, linux_vt=_is_linux_virtual_console())
+        result = Text(f"F{number} PWM ")
+        result.append(percentage, style=Style(color=accent))
+        result.append(f"\nRPM {rpm_text}\n")
+        result.append(state, style=Style(color=accent))
+        if override:
+            result.append(" OVR", style=Style(color="red"))
+        return result
 
     def _refresh_display(self) -> None:
         override = self.overall_state == "SAFETY OVERRIDE"
