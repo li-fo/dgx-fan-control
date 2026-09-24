@@ -758,6 +758,31 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             await pilot.pause()
             scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
             assert scroll.display and scroll.max_scroll_y == 0
+            high = GPUStat(
+                "GPU-high",
+                "A100",
+                976_562_500 * 1024,
+                976_562_500 * 1024,
+                100,
+                150,
+                999999,
+            )
+            extreme = replace(
+                snapshot,
+                endpoint_snapshots=(
+                    replace(snapshot.endpoint_snapshots[0], gpus=(high,), sample_revision=3),
+                    replace(snapshot.endpoint_snapshots[1], gpus=(high,), sample_revision=3),
+                ),
+            )
+            ui.update_snapshot(extreme, 124)
+            await pilot.pause()
+            text = next(iter(ui.query(".dgx-panel"))).render().plain
+            assert "TEMP 150.0 C" in text and "MEM 976562500 / 976562500 GiB" in text
+            assert "UTIL 100%" in text and "POWER 999999 W" in text and "…" not in text
+            styles = " ".join(str(span.style) for span in next(iter(ui.query(".dgx-panel"))).render().spans)
+            for color in ("ansi_yellow", "ansi_cyan", "ansi_red", "ansi_green"):
+                assert color in styles
+            assert scroll.max_scroll_y == 0
 
     asyncio.run(exercise())
 
@@ -765,15 +790,16 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
 def test_large_metric_glyphs_are_unique_and_fit_wide_and_79_column_cards() -> None:
     assert len(set(_LARGE_DIGITS.values())) == 10
     ui = FanAppUI("config.toml", lambda: None, 75, 2, graph_view="graph-2")
-    for width, values in (
-        (50, ("50.0 C", "111 / 121 GiB", "0%", "12 W")),
-        (38, ("50.0 C", "111 / 121 GiB", "999%", "999 W")),
-    ):
-        rows, _spans = ui._large_metric_rows(values, width)
-        assert len(rows) == 4
-        assert all(len(row) <= width for row in rows)
-        assert rows[0].index("TEMP") < rows[0].index("MEM") < rows[0].index("UTIL") < rows[0].index("POWER")
-        assert "GiB" in "\n".join(rows[1:])
+    ordinary = ("50.0 C", "111 / 121 GiB", "0%", "12 W")
+    rows, _spans = ui._large_metric_rows(ordinary, 50)
+    assert len(rows) == 4 and all(len(row) <= 50 for row in rows)
+    assert rows[0].index("TEMP") < rows[0].index("MEM") < rows[0].index("UTIL") < rows[0].index("POWER")
+    assert "GiB" in "\n".join(rows[1:])
+
+    extreme = ("150.0 C", "976562500 / 976562500 GiB", "100%", "999999 W")
+    rows, _spans = ui._large_metric_rows(extreme, 39)
+    assert rows == [f"{label} {value}" for label, value in zip(("TEMP", "MEM", "UTIL", "POWER"), extreme, strict=True)]
+    assert all("…" not in row and value in row for row, value in zip(rows, extreme, strict=True))
 
 
 @pytest.mark.parametrize(("graph_view", "size"), [("graph-1", (100, 24)), ("graph-2", (79, 30))])

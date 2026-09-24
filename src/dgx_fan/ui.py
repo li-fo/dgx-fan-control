@@ -730,13 +730,13 @@ class FanAppUI(Static):
                 del self.panels[key]
         available = max(30, scroll.scrollable_content_region.width)
         card_width = max(30, (available - 1) // max(1, min(2, len(snapshot.endpoint_snapshots))))
-        cards: list[tuple[list[str], tuple[tuple[int, int], ...]]] = []
+        cards: list[tuple[list[str], tuple[tuple[tuple[int, int, int], ...], ...]]] = []
         for endpoint in snapshot.endpoint_snapshots[:2]:
             gpus = endpoint.gpus if endpoint.healthy and not endpoint.stale and endpoint.error is None else ()
             temperatures = [gpu.temperature_celsius for gpu in gpus if gpu.temperature_celsius is not None]
             utilization = [gpu.utilization_percent for gpu in gpus if gpu.utilization_percent is not None]
             powers = [gpu.power_watts for gpu in gpus]
-            temp = "N/A" if not temperatures else f"{max(temperatures):.1f}C"
+            temp = "N/A" if not temperatures else f"{max(temperatures):.1f} C"
             util = "N/A" if not utilization else f"{max(utilization):.0f}%"
             if endpoint.memory_source == "node-exporter":
                 memory = (
@@ -774,17 +774,17 @@ class FanAppUI(Static):
                 value = card[row].ljust(card_width) if row < len(card) else " " * card_width
                 start = len(line.plain)
                 line.append(value)
-                if 1 <= row <= 4:
+                if 1 <= row <= len(metric_spans):
                     colors = (
                         self.dashboard_colors.temperature,
                         self.dashboard_colors.memory,
                         self.dashboard_colors.utilization,
                         self.dashboard_colors.power,
                     )
-                    for metric_index, (offset, width) in enumerate(metric_spans):
+                    for metric_index, offset, width in metric_spans[row - 1]:
                         color = colors[metric_index]
                         line.stylize(Style(color=_rich_color(color)), start + offset, start + offset + width)
-                elif row >= 5:
+                elif row > len(metric_spans):
                     line.stylize(
                         Style(color=_rich_color(self.dashboard_colors.utilization)),
                         start,
@@ -808,40 +808,33 @@ class FanAppUI(Static):
     def _large_metric_rows(
         self,
         values: tuple[str, str, str, str], card_width: int
-    ) -> tuple[list[str], tuple[tuple[int, int], ...]]:
+    ) -> tuple[list[str], tuple[tuple[tuple[int, int, int], ...], ...]]:
         """Render four genuine 3-row ASCII values within a two-card console width."""
-        wide = values
-        narrow = tuple(
-            value.replace(" C", "C").replace(" / ", "/").replace(" W", "W")
-            for value in values
-        )
-        glyphs = [self._large_value(value) for value in wide]
-        widths = [len(glyph[0]) for glyph in glyphs]
-        gap = 1
-        if sum(widths) + len(widths) - 1 > card_width:
-            glyphs = [self._large_value(value) for value in narrow]
-            widths = [len(glyph[0]) for glyph in glyphs]
-            gap = max(0, (card_width - sum(widths)) // max(1, len(widths) - 1))
-        if sum(widths) > card_width:
-            compact = (narrow[0].split(".", 1)[0] + "C", narrow[1], narrow[2], narrow[3])
-            glyphs = [self._large_value(value) for value in compact]
-            widths = [len(glyph[0]) for glyph in glyphs]
-            gap = max(0, (card_width - sum(widths)) // max(1, len(widths) - 1))
-        if sum(widths) > card_width:
-            # Exceptional telemetry widths retain every character in a
-            # three-row region rather than letting a final cell clip hide it.
-            glyphs = [self._small_value(value) for value in narrow]
-            widths = [len(glyph[0]) for glyph in glyphs]
-            gap = max(0, (card_width - sum(widths)) // max(1, len(widths) - 1))
-        separator = " " * gap
-        starts: list[tuple[int, int]] = []
-        offset = 0
-        for width in widths:
-            starts.append((offset, width))
-            offset += width + gap
-        labels = separator.join(label.center(width) for label, width in zip(_GRAPH_TWO_METRIC_LABELS, widths, strict=True))
-        rows = [labels, *(separator.join(glyph[row] for glyph in glyphs) for row in range(3))]
-        return [_compact_display_text(row, card_width) for row in rows], tuple(starts)
+        narrow = tuple(value.replace(" C", "C").replace(" / ", "/").replace(" W", "W") for value in values)
+        for rendered_values, preferred_gap in ((values, 1), (narrow, 0)):
+            glyphs = [self._large_value(value) for value in rendered_values]
+            widths = [max(len(glyph[0]), len(label)) for glyph, label in zip(glyphs, _GRAPH_TWO_METRIC_LABELS, strict=True)]
+            required = sum(widths) + preferred_gap * (len(widths) - 1)
+            if required > card_width:
+                continue
+            separator = " " * preferred_gap
+            starts: list[tuple[int, int, int]] = []
+            offset = 0
+            for metric_index, width in enumerate(widths):
+                starts.append((metric_index, offset, width))
+                offset += width + preferred_gap
+            labels = separator.join(label.center(width) for label, width in zip(_GRAPH_TWO_METRIC_LABELS, widths, strict=True))
+            rows = [labels]
+            for glyph_row in range(3):
+                rows.append(separator.join(glyph[glyph_row].center(width) for glyph, width in zip(glyphs, widths, strict=True)))
+            spans = tuple(tuple(starts) for _ in rows)
+            return rows, spans
+
+        # At genuinely impossible glyph widths, keep every full value in an
+        # explicit stacked card mode instead of truncating or eliding data.
+        rows = [f"{label} {value}" for label, value in zip(_GRAPH_TWO_METRIC_LABELS, values, strict=True)]
+        spans = tuple(((index, 0, len(row)),) for index, row in enumerate(rows))
+        return rows, spans
 
     @staticmethod
     def _large_value(value: str) -> tuple[str, str, str]:
@@ -855,10 +848,6 @@ class FanAppUI(Static):
             for row, piece in enumerate(glyph):
                 rows[row] += piece
         return rows[0], rows[1], rows[2]
-
-    @staticmethod
-    def _small_value(value: str) -> tuple[str, str, str]:
-        return " " * len(value), value, " " * len(value)
 
     @staticmethod
     def _chart_lines(metric: str, value: str, chart: list[str]) -> list[str]:
