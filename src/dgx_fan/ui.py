@@ -338,23 +338,37 @@ class FanGauge(Static):
         super().__init__(self._content(number, None, None, "WAITING"), id=f"fan-{number}-gauge")
 
     @staticmethod
-    def _accent(duty_percent: int | None, state: str, *, linux_vt: bool = False) -> str:
+    def _tone(name: str, *, linux_vt: bool = False) -> str:
+        """Use fixed RGB for graphical gauges and legacy ANSI on a real VT."""
+        if linux_vt:
+            return "yellow" if name == "orange" else name
+        return {
+            "blue": "#3b82f6", "yellow": "#facc15", "orange": "#ff8700",
+            "red": "#ef4444", "bright_black": "#6b7280", "cyan": "#22d3ee",
+        }[name]
+
+    @classmethod
+    def _accent(
+        cls, duty_percent: int | None, state: str, *, linux_vt: bool = False,
+    ) -> str:
         """Keep fault/unknown priorities above normal PWM display bands."""
         if state == "STALLED":
-            return "red"
-        if state == "NO TACH":
-            return "yellow"
-        if state in ("WAITING", "STOPPED") or duty_percent is None:
-            return "bright_black"
-        if state != "RUNNING":
-            return "cyan"
-        if duty_percent <= 40:
-            return "blue"
-        if duty_percent < 80:
-            return "yellow"
-        if duty_percent < 90:
-            return "yellow" if linux_vt else "#ff8700"
-        return "red"
+            name = "red"
+        elif state == "NO TACH":
+            name = "yellow"
+        elif state in ("WAITING", "STOPPED") or duty_percent is None:
+            name = "bright_black"
+        elif state != "RUNNING":
+            name = "cyan"
+        elif duty_percent <= 40:
+            name = "blue"
+        elif duty_percent < 80:
+            name = "yellow"
+        elif duty_percent < 90:
+            name = "orange"
+        else:
+            name = "red"
+        return cls._tone(name, linux_vt=linux_vt)
 
     @classmethod
     def _content(
@@ -373,13 +387,15 @@ class FanGauge(Static):
             ring[row][column] = "●" if index < filled else "○"
         ring[2][5:10] = list(f"{percentage:^5}")
         rpm_text = "N/A" if rpm is None else f"{rpm:.0f} RPM"
-        accent = cls._accent(duty_percent, state, linux_vt=_is_linux_virtual_console())
+        linux_vt = _is_linux_virtual_console()
+        accent = cls._accent(duty_percent, state, linux_vt=linux_vt)
+        track_color = cls._tone("bright_black", linux_vt=linux_vt)
         result = Text(f"Fan {number}\n")
         for row_index, row in enumerate(ring):
             for column, glyph in enumerate(row):
                 color = (
                     accent if glyph == "●" or (row_index == 2 and 5 <= column < 10 and glyph != " ")
-                    else "bright_black" if glyph == "○" else None
+                    else track_color if glyph == "○" else None
                 )
                 result.append(glyph, style=Style(color=color) if color else None)
             if row_index < len(ring) - 1:
@@ -387,7 +403,7 @@ class FanGauge(Static):
         result.append(f"\nRPM: {rpm_text} | ")
         result.append(state, style=Style(color=accent))
         if override:
-            result.append(" | OVERRIDE", style=Style(color="red"))
+            result.append(" | OVERRIDE", style=Style(color=cls._tone("red", linux_vt=linux_vt)))
         return result
 
     @classmethod
@@ -417,6 +433,7 @@ class FanGauge(Static):
         percentage = "--" if duty_percent is None else f"{duty_percent}%"
         level = None if duty_percent is None else max(0, min(100, duty_percent)) / 100
         accent = cls._accent(duty_percent, state)
+        track_color = cls._tone("bright_black")
         track = [[0] * cls.DENSE_WIDTH for _ in range(cls.DENSE_HEIGHT)]
         filled = [[False] * cls.DENSE_WIDTH for _ in range(cls.DENSE_HEIGHT)]
         center = [[False] * cls.DENSE_WIDTH for _ in range(cls.DENSE_HEIGHT)]
@@ -441,14 +458,14 @@ class FanGauge(Static):
         result = Text(f"Fan {number} · PWM {percentage}\n")
         for row in range(cls.DENSE_HEIGHT):
             for column, glyph in enumerate(glyphs[row]):
-                color = accent if filled[row][column] or center[row][column] else "bright_black"
+                color = accent if filled[row][column] or center[row][column] else track_color
                 result.append(glyph, style=Style(color=color))
             result.append("\n")
         rpm_text = "N/A" if rpm is None else f"{rpm:.0f} RPM"
         result.append(f"RPM: {rpm_text} | ")
         result.append(state, style=Style(color=accent))
         if override:
-            result.append(" | OVERRIDE", style=Style(color="red"))
+            result.append(" | OVERRIDE", style=Style(color=cls._tone("red")))
         return result
 
     @classmethod
@@ -458,13 +475,14 @@ class FanGauge(Static):
     ) -> Text:
         percentage = "--" if duty_percent is None else f"{duty_percent}%"
         rpm_text = "N/A" if rpm is None else f"{rpm:.0f} RPM"
-        accent = cls._accent(duty_percent, state, linux_vt=_is_linux_virtual_console())
+        linux_vt = _is_linux_virtual_console()
+        accent = cls._accent(duty_percent, state, linux_vt=linux_vt)
         result = Text(f"F{number} PWM ")
         result.append(percentage, style=Style(color=accent))
         result.append(f"\nRPM {rpm_text}\n")
         result.append(state, style=Style(color=accent))
         if override:
-            result.append(" OVR", style=Style(color="red"))
+            result.append(" OVR", style=Style(color=cls._tone("red", linux_vt=linux_vt)))
         return result
 
     def _refresh_display(self) -> None:

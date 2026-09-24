@@ -7,6 +7,7 @@ from typing import Literal
 import pytest
 from rich.cells import cell_len
 from rich.color import Color as RichColor
+from rich.color import ColorType
 from rich.console import Console
 from rich.style import Style
 from textual.app import App, ComposeResult
@@ -277,8 +278,8 @@ def test_fan_gauge_dense_ring_distinguishes_pwm_rpm_and_states() -> None:
     assert 0.85 <= dot_aspect <= 1.15  # 2x4 Braille dots correct typical 1:2 cell aspect.
     assert not any(row in (3, 4, 5) and 3 <= column <= 13 for row, column, _bit, _progress in dots)
     filled_counts: list[int] = []
-    for duty, accent in ((0, "blue"), (20, "blue"), (50, "yellow"),
-                         (80, "#ff8700"), (100, "red")):
+    for duty, accent in ((0, "#3b82f6"), (20, "#3b82f6"), (50, "#facc15"),
+                         (80, "#ff8700"), (100, "#ef4444")):
         rendered = FanGauge._dense_content(1, duty, 1234, "RUNNING")
         lines = rendered.plain.splitlines()
         assert len(lines) == 11 and lines[0] == f"Fan 1 · PWM {duty}%"
@@ -291,7 +292,7 @@ def test_fan_gauge_dense_ring_distinguishes_pwm_rpm_and_states() -> None:
         ]
         assert braille
         filled_counts.append(sum(str(span.style) == accent for span in braille))
-        assert all(str(span.style) in (accent, "bright_black") for span in braille)
+        assert all(str(span.style) in (accent, "#6b7280") for span in braille)
         ring_start = len(lines[0]) + 1
         ring_end = ring_start + sum(len(line) + 1 for line in lines[1:10])
         center = [span for span in rendered.spans if ring_start <= span.start < ring_end
@@ -304,23 +305,23 @@ def test_fan_gauge_dense_ring_distinguishes_pwm_rpm_and_states() -> None:
     unknown = FanGauge._dense_content(1, None, None, "WAITING")
     assert "PWM --" in unknown.plain and "RPM: N/A | WAITING" in unknown.plain
     assert "0%" not in unknown.plain
-    assert any(unknown.plain[span.start:span.end] == "-" and str(span.style) == "bright_black"
+    assert any(unknown.plain[span.start:span.end] == "-" and str(span.style) == "#6b7280"
                for span in unknown.spans)
     stalled = FanGauge._dense_content(1, 100, 0, "STALLED", override=True)
     assert "RPM: 0 RPM | STALLED | OVERRIDE" in stalled.plain
-    assert any(str(span.style) == "red" for span in stalled.spans)
+    assert any(str(span.style) == "#ef4444" for span in stalled.spans)
     no_tach = FanGauge._dense_content(2, 80, None, "NO TACH")
     assert "RPM: N/A | NO TACH" in no_tach.plain
-    assert any(str(span.style) == "yellow" for span in no_tach.spans)
+    assert any(str(span.style) == "#facc15" for span in no_tach.spans)
     stopped = FanGauge._dense_content(2, 0, None, "STOPPED")
     assert "STOPPED" in stopped.plain
-    assert all(str(span.style) != "red" for span in stopped.spans)
+    assert all(str(span.style) != "#ef4444" for span in stopped.spans)
 
 
 def test_fan_gauge_pwm_color_boundaries_and_fallback_consistency(monkeypatch: pytest.MonkeyPatch) -> None:
     for duty, expected in (
-        (0, "blue"), (40, "blue"), (41, "yellow"), (79, "yellow"),
-        (80, "#ff8700"), (89, "#ff8700"), (90, "red"), (100, "red"),
+        (0, "#3b82f6"), (40, "#3b82f6"), (41, "#facc15"), (79, "#facc15"),
+        (80, "#ff8700"), (89, "#ff8700"), (90, "#ef4444"), (100, "#ef4444"),
     ):
         for rendered in (
             FanGauge._dense_content(1, duty, 1234, "RUNNING"),
@@ -334,8 +335,12 @@ def test_fan_gauge_pwm_color_boundaries_and_fallback_consistency(monkeypatch: py
                 and str(span.style) == expected
             ]
             assert styled_pwm, (duty, expected, rendered.plain)
+            assert all(span.style.color is not None
+                       and span.style.color.type == ColorType.TRUECOLOR
+                       and span.style.color.triplet == RichColor.parse(expected).triplet
+                       for span in styled_pwm)
             assert not any(
-                str(span.style) not in (expected, "bright_black", "red")
+                str(span.style) not in (expected, "#6b7280", "#ef4444")
                 for span in rendered.spans
             )
         simple = FanGauge._content(1, duty, 1234, "RUNNING")
@@ -343,20 +348,44 @@ def test_fan_gauge_pwm_color_boundaries_and_fallback_consistency(monkeypatch: py
                    if simple.plain[span.start:span.end] == "●")
 
     for state, duty, expected in (
-        ("STALLED", 20, "red"), ("NO TACH", 100, "yellow"),
-        ("STOPPED", 100, "bright_black"), ("WAITING", None, "bright_black"),
-        ("RUNNING", None, "bright_black"),
+        ("STALLED", 20, "#ef4444"), ("NO TACH", 100, "#facc15"),
+        ("STOPPED", 100, "#6b7280"), ("WAITING", None, "#6b7280"),
+        ("RUNNING", None, "#6b7280"),
     ):
         assert FanGauge._accent(duty, state) == expected
+        for rendered in (FanGauge._dense_content(1, duty, None, state),
+                         FanGauge._content(1, duty, None, state),
+                         FanGauge._compact_content(1, duty, None, state)):
+            assert any(str(span.style) == expected for span in rendered.spans)
+            assert all(span.style.color is not None and span.style.color.type == ColorType.TRUECOLOR
+                       for span in rendered.spans)
+    assert FanGauge._tone("bright_black") == "#6b7280"
+    assert FanGauge._tone("cyan") == "#22d3ee"
+    for rendered in (FanGauge._dense_content(1, 20, None, "RUNNING", override=True),
+                     FanGauge._content(1, 20, None, "RUNNING", override=True),
+                     FanGauge._compact_content(1, 20, None, "RUNNING", override=True)):
+        assert any(("OVERRIDE" in rendered.plain[span.start:span.end]
+                    or "OVR" in rendered.plain[span.start:span.end])
+                   and span.style.color is not None
+                   and span.style.color.triplet == RichColor.parse("#ef4444").triplet
+                   for span in rendered.spans)
     assert FanGauge._dense_content(1, None, None, "RUNNING").plain.startswith("Fan 1 · PWM --")
     assert "0%" not in FanGauge._compact_content(1, None, None, "RUNNING").plain
 
     monkeypatch.setattr(ui_module, "_is_linux_virtual_console", lambda: True)
     assert FanGauge._accent(85, "RUNNING", linux_vt=True) == "yellow"
-    for rendered in (FanGauge._content(1, 85, 1234, "RUNNING"),
-                     FanGauge._compact_content(1, 85, 1234, "RUNNING")):
+    assert FanGauge._accent(20, "RUNNING", linux_vt=True) == "blue"
+    assert FanGauge._accent(100, "RUNNING", linux_vt=True) == "red"
+    assert FanGauge._accent(None, "RUNNING", linux_vt=True) == "bright_black"
+    for rendered in (FanGauge._content(1, 85, 1234, "RUNNING", override=True),
+                     FanGauge._compact_content(1, 85, 1234, "RUNNING", override=True)):
         assert any(str(span.style) == "yellow" for span in rendered.spans)
         assert all(str(span.style) != "#ff8700" for span in rendered.spans)
+        assert all(span.style.color is not None and span.style.color.type == ColorType.STANDARD
+                   for span in rendered.spans)
+        assert any(("OVERRIDE" in rendered.plain[span.start:span.end]
+                    or "OVR" in rendered.plain[span.start:span.end]) and str(span.style) == "red"
+                   for span in rendered.spans)
 
 
 def test_fan_gauge_compact_fallback_keeps_status_visible() -> None:
@@ -423,9 +452,9 @@ def test_fan_control_panel_updates_gauges_and_buttons_without_side_effects() -> 
             assert "Fan 1 · PWM 20%" in one and "Fan 2 · PWM 80%" in two
             assert any("\u2800" <= character <= "\u28ff" for character in one)
             assert one != two
-            assert any("blue" in str(span.style) for span in
+            assert any(str(span.style) == "rgb(59,130,246)" for span in
                        app.query_one("#fan-1-gauge", FanGauge).render().spans)
-            assert any("yellow" in str(span.style) for span in
+            assert any(str(span.style) == "rgb(250,204,21)" for span in
                        app.query_one("#fan-2-gauge", FanGauge).render().spans)
             refreshed = ControlSnapshot(
                 (50, 80),
@@ -443,9 +472,9 @@ def test_fan_control_panel_updates_gauges_and_buttons_without_side_effects() -> 
             assert "RPM: 1500 RPM" in app.query_one("#fan-1-gauge", FanGauge).render().plain
             assert "RPM: 900 RPM" in app.query_one("#fan-2-gauge", FanGauge).render().plain
             assert "STOPPED" in app.query_one("#fan-2-gauge", FanGauge).render().plain
-            assert any("yellow" in str(span.style) for span in
+            assert any(str(span.style) == "rgb(250,204,21)" for span in
                        app.query_one("#fan-1-gauge", FanGauge).render().spans)
-            assert all(str(span.style) != "#ff8700" for span in
+            assert all(str(span.style) != "rgb(255,135,0)" for span in
                        app.query_one("#fan-2-gauge", FanGauge).render().spans)
             power = app.query_one("#power-toggle", Button)
             power.press()
