@@ -723,7 +723,7 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
                 assert color in styles
             sparklines = list(ui.query(Sparkline))
             assert len(sparklines) == 2
-            assert all(sparkline.data == (40,) for sparkline in sparklines)
+            assert all(sparkline.data == () and not sparkline.display for sparkline in sparklines)
             assert all(sparkline.min_color == sparkline.max_color for sparkline in sparklines)
             assert all(sparkline.max_color is not None and sparkline.max_color.hex == "#00FFFF" for sparkline in sparklines)
             failed = replace(
@@ -827,7 +827,7 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
         def compose(self) -> ComposeResult:
             yield FanAppUI("config.toml", lambda: None, 75, 2, graph_view="graph-2")
 
-    gpu = GPUStat("GPU-a", "A100", 1024, 2048, 55, 50, 12)
+    gpu = GPUStat("GPU-a", "A100", 1024, 2048, 5, 50, 12)
     snapshot = _fan_snapshot(
         20, "curve", "AUTO ON", 50, 0,
         (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
@@ -841,15 +841,20 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
             ui.update_snapshot(snapshot, 120)
             await pilot.pause()
             sparkline = ui.query_one(Sparkline)
-            assert sparkline.data == (55,)
-            assert "UTIL 55% · One" in ui.query_one(".graph-two-util-label", Static).render().plain
+            assert sparkline.data == () and not sparkline.display
+            assert "UTIL 5% · One · REL N/A" in ui.query_one(".graph-two-util-label", Static).render().plain
 
             zero = replace(snapshot, endpoint_snapshots=(
                 replace(snapshot.endpoint_snapshots[0], gpus=(replace(gpu, utilization_percent=0),), sample_revision=2),
             ))
             ui.update_snapshot(zero, 121)
             await pilot.pause()
-            assert sparkline.data == (55, 0)
+            assert sparkline.data == (5, 0) and sparkline.display
+            assert "REL 0–5% · 1s" in ui.query_one(".graph-two-util-label", Static).render().plain
+
+            ui.reconfigure_display(75, 2, DashboardColors(utilization="green"), graph_view="graph-2")
+            await pilot.pause()
+            assert sparkline.max_color is not None and sparkline.max_color.hex == "#008000"
 
             stale = replace(zero, endpoint_snapshots=(
                 replace(zero.endpoint_snapshots[0], stale=True, error="offline"),
@@ -857,7 +862,15 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
             ui.update_snapshot(stale, 122)
             await pilot.pause()
             assert sparkline.data == ()
+            assert not sparkline.display
             assert "UTIL N/A · One" in ui.query_one(".graph-two-util-label", Static).render().plain
+
+            sparse = replace(zero, endpoint_snapshots=(
+                replace(zero.endpoint_snapshots[0], sample_revision=3),
+            ))
+            ui.update_snapshot(sparse, 130)
+            await pilot.pause()
+            assert sparkline.data == () and not sparkline.display
 
             ui.graph_view = "graph-1"
             ui.update_snapshot(snapshot, 123)
@@ -868,6 +881,36 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
             await pilot.pause()
             assert len(ui.query(Sparkline)) == 1
             assert ui.query_one("#dashboard-scroll", VerticalScroll).max_scroll_y == 0
+
+    asyncio.run(exercise())
+
+
+def test_graph_two_sparkline_hides_empty_and_single_zero_samples() -> None:
+    class GraphTwoApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FanAppUI("config.toml", lambda: None, 75, 2, graph_view="graph-2")
+
+    zero = GPUStat("GPU-a", "A100", 1024, 2048, 0, 50, 12)
+    empty = _fan_snapshot(
+        20, "curve", "AUTO ON", None, 0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (EndpointSnapshot("one", "One", True, 0, gpus=(), sample_revision=1),),
+    )
+    one_zero = replace(empty, endpoint_snapshots=(
+        replace(empty.endpoint_snapshots[0], gpus=(zero,), sample_revision=2),
+    ))
+    app = GraphTwoApp()
+
+    async def exercise() -> None:
+        async with app.run_test(size=(79, 30)) as pilot:
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(empty, 120)
+            await pilot.pause()
+            sparkline = ui.query_one(Sparkline)
+            assert sparkline.data == () and not sparkline.display
+            ui.update_snapshot(one_zero, 121)
+            await pilot.pause()
+            assert sparkline.data == () and not sparkline.display
 
     asyncio.run(exercise())
 

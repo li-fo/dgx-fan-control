@@ -5,6 +5,7 @@ import sys
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import pairwise
 from math import ceil
 
 from rich.cells import cell_len
@@ -12,6 +13,7 @@ from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
+from textual.color import Color
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.renderables.digits import Digits
@@ -250,6 +252,10 @@ class DashboardHistory:
 
     def endpoint_values(self, endpoint_id: str, metric: str, now: float) -> tuple[float, ...]:
         """Return observed 120-second per-endpoint maxima without fabricating gaps."""
+        return tuple(point.value for point in self.endpoint_samples(endpoint_id, metric, now))
+
+    def endpoint_samples(self, endpoint_id: str, metric: str, now: float) -> tuple[HistoryPoint, ...]:
+        """Return observed 120-second per-endpoint maxima with their sample times."""
         cutoff = now - HISTORY_SECONDS
         values_by_time: dict[float, float] = {}
         for (source, _gpu, source_metric), points in self.points.items():
@@ -259,7 +265,7 @@ class DashboardHistory:
                 if cutoff <= point.at <= now:
                     previous = values_by_time.get(point.at)
                     values_by_time[point.at] = point.value if previous is None else max(previous, point.value)
-        return tuple(values_by_time[at] for at in sorted(values_by_time))
+        return tuple(HistoryPoint(at, values_by_time[at]) for at in sorted(values_by_time))
 
 
 class FanGauge(Static):
@@ -795,14 +801,26 @@ class FanAppUI(Static):
                 _compact_display_text(f"┌ {endpoint.name}", card_width).ljust(card_width, "─"),
                 *metric_rows,
             ], metric_spans))
-            label = self.graph_two_util_labels[endpoint.endpoint_id]
-            label.update(_compact_display_text(f"UTIL {util} · {endpoint.name}", card_width))
             sparkline = self.graph_two_sparklines[endpoint.endpoint_id]
-            sparkline.data = (
-                self.history.endpoint_values(endpoint.endpoint_id, "util", now)
-                if gpus
-                else ()
+            samples = self.history.endpoint_samples(endpoint.endpoint_id, "util", now) if gpus else ()
+            contiguous = len(samples) >= 2 and all(
+                later.at - earlier.at <= self.collection_interval_seconds * 1.5
+                for earlier, later in pairwise(samples)
             )
+            sparkline.display = contiguous
+            sparkline.data = tuple(sample.value for sample in samples) if contiguous else ()
+            sparkline.min_color = self._sparkline_color(self.dashboard_colors.utilization)
+            sparkline.max_color = self._sparkline_color(self.dashboard_colors.utilization)
+            sparkline.refresh()
+            label = self.graph_two_util_labels[endpoint.endpoint_id]
+            if contiguous:
+                minimum = min(sample.value for sample in samples)
+                maximum = max(sample.value for sample in samples)
+                span = samples[-1].at - samples[0].at
+                trend = f"REL {minimum:.0f}–{maximum:.0f}% · {span:.0f}s"
+            else:
+                trend = "REL N/A"
+            label.update(_compact_display_text(f"UTIL {util} · {endpoint.name} · {trend}", card_width))
         rendered = Text()
         height = max((len(card[0]) for card in cards), default=0)
         for row in range(height):
@@ -851,8 +869,8 @@ class FanAppUI(Static):
             label = Static(classes="graph-two-util-label", markup=False)
             sparkline = Sparkline(
                 (),
-                min_color=_rich_color(self.dashboard_colors.utilization),
-                max_color=_rich_color(self.dashboard_colors.utilization),
+                min_color=self._sparkline_color(self.dashboard_colors.utilization),
+                max_color=self._sparkline_color(self.dashboard_colors.utilization),
                 id=f"graph-two-util-{index}",
                 classes="graph-two-util-sparkline",
             )
@@ -879,6 +897,11 @@ class FanAppUI(Static):
         self.graph_two_util_labels.clear()
         self.graph_two_sparklines.clear()
         self.graph_two_endpoint_ids = ()
+
+    @staticmethod
+    def _sparkline_color(color: str | None) -> Color | None:
+        """Use the configured terminal-safe color for the native widget."""
+        return None if color is None else Color.parse(_rich_color(color))
 
     def _large_metric_rows(
         self,
