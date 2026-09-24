@@ -60,6 +60,10 @@ def parse_metrics(endpoint_id: str, name: str, text: str) -> tuple[GPUStat, ...]
                 labels_by_key[raw_key] = labels
     result: list[GPUStat] = []
     for key, item in values.items():
+        # Power augments an otherwise usable DCGM GPU sample; it must not turn
+        # a power-only scrape into a healthy temperature/control sample.
+        if set(item) == {"power_watts"}:
+            continue
         labels = labels_by_key[key]
         used, free, reserved = item.get("memory_used_mib"), item.get("memory_free_mib"), item.get("memory_reserved_mib")
         total = used + free + reserved if used is not None and free is not None and reserved is not None else None

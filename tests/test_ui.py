@@ -709,6 +709,27 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             await pilot.pause()
             text = next(iter(ui.query(".dgx-panel"))).render().plain
             assert "POWER 250 W" in text and "TEMP 120s" in text and "X: overlap" in text
+            failed = replace(
+                snapshot,
+                endpoint_snapshots=(
+                    replace(snapshot.endpoint_snapshots[0], healthy=False, error="offline"),
+                    snapshot.endpoint_snapshots[1],
+                ),
+            )
+            ui.update_snapshot(failed, 121)
+            await pilot.pause()
+            text = next(iter(ui.query(".dgx-panel"))).render().plain
+            assert "TEMP N/A" in text and "POWER N/A" in text
+            zero_total = replace(
+                snapshot,
+                endpoint_snapshots=(
+                    replace(snapshot.endpoint_snapshots[0], gpus=(replace(gpu, memory_total_mib=0),)),
+                    snapshot.endpoint_snapshots[1],
+                ),
+            )
+            ui.update_snapshot(zero_total, 122)
+            await pilot.pause()
+            assert "TEMP 55.0 C  MEM N/A" in next(iter(ui.query(".dgx-panel"))).render().plain
             await pilot.resize_terminal(79, 30)
             await pilot.pause()
             scroll = ui.query_one("#dashboard-scroll", VerticalScroll)

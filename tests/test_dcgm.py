@@ -37,6 +37,31 @@ def test_parse_optional_physical_gpu_power() -> None:
 
 
 @pytest.mark.asyncio
+async def test_power_only_scrape_remains_unusable_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = EndpointConfig("one", "One", "http://example/metrics")
+    collector = DCGMCollector((endpoint,), 1, 5, retry_count=1, retry_delay_seconds=0)
+    calls = 0
+
+    async def power_only(self: httpx.AsyncClient, url: str) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            text='DCGM_FI_DEV_POWER_USAGE{UUID="GPU-a"} 321.5\n',
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", power_only)
+    snapshot = await collector.collect_endpoint(endpoint, 10)
+    assert calls == 1
+    assert not snapshot.healthy
+    assert snapshot.error == "no usable GPU data"
+    assert snapshot.failed_attempts == 1
+
+
+@pytest.mark.asyncio
 async def test_collector_retains_fresh_sample_then_expires(monkeypatch: pytest.MonkeyPatch) -> None:
     endpoint = EndpointConfig("one", "One", "http://example/metrics")
     collector = DCGMCollector((endpoint,), 1, 2)

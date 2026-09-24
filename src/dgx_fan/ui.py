@@ -325,7 +325,7 @@ class FanAppUI(Static):
         self.history = DashboardHistory(collection_interval_seconds)
         self.panels: dict[str, Static] = {}
         self.last_render_time: float | None = None
-        self.last_signature: tuple[tuple[str, int, int, bool, bool, str | None], ...] | None = None
+        self.last_signature: tuple[tuple[object, ...], ...] | None = None
         self.monitor_transport_status: str | None = None
         self._resize_redraw_pending = False
         self._dashboard_layout_signature: tuple[int, int, int, int, int, int] | None = None
@@ -436,6 +436,12 @@ class FanAppUI(Static):
                 endpoint.memory_healthy,
                 endpoint.memory_stale,
                 endpoint.memory_error,
+                # Graph #2 substitutes N/A for stale/failed values, so its
+                # renderer must react even before a new collector revision.
+                endpoint.healthy if self.graph_view == "graph-2" else None,
+                endpoint.stale if self.graph_view == "graph-2" else None,
+                endpoint.error if self.graph_view == "graph-2" else None,
+                endpoint.memory_healthy if self.graph_view == "graph-2" else None,
             )
             for endpoint in snapshot.endpoint_snapshots
         )
@@ -730,7 +736,7 @@ class FanAppUI(Static):
             else:
                 used = sum(gpu.memory_used_mib or 0 for gpu in gpus)
                 total = sum(gpu.memory_total_mib or 0 for gpu in gpus)
-                mem = "N/A" if not gpus or any(gpu.memory_used_mib is None or gpu.memory_total_mib is None for gpu in gpus) else f"{used:.0f}/{total:.0f} MiB"
+                mem = "N/A" if not gpus or total <= 0 or any(gpu.memory_used_mib is None or gpu.memory_total_mib is None for gpu in gpus) else f"{used:.0f}/{total:.0f} MiB"
             power = "N/A" if not gpus or any(value is None for value in powers) else f"{sum(value for value in powers if value is not None):.0f} W"
             util_chart = self.history.endpoint_area(endpoint.endpoint_id, "util", now, max(1, card_width - 7), 100, 2)
             util_box = self._chart_lines("UTIL", util, util_chart)
