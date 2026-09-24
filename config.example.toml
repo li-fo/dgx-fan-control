@@ -25,8 +25,9 @@ url = "http://192.168.1.10:9400/metrics"
 graph_view = "graph-1"
 
 [dashboard.colors]
-# Optional foreground colors for MEM, UTIL, TEMP, and History Power charts. Use a Rich color
-# name or exact #RRGGBB; omit any key to retain the terminal default color.
+# Optional foreground colors for MEM, UTIL, TEMP, and POWER charts. Use a Rich
+# color name or exact #RRGGBB. Omitted MEM/UTIL/TEMP use the terminal default;
+# omitted POWER uses ansi_green. The literal value "default" is not accepted.
 memory = "yellow"
 utilization = "cyan"
 temperature = "red"
@@ -34,23 +35,26 @@ temperature = "red"
 power = "ansi_green"
 
 [web]
-# The browser companion is opt-in and read-only by default. `./scripts/web.sh start` serves the
-# current physical TUI state at this numeric address and port. Keep the
+# The browser companion is opt-in and read-only by default. enabled does not
+# start the renderer; run `./scripts/web.sh start` separately. Keep the
 # loopback default, or explicitly use 0.0.0.0 for a trusted private LAN.
 # Never use the wildcard with router port forwarding or WAN firewall exposure.
 enabled = false
-# WARNING: true lets every browser visitor on this trusted LAN edit settings
-# and turn fans on/off without login. Do not expose this service to the WAN.
+# WARNING: allow_control is separate from enabled. true lets every browser
+# visitor on this trusted LAN edit settings and turn fans on/off without login.
+# Do not expose this service to the WAN.
 allow_control = false
 host = "127.0.0.1"
 port = 8000
 # socket_path = "/absolute/path/to/.dgx-fan-monitor.sock"
 
 [collection]
+# The next request starts after the previous request finishes plus this interval.
 interval_seconds = 2.0
 timeout_seconds = 1.5
 stale_after_seconds = 6.0
-# Extra attempts after the first DCGM request. Only transport errors and HTTP
+# Extra attempts after the first DCGM request; omitted default is 0, while
+# this example deliberately uses 3. Only transport errors and HTTP
 # 408, 429, and 5xx responses retry; stale or exhausted telemetry is fail-safe.
 retry_count = 3
 retry_delay_seconds = 10.0
