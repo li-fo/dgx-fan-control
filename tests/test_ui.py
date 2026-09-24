@@ -154,6 +154,34 @@ def test_graph_two_timed_columns_hold_only_expected_polling_wait() -> None:
     assert time_columns((50,), (121,), 120, 120, collection_interval_seconds=2) == (None,) * 120
 
 
+def test_graph_two_regular_polling_has_no_phase_dependent_internal_blank_columns() -> None:
+    for base in (0.0, 1_700_000_000.125):
+        for interval in (1.0, 2.0):
+            for width in (40, 50, 100, 200):
+                for phase_step in range(8):
+                    phase = phase_step / 8 * interval
+                    times = tuple(base + phase + index * interval
+                                  for index in range(int(120 / interval) + 1))
+                    for age_step in range(8):
+                        now = times[-1] + age_step / 8 * interval
+                        columns = time_columns(
+                            (0,) * len(times), times, now, width,
+                            collection_interval_seconds=interval,
+                        )
+                        first = next(index for index, value in enumerate(columns) if value is not None)
+                        assert columns[first:] == (0,) * (width - first)
+
+
+def test_graph_two_short_hold_does_not_fill_real_outage_or_prehistory() -> None:
+    for width in (40, 50, 100, 200):
+        gap = time_columns((0, 80), (0, 6), 120, width, collection_interval_seconds=2)
+        observed = [index for index, value in enumerate(gap) if value is not None]
+        assert gap[observed[0]] == 0 and gap[observed[-1]] == 80
+        assert None in gap[observed[0]:observed[-1]]
+        recent = time_columns((0,), (119,), 120, width, collection_interval_seconds=2)
+        assert recent[0] is None and recent[-1] == 0
+
+
 def test_graph_two_time_window_advances_without_new_revision() -> None:
     class GraphTwoApp(App[None]):
         def compose(self) -> ComposeResult:
@@ -319,6 +347,21 @@ def test_fan_gauge_dense_ring_distinguishes_pwm_rpm_and_states() -> None:
     stopped = FanGauge._dense_content(2, 0, None, "STOPPED")
     assert "STOPPED" in stopped.plain
     assert all(str(span.style) != "#ef4444" for span in stopped.spans)
+
+
+def test_fan_gauge_dense_digits_share_one_origin_and_clear_ring() -> None:
+    for duty in (0, 9, 10, 99, 100):
+        lines = FanGauge._dense_content(1, duty, 1234, "RUNNING", stage=3).plain.splitlines()
+        digits = FanAppUI._native_digit_lines(str(duty))
+        digit_width = len(digits[0])
+        origin = (FanGauge.DENSE_WIDTH - digit_width - 1) // 2
+        for digit_row, expected in enumerate(digits):
+            actual = lines[1 + (FanGauge.DENSE_HEIGHT - len(digits)) // 2 + digit_row]
+            assert actual[origin:origin + digit_width] == expected
+            assert actual[origin + digit_width] == ("%" if digit_row == 1 else " ")
+            assert "\u2800" not in actual[origin:origin + digit_width + 1]
+    unknown = FanGauge._dense_content(1, None, None, "WAITING").plain.splitlines()
+    assert "--" in unknown[1 + FanGauge.DENSE_HEIGHT // 2]
 
 
 def test_fan_gauge_stage_colors_are_independent_of_pwm_and_match_fallbacks(

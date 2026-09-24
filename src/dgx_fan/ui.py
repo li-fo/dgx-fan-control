@@ -449,14 +449,15 @@ class FanGauge(Static):
         else:
             digit_lines = FanAppUI._native_digit_lines(str(duty_percent))
         digit_start = (cls.DENSE_HEIGHT - len(digit_lines)) // 2
+        digit_width = max(map(len, digit_lines))
+        value_start = (cls.DENSE_WIDTH - digit_width - (duty_percent is not None)) // 2
         for digit_row, line in enumerate(digit_lines):
             row = digit_start + digit_row
             value = line + ("%" if digit_row == 1 and duty_percent is not None else "")
-            start = (cls.DENSE_WIDTH - len(value)) // 2
             for offset, character in enumerate(value):
-                glyphs[row][start + offset] = character
-                filled[row][start + offset] = False
-                center[row][start + offset] = character != " "
+                glyphs[row][value_start + offset] = character
+                filled[row][value_start + offset] = False
+                center[row][value_start + offset] = character != " "
         result = Text(f"Fan {number} · PWM {percentage}\n")
         for row in range(cls.DENSE_HEIGHT):
             for column, glyph in enumerate(glyphs[row]):
