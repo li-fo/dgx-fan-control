@@ -257,7 +257,7 @@ write_display_helpers() {
     openvt_quoted=$(posix_quote "$(target_path /usr/bin/openvt)")
     runuser_quoted=$(posix_quote "$(target_path /usr/sbin/runuser)")
     setfont_quoted=$(posix_quote "$(target_path /usr/bin/setfont)")
-    font_quoted=$(posix_quote "$(target_path /usr/share/consolefonts/Lat15-TerminusBold24x12.psf.gz)")
+    font_quoted=$(posix_quote "$(target_path /usr/share/consolefonts/Lat15-TerminusBold20x10.psf.gz)")
     chvt_quoted=$(posix_quote "$(target_path /usr/bin/chvt)")
     deallocvt_quoted=$(posix_quote "$(target_path /usr/bin/deallocvt)")
     fuser_quoted=$(posix_quote "$(target_path /usr/bin/fuser)")

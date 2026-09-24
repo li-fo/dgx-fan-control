@@ -857,6 +857,12 @@ class FanAppUI(Static):
                 line += segment.text
         return rows[0], rows[1], rows[2]
 
+    @classmethod
+    def _graph_two_digit_lines(cls, value: str) -> tuple[str, str, str, str]:
+        """Make only Graph #2's native digit art taller, never the console font."""
+        top, middle, bottom = cls._native_digit_lines(value)
+        return top, middle, middle, bottom
+
     @staticmethod
     def _numeric_value(value: str) -> str:
         for suffix in (" GiB", " C", " W", "%"):
@@ -880,10 +886,10 @@ class FanAppUI(Static):
     @classmethod
     def _digit_value(cls, value: str) -> tuple[str, tuple[str, ...]]:
         if value == "N/A":
-            blank = ("",) * 3
+            blank = ("",) * 4
             middle = len(blank) // 2
             return value, (*blank[:middle], value, *blank[middle + 1:])
-        lines = list(cls._native_digit_lines(value))
+        lines = list(cls._graph_two_digit_lines(value))
         width = max(len(line) for line in lines)
         return " " * width, tuple(line.ljust(width) for line in lines)
 
