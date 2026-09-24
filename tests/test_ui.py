@@ -842,7 +842,7 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
             await pilot.pause()
             sparkline = ui.query_one(Sparkline)
             assert sparkline.data == () and not sparkline.display
-            assert "UTIL 5% · One · REL N/A" in ui.query_one(".graph-two-util-label", Static).render().plain
+            assert "UTIL 5% · REL N/A · One" in ui.query_one(".graph-two-util-label", Static).render().plain
 
             zero = replace(snapshot, endpoint_snapshots=(
                 replace(snapshot.endpoint_snapshots[0], gpus=(replace(gpu, utilization_percent=0),), sample_revision=2),
@@ -850,7 +850,7 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
             ui.update_snapshot(zero, 121)
             await pilot.pause()
             assert sparkline.data == (5, 0) and sparkline.display
-            assert "REL 0–5% · 1s" in ui.query_one(".graph-two-util-label", Static).render().plain
+            assert "UTIL 0% · REL 0–5% · 1s" in ui.query_one(".graph-two-util-label", Static).render().plain
 
             ui.reconfigure_display(75, 2, DashboardColors(utilization="green"), graph_view="graph-2")
             await pilot.pause()
@@ -863,7 +863,7 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
             await pilot.pause()
             assert sparkline.data == ()
             assert not sparkline.display
-            assert "UTIL N/A · One" in ui.query_one(".graph-two-util-label", Static).render().plain
+            assert "UTIL N/A · REL N/A · One" in ui.query_one(".graph-two-util-label", Static).render().plain
 
             sparse = replace(zero, endpoint_snapshots=(
                 replace(zero.endpoint_snapshots[0], sample_revision=3),
@@ -880,6 +880,43 @@ def test_graph_two_sparkline_updates_zero_stale_and_mode_switch() -> None:
             ui.update_snapshot(snapshot, 124)
             await pilot.pause()
             assert len(ui.query(Sparkline)) == 1
+            assert ui.query_one("#dashboard-scroll", VerticalScroll).max_scroll_y == 0
+
+    asyncio.run(exercise())
+
+
+def test_graph_two_sparkline_relative_summary_survives_long_name_at_79_columns() -> None:
+    class GraphTwoApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FanAppUI("config.toml", lambda: None, 75, 2, graph_view="graph-2")
+
+    name = "DGX-with-an-intentionally-very-long-endpoint-name"
+    first = GPUStat("GPU-a", "A100", 1024, 2048, 5, 50, 12)
+    second = replace(first, utilization_percent=10)
+    snapshot = _fan_snapshot(
+        20, "curve", "AUTO ON", 50, 0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (
+            EndpointSnapshot("one", name, True, 0, gpus=(first,), sample_revision=1),
+            EndpointSnapshot("two", name, True, 0, gpus=(first,), sample_revision=1),
+        ),
+    )
+    updated = replace(snapshot, endpoint_snapshots=(
+        replace(snapshot.endpoint_snapshots[0], gpus=(second,), sample_revision=2),
+        replace(snapshot.endpoint_snapshots[1], gpus=(second,), sample_revision=2),
+    ))
+    app = GraphTwoApp()
+
+    async def exercise() -> None:
+        async with app.run_test(size=(79, 30)) as pilot:
+            ui = app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 120)
+            ui.update_snapshot(updated, 121)
+            await pilot.pause()
+            labels = [label.render().plain for label in ui.query(".graph-two-util-label")]
+            assert len(labels) == 2
+            assert all("UTIL 10% · REL 5–10% · 1s" in label for label in labels)
+            assert all(len(label) <= 39 for label in labels)
             assert ui.query_one("#dashboard-scroll", VerticalScroll).max_scroll_y == 0
 
     asyncio.run(exercise())

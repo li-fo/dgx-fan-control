@@ -820,7 +820,7 @@ class FanAppUI(Static):
                 trend = f"REL {minimum:.0f}–{maximum:.0f}% · {span:.0f}s"
             else:
                 trend = "REL N/A"
-            label.update(_compact_display_text(f"UTIL {util} · {endpoint.name} · {trend}", card_width))
+            label.update(_compact_display_text(f"UTIL {util} · {trend} · {endpoint.name}", card_width))
         rendered = Text()
         height = max((len(card[0]) for card in cards), default=0)
         for row in range(height):
