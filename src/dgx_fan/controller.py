@@ -132,9 +132,11 @@ class FanController:
         if self.config.fan_mode == "linked":
             duties = [max(duties)] * 2
         self._previous_duties = duties
+        displayed_stages = (max(stages),) * 2 if self.config.fan_mode == "linked" else stages
         return self._snapshot(
             (duties[0], duties[1]), "startup boost" if boosting else "temperature curve",
-            "STARTUP BOOST" if boosting else "AUTO ON", maximum, temperatures, fans, endpoints, stages,
+            "STARTUP BOOST" if boosting else "AUTO ON", maximum, temperatures, fans, endpoints,
+            displayed_stages,
         )
 
     @property
@@ -152,9 +154,13 @@ class FanController:
         endpoints: tuple[EndpointSnapshot, ...],
         stages: tuple[int | None, int | None] | None = None,
     ) -> ControlSnapshot:
+        displayed_stages = (
+            (None, None) if state in ("USER OFF", "SAFETY OVERRIDE")
+            else stages if stages is not None else (self._stages[0], self._stages[1])
+        )
         return ControlSnapshot(
             duties, reason, state, maximum,
-            stages if stages is not None else (self._stages[0], self._stages[1]),
+            displayed_stages,
             temperatures, self.config.fan_endpoint_ids, fans, endpoints,
         )
 

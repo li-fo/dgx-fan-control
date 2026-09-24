@@ -332,6 +332,7 @@ class FanGauge(Static):
     def __init__(self, number: int) -> None:
         self.number = number
         self.duty_percent: int | None = None
+        self.stage: int | None = None
         self.rpm: float | None = None
         self.fan_state = "WAITING"
         self.overall_state: str | None = None
@@ -350,30 +351,28 @@ class FanGauge(Static):
     @classmethod
     def _accent(
         cls, duty_percent: int | None, state: str, *, linux_vt: bool = False,
+        stage: int | None = None, overall_state: str | None = None,
     ) -> str:
-        """Keep fault/unknown priorities above normal PWM display bands."""
-        if state == "STALLED":
+        """Color the applied stage, with fault and off states taking priority."""
+        if overall_state == "SAFETY OVERRIDE" or state == "STALLED":
             name = "red"
+        elif overall_state == "USER OFF" or state in ("WAITING", "STOPPED"):
+            name = "bright_black"
         elif state == "NO TACH":
             name = "yellow"
-        elif state in ("WAITING", "STOPPED") or duty_percent is None:
-            name = "bright_black"
         elif state != "RUNNING":
             name = "cyan"
-        elif duty_percent <= 40:
-            name = "blue"
-        elif duty_percent < 80:
-            name = "yellow"
-        elif duty_percent < 90:
-            name = "orange"
+        elif stage in (0, 1, 2, 3):
+            name = ("blue", "yellow", "orange", "red")[stage]
         else:
-            name = "red"
+            name = "bright_black"
         return cls._tone(name, linux_vt=linux_vt)
 
     @classmethod
     def _content(
         cls, number: int, duty_percent: int | None, rpm: float | None, state: str,
-        *, override: bool = False,
+        *, override: bool = False, stage: int | None = None,
+        overall_state: str | None = None,
     ) -> Text:
         """Keep the original simple ring for a real Linux virtual console."""
         percentage = "--" if duty_percent is None else f"{duty_percent}%"
@@ -388,11 +387,12 @@ class FanGauge(Static):
         ring[2][5:10] = list(f"{percentage:^5}")
         rpm_text = "N/A" if rpm is None else f"{rpm:.0f} RPM"
         linux_vt = _is_linux_virtual_console()
-        accent = cls._accent(duty_percent, state, linux_vt=linux_vt)
+        accent = cls._accent(duty_percent, state, linux_vt=linux_vt, stage=stage,
+                             overall_state=overall_state or ("SAFETY OVERRIDE" if override else None))
         track_color = cls._tone("bright_black", linux_vt=linux_vt)
         result = Text(f"Fan {number}\n")
-        for row_index, row in enumerate(ring):
-            for column, glyph in enumerate(row):
+        for row_index, ring_row in enumerate(ring):
+            for column, glyph in enumerate(ring_row):
                 color = (
                     accent if glyph == "●" or (row_index == 2 and 5 <= column < 10 and glyph != " ")
                     else track_color if glyph == "○" else None
@@ -427,12 +427,14 @@ class FanGauge(Static):
     @classmethod
     def _dense_content(
         cls, number: int, duty_percent: int | None, rpm: float | None, state: str,
-        *, override: bool = False,
+        *, override: bool = False, stage: int | None = None,
+        overall_state: str | None = None,
     ) -> Text:
         """A nine-row ring with native digits, retaining separate measured RPM."""
         percentage = "--" if duty_percent is None else f"{duty_percent}%"
         level = None if duty_percent is None else max(0, min(100, duty_percent)) / 100
-        accent = cls._accent(duty_percent, state)
+        accent = cls._accent(duty_percent, state, stage=stage,
+                             overall_state=overall_state or ("SAFETY OVERRIDE" if override else None))
         track_color = cls._tone("bright_black")
         track = [[0] * cls.DENSE_WIDTH for _ in range(cls.DENSE_HEIGHT)]
         filled = [[False] * cls.DENSE_WIDTH for _ in range(cls.DENSE_HEIGHT)]
@@ -471,12 +473,14 @@ class FanGauge(Static):
     @classmethod
     def _compact_content(
         cls, number: int, duty_percent: int | None, rpm: float | None, state: str,
-        *, override: bool = False,
+        *, override: bool = False, stage: int | None = None,
+        overall_state: str | None = None,
     ) -> Text:
         percentage = "--" if duty_percent is None else f"{duty_percent}%"
         rpm_text = "N/A" if rpm is None else f"{rpm:.0f} RPM"
         linux_vt = _is_linux_virtual_console()
-        accent = cls._accent(duty_percent, state, linux_vt=linux_vt)
+        accent = cls._accent(duty_percent, state, linux_vt=linux_vt, stage=stage,
+                             overall_state=overall_state or ("SAFETY OVERRIDE" if override else None))
         result = Text(f"F{number} PWM ")
         result.append(percentage, style=Style(color=accent))
         result.append(f"\nRPM {rpm_text}\n")
@@ -497,7 +501,9 @@ class FanGauge(Static):
             content = self._content
         else:
             content = self._dense_content
-        self.update(content(self.number, self.duty_percent, self.rpm, self.fan_state, override=override))
+        self.update(content(self.number, self.duty_percent, self.rpm, self.fan_state,
+                            override=override, stage=self.stage,
+                            overall_state=self.overall_state))
 
     def on_mount(self) -> None:
         self._refresh_display()
@@ -507,12 +513,13 @@ class FanGauge(Static):
 
     def set_reading(
         self, duty_percent: int | None, rpm: float | None, state: str,
-        overall_state: str | None = None,
+        overall_state: str | None = None, stage: int | None = None,
     ) -> None:
-        reading = (duty_percent, rpm, state, overall_state)
-        if reading == (self.duty_percent, self.rpm, self.fan_state, self.overall_state):
+        reading = (duty_percent, rpm, state, overall_state, stage)
+        if reading == (self.duty_percent, self.rpm, self.fan_state, self.overall_state,
+                       self.stage):
             return
-        self.duty_percent, self.rpm, self.fan_state, self.overall_state = reading
+        self.duty_percent, self.rpm, self.fan_state, self.overall_state, self.stage = reading
         self._refresh_display()
 
 
@@ -720,7 +727,8 @@ class FanAppUI(Static):
             temperature_text = "N/A" if temperature is None else f"{temperature:.1f} C"
             return (
                 f"F{index + 1} {_compact_display_text(snapshot.fan_endpoint_ids[index], 14)} "
-                f"{snapshot.duty_percents[index]}% {temperature_text} S{stage if stage is not None else '-'}"
+                f"{snapshot.duty_percents[index]}% {temperature_text} "
+                f"S{stage + 1 if stage in (0, 1, 2, 3) else '-'}"
             )
 
         self.query_one("#fan-status", Static).update(
@@ -731,6 +739,7 @@ class FanAppUI(Static):
             fan = snapshot.fans[number - 1]
             self.query_one(f"#fan-{number}-gauge", FanGauge).set_reading(
                 snapshot.duty_percents[number - 1], fan.rpm, fan.state, snapshot.state,
+                snapshot.active_stages[number - 1],
             )
 
     def update_monitor_snapshot(

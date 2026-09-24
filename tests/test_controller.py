@@ -46,8 +46,10 @@ def test_linked_mode_uses_higher_capped_mapped_demand_in_both_directions() -> No
     controller = _controller(fan_mode="linked", max_speed_percent=100)
     first_hot = controller.update(_endpoints(40, 71), FANS, 0)
     assert first_hot.state == "AUTO ON" and first_hot.duty_percents == (100, 100)
+    assert first_hot.active_stages == (3, 3) and controller._stages == [0, 3]
     second_hot = controller.update(_endpoints(71, 40), FANS, 1)
     assert second_hot.state == "AUTO ON" and second_hot.duty_percents == (100, 100)
+    assert second_hot.active_stages == (3, 3) and controller._stages == [3, 0]
     assert controller.update(_endpoints(40, 40), FANS, 2).duty_percents == (20, 20)
     controller.reconfigure(replace(controller.config, fan_mode="independent"), controller.hardware)
     assert controller.update(_endpoints(71, 40), FANS, 3).duty_percents == (100, 20)
@@ -56,10 +58,26 @@ def test_linked_mode_uses_higher_capped_mapped_demand_in_both_directions() -> No
 def test_linked_mode_preserves_stages_and_applies_zero_and_normal_cap() -> None:
     controller = _controller(fan_mode="linked", max_speed_percent=25)
     assert controller.update(_endpoints(60, 40), FANS, 0).duty_percents == (25, 25)
-    assert controller.update(_endpoints(54, 40), FANS, 1).active_stages == (2, 0)
+    assert controller.update(_endpoints(54, 40), FANS, 1).active_stages == (2, 2)
+    assert controller._stages == [2, 0]  # Snapshot projection must not change hysteresis.
     control = replace(controller.config, stages=(Stage(45, 0), Stage(55, 0), Stage(70, 0), Stage(None, 100)))
     controller.reconfigure(control, controller.hardware)
     assert controller.update(_endpoints(40, 40), FANS, 2).duty_percents == (0, 0)
+
+
+def test_linked_equal_speeds_and_cap_still_show_highest_selected_stage() -> None:
+    controller = _controller(fan_mode="linked", max_speed_percent=25)
+    controller.reconfigure(replace(controller.config, stages=(
+        Stage(45, 20), Stage(55, 20), Stage(70, 80), Stage(None, 100),
+    )), controller.hardware)
+    equal_speed = controller.update(_endpoints(40, 52), FANS, 0)
+    assert equal_speed.duty_percents == (20, 20)
+    assert equal_speed.active_stages == (1, 1) and controller._stages == [0, 1]
+    capped = controller.update(_endpoints(40, 60), FANS, 1)
+    assert capped.duty_percents == (25, 25)
+    assert capped.active_stages == (2, 2) and controller._stages == [0, 2]
+    hysteresis = controller.update(_endpoints(40, 54), FANS, 2)
+    assert hysteresis.active_stages == (2, 2) and controller._stages == [0, 2]
 
 
 def test_mode_reconfigure_preserves_latches_and_linked_boost_is_shared() -> None:
@@ -70,7 +88,8 @@ def test_mode_reconfigure_preserves_latches_and_linked_boost_is_shared() -> None
     controller.set_power(True)
     snapshot = controller.update(_endpoints(40, 60), FANS, 1)
     assert snapshot.duty_percents == (100, 100)
-    assert snapshot.active_stages == (0, 2)
+    assert snapshot.active_stages == (2, 2)
+    assert controller._stages == [0, 2]
     assert controller._previous_duties == [100, 100]
     assert controller.update(_endpoints(40, 60), FANS, 2).duty_percents == (80, 80)
 
@@ -83,6 +102,27 @@ def test_global_off_and_per_fan_startup_boost() -> None:
     snapshot = controller.update(_endpoints(40, 60), FANS, 1)
     assert snapshot.state == "STARTUP BOOST" and snapshot.duty_percents == (100, 100)
     assert controller.update(_endpoints(40, 60), FANS, 2).duty_percents == (20, 80)
+
+
+def test_off_and_safety_snapshots_hide_preserved_internal_stages() -> None:
+    controller = _controller(fan_mode="linked")
+    normal = controller.update(_endpoints(40, 60), FANS, 0)
+    assert normal.active_stages == (2, 2) and controller._stages == [0, 2]
+
+    controller.set_power(False)
+    off = controller.update(_endpoints(40, 60), FANS, 1)
+    assert off.state == "USER OFF" and off.active_stages == (None, None)
+    assert controller._stages == [0, 2]
+
+    controller.set_power(True)
+    safety = controller.update(_endpoints(40, 80), FANS, 2)
+    assert safety.state == "SAFETY OVERRIDE" and safety.active_stages == (None, None)
+    assert controller._stages == [0, 2]
+    recovery = controller.update(_endpoints(40, 72), FANS, 3)
+    assert recovery.reason == "safety recovery dwell"
+    assert recovery.active_stages == (None, None) and controller._stages == [0, 2]
+    restored = controller.update(_endpoints(40, 60), FANS, 13)
+    assert restored.state == "AUTO ON" and restored.active_stages == (2, 2)
 
 
 def test_configured_fallback_couples_all_immediate_safety_reasons() -> None:

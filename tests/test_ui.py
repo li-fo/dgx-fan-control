@@ -18,6 +18,7 @@ from textual.widgets import Button, Sparkline, Static, TabbedContent
 import dgx_fan.ui as ui_module
 from dgx_fan.app import DGXFanApp
 from dgx_fan.config import DashboardColors, EndpointConfig, load_config
+from dgx_fan.controller import FanController
 from dgx_fan.models import (
     ControlSnapshot,
     EndpointSnapshot,
@@ -26,6 +27,7 @@ from dgx_fan.models import (
     MemoryStat,
     NodeMemorySnapshot,
 )
+from dgx_fan.monitor import MonitorState, decode_state, encode_state
 from dgx_fan.ui import DashboardHistory, FanAppUI, FanGauge, HistoryPoint
 from dgx_fan.ui_sparkline import UtilTimeAxis, _FixedScaleRenderable, time_axis, time_columns
 
@@ -278,9 +280,10 @@ def test_fan_gauge_dense_ring_distinguishes_pwm_rpm_and_states() -> None:
     assert 0.85 <= dot_aspect <= 1.15  # 2x4 Braille dots correct typical 1:2 cell aspect.
     assert not any(row in (3, 4, 5) and 3 <= column <= 13 for row, column, _bit, _progress in dots)
     filled_counts: list[int] = []
-    for duty, accent in ((0, "#3b82f6"), (20, "#3b82f6"), (50, "#facc15"),
-                         (80, "#ff8700"), (100, "#ef4444")):
-        rendered = FanGauge._dense_content(1, duty, 1234, "RUNNING")
+    for duty, stage, accent in ((0, 0, "#3b82f6"), (20, 0, "#3b82f6"),
+                               (50, 1, "#facc15"), (80, 2, "#ff8700"),
+                               (100, 3, "#ef4444")):
+        rendered = FanGauge._dense_content(1, duty, 1234, "RUNNING", stage=stage)
         lines = rendered.plain.splitlines()
         assert len(lines) == 11 and lines[0] == f"Fan 1 · PWM {duty}%"
         assert all(cell_len(line) == FanGauge.DENSE_WIDTH for line in lines[1:10])
@@ -318,15 +321,17 @@ def test_fan_gauge_dense_ring_distinguishes_pwm_rpm_and_states() -> None:
     assert all(str(span.style) != "#ef4444" for span in stopped.spans)
 
 
-def test_fan_gauge_pwm_color_boundaries_and_fallback_consistency(monkeypatch: pytest.MonkeyPatch) -> None:
-    for duty, expected in (
-        (0, "#3b82f6"), (40, "#3b82f6"), (41, "#facc15"), (79, "#facc15"),
-        (80, "#ff8700"), (89, "#ff8700"), (90, "#ef4444"), (100, "#ef4444"),
+def test_fan_gauge_stage_colors_are_independent_of_pwm_and_match_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for stage, duty, expected in (
+        (0, 100, "#3b82f6"), (1, 20, "#facc15"),
+        (2, 20, "#ff8700"), (3, 20, "#ef4444"),
     ):
         for rendered in (
-            FanGauge._dense_content(1, duty, 1234, "RUNNING"),
-            FanGauge._content(1, duty, 1234, "RUNNING"),
-            FanGauge._compact_content(1, duty, 1234, "RUNNING"),
+            FanGauge._dense_content(1, duty, 1234, "RUNNING", stage=stage),
+            FanGauge._content(1, duty, 1234, "RUNNING", stage=stage),
+            FanGauge._compact_content(1, duty, 1234, "RUNNING", stage=stage),
         ):
             styled_pwm = [
                 span for span in rendered.spans
@@ -343,7 +348,7 @@ def test_fan_gauge_pwm_color_boundaries_and_fallback_consistency(monkeypatch: py
                 str(span.style) not in (expected, "#6b7280", "#ef4444")
                 for span in rendered.spans
             )
-        simple = FanGauge._content(1, duty, 1234, "RUNNING")
+        simple = FanGauge._content(1, duty, 1234, "RUNNING", stage=stage)
         assert all(str(span.style) == expected for span in simple.spans
                    if simple.plain[span.start:span.end] == "●")
 
@@ -361,6 +366,10 @@ def test_fan_gauge_pwm_color_boundaries_and_fallback_consistency(monkeypatch: py
                        for span in rendered.spans)
     assert FanGauge._tone("bright_black") == "#6b7280"
     assert FanGauge._tone("cyan") == "#22d3ee"
+    assert FanGauge._accent(100, "RUNNING", stage=None) == "#6b7280"
+    assert FanGauge._accent(100, "RUNNING", stage=4) == "#6b7280"
+    assert FanGauge._accent(100, "RUNNING", stage=3, overall_state="USER OFF") == "#6b7280"
+    assert FanGauge._accent(20, "RUNNING", stage=0, overall_state="SAFETY OVERRIDE") == "#ef4444"
     for rendered in (FanGauge._dense_content(1, 20, None, "RUNNING", override=True),
                      FanGauge._content(1, 20, None, "RUNNING", override=True),
                      FanGauge._compact_content(1, 20, None, "RUNNING", override=True)):
@@ -373,19 +382,18 @@ def test_fan_gauge_pwm_color_boundaries_and_fallback_consistency(monkeypatch: py
     assert "0%" not in FanGauge._compact_content(1, None, None, "RUNNING").plain
 
     monkeypatch.setattr(ui_module, "_is_linux_virtual_console", lambda: True)
-    assert FanGauge._accent(85, "RUNNING", linux_vt=True) == "yellow"
-    assert FanGauge._accent(20, "RUNNING", linux_vt=True) == "blue"
-    assert FanGauge._accent(100, "RUNNING", linux_vt=True) == "red"
+    assert FanGauge._accent(85, "RUNNING", linux_vt=True, stage=2) == "yellow"
+    assert FanGauge._accent(20, "RUNNING", linux_vt=True, stage=0) == "blue"
+    assert FanGauge._accent(100, "RUNNING", linux_vt=True, stage=3) == "red"
     assert FanGauge._accent(None, "RUNNING", linux_vt=True) == "bright_black"
-    for rendered in (FanGauge._content(1, 85, 1234, "RUNNING", override=True),
-                     FanGauge._compact_content(1, 85, 1234, "RUNNING", override=True)):
+    for rendered in (FanGauge._content(1, 85, 1234, "RUNNING", stage=2),
+                     FanGauge._compact_content(1, 85, 1234, "RUNNING", stage=2)):
         assert any(str(span.style) == "yellow" for span in rendered.spans)
         assert all(str(span.style) != "#ff8700" for span in rendered.spans)
         assert all(span.style.color is not None and span.style.color.type == ColorType.STANDARD
                    for span in rendered.spans)
-        assert any(("OVERRIDE" in rendered.plain[span.start:span.end]
-                    or "OVR" in rendered.plain[span.start:span.end]) and str(span.style) == "red"
-                   for span in rendered.spans)
+    assert any(str(span.style) == "red" for span in
+               FanGauge._content(1, 85, 1234, "RUNNING", override=True, stage=2).spans)
 
 
 def test_fan_gauge_compact_fallback_keeps_status_visible() -> None:
@@ -442,8 +450,8 @@ def test_fan_control_panel_updates_gauges_and_buttons_without_side_effects() -> 
             two = app.query_one("#fan-2-gauge", FanGauge).render().plain
             assert status.splitlines() == [
                 "Fan Status / Control · AUTO ON",
-                "F1 dgx-1 20% 40.0 C S0",
-                "F2 dgx-2 80% 63.0 C S2",
+                "F1 dgx-1 20% 40.0 C S1",
+                "F2 dgx-2 80% 63.0 C S3",
             ]
             assert not any(glyph in status for glyph in "┌┐└┘│")
             assert "F1 dgx-1 20%" in status and "F2 dgx-2 80%" in status
@@ -456,6 +464,16 @@ def test_fan_control_panel_updates_gauges_and_buttons_without_side_effects() -> 
                        app.query_one("#fan-1-gauge", FanGauge).render().spans)
             assert any(str(span.style) == "rgb(250,204,21)" for span in
                        app.query_one("#fan-2-gauge", FanGauge).render().spans)
+            stage_only = replace(snapshot, active_stages=(3, 2))
+            ui.update_snapshot(stage_only, 1.5)
+            assert app.query_one("#fan-1-gauge", FanGauge).stage == 3
+            assert any(str(span.style) == "rgb(239,68,68)" for span in
+                       app.query_one("#fan-1-gauge", FanGauge).render().spans)
+            ui.update_snapshot(replace(stage_only, state="USER OFF"), 1.6)
+            off_gauge = app.query_one("#fan-1-gauge", FanGauge).render()
+            assert "RUNNING" in off_gauge.plain
+            assert all(str(span.style) != "rgb(239,68,68)" for span in off_gauge.spans)
+            assert any(str(span.style) == "rgb(107,114,128)" for span in off_gauge.spans)
             refreshed = ControlSnapshot(
                 (50, 80),
                 "curve",
@@ -507,6 +525,59 @@ def test_fan_control_panel_updates_gauges_and_buttons_without_side_effects() -> 
             power.press()
             await pilot.pause()
             assert calls == ["toggle", "toggle"]
+
+    asyncio.run(exercise())
+
+
+def test_linked_controller_stage_survives_monitor_codec_and_mounted_ui() -> None:
+    config = load_config(Path("config.example.toml"))
+    control = replace(config.control, fan_endpoint_ids=("one", "two"), fan_mode="linked")
+    controller = FanController(control, config.hardware)
+    endpoints = (
+        EndpointSnapshot("one", "One", True, 0, gpus=(GPUStat("gpu-1", "GPU 1", temperature_celsius=40),)),
+        EndpointSnapshot("two", "Two", True, 0, gpus=(GPUStat("gpu-2", "GPU 2", temperature_celsius=60),)),
+    )
+    fans = (FanReading(1000, "RUNNING"), FanReading(1000, "RUNNING"))
+    snapshot = controller.update(endpoints, fans, 0)
+    assert snapshot.active_stages == (2, 2)
+    assert controller._stages == [0, 2]
+    decoded = decode_state(encode_state(MonitorState(
+        "source", 1, 0, snapshot, DashboardHistory(2),
+    )), 2)
+    assert decoded.snapshot is not None and decoded.snapshot.active_stages == (2, 2)
+
+    class FanPanelApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FanAppUI("config.toml", lambda: None, 75, 2)
+
+    async def exercise() -> None:
+        app = FanPanelApp()
+        async with app.run_test(size=(100, 30)) as pilot:
+            app.query_one(TabbedContent).active = "fan-control"
+            app.query_one(FanAppUI).update_snapshot(decoded.snapshot, 0)
+            await pilot.pause()
+            assert " S3" in app.query_one("#fan-status", Static).render().plain
+            for gauge in app.query(FanGauge):
+                assert gauge.stage == 2
+                assert any(str(span.style) == "rgb(255,135,0)" for span in gauge.render().spans)
+            controller.set_power(False)
+            off = controller.update(endpoints, fans, 1)
+            assert off.active_stages == (None, None)
+            app.query_one(FanAppUI).update_snapshot(off, 1)
+            await pilot.pause()
+            assert app.query_one("#fan-status", Static).render().plain.count(" S-") == 2
+            assert all(gauge.stage is None for gauge in app.query(FanGauge))
+
+            controller.set_power(True)
+            hot = (endpoints[0], replace(endpoints[1], gpus=(
+                replace(endpoints[1].gpus[0], temperature_celsius=80),
+            )))
+            safety = controller.update(hot, fans, 2)
+            assert safety.state == "SAFETY OVERRIDE" and safety.active_stages == (None, None)
+            app.query_one(FanAppUI).update_snapshot(safety, 2)
+            await pilot.pause()
+            assert app.query_one("#fan-status", Static).render().plain.count(" S-") == 2
+            assert all(gauge.stage is None for gauge in app.query(FanGauge))
 
     asyncio.run(exercise())
 

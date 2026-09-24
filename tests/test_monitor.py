@@ -52,7 +52,11 @@ def test_monitor_state_round_trip_preserves_chart_history() -> None:
     assert decoded.snapshot is not None and decoded.history is not None
     assert decoded.snapshot.duty_percents == (20, 40)
     assert decoded.snapshot.endpoint_snapshots[0].gpus[0].temperature_celsius == 55
-    assert decoded.history.last_seen == {("dgx-1", "gpu-0"): 100.0}
+    # The existing DCGM weighted-memory aggregate is retained alongside the GPU.
+    assert decoded.history.last_seen == {
+        ("dgx-1", "gpu-0"): 100.0,
+        ("dgx-1", "__weighted__"): 100.0,
+    }
     assert decoded.history.area("dgx-1", "gpu-0", "mem", 100, 8, 100)
 
 
