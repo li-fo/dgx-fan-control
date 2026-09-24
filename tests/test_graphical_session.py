@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import runpy
 import signal
 import socket
 import subprocess
@@ -11,6 +12,22 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/graphical_session.py"
+
+
+def test_generated_lxterminal_config_hides_chrome_and_keeps_font(tmp_path: Path) -> None:
+    write_config = runpy.run_path(str(SCRIPT))["_write_config"]
+
+    labwc_dir = write_config(tmp_path)
+
+    terminal_config = tmp_path / "xdg/lxterminal/lxterminal.conf"
+    assert labwc_dir == tmp_path / "labwc"
+    assert terminal_config.read_text().splitlines() == [
+        "[general]",
+        "fontname=DejaVu Sans Mono 12",
+        "scrollback=0",
+        "hidemenubar=true",
+        "hidescrollbar=true",
+    ]
 
 
 def _fixture(

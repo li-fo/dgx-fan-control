@@ -916,6 +916,8 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
             assert scroll.max_scroll_y == 0
             assert all(axis.region.bottom <= scroll.region.bottom for axis in axes)
+            metric_row = ui.query_one("#graph-two-metric-row")
+            assert 0 <= scroll.region.bottom - metric_row.region.bottom < 4
             width = util_lines[0].size.width
             for values, expected in (
                 ((), [" " * width] * 2),
@@ -989,6 +991,7 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
             assert scroll.display and scroll.max_scroll_y == 0
             assert all(sparkline.size.height == 1 for sparkline in sparklines)
+            assert 0 <= scroll.region.bottom - metric_row.region.bottom < 4
             assert all(axis.size.height == 1 and axis.region.bottom <= scroll.region.bottom
                        for axis in axes)
             assert all(axis.size.width == sparkline.size.width for axis, sparkline in
@@ -999,8 +1002,24 @@ def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
             scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
             assert scroll.display and scroll.max_scroll_y == 0
             assert all(sparkline.size.height == 2 for sparkline in sparklines)
+            assert 0 <= scroll.region.bottom - metric_row.region.bottom < 4
             assert all(axis.size.height == 1 and axis.region.bottom <= scroll.region.bottom
                        for axis in axes)
+            await pilot.resize_terminal(102, 46)
+            await pilot.pause()
+            scroll = ui.query_one("#dashboard-scroll", VerticalScroll)
+            assert scroll.max_scroll_y == 0
+            tall_height = sparklines[0].size.height
+            assert tall_height > 4
+            assert all(sparkline.size.height == tall_height for sparkline in sparklines)
+            assert 0 <= scroll.region.bottom - metric_row.region.bottom < 4
+            await pilot.pause()
+            assert all(sparkline.size.height == tall_height for sparkline in sparklines)
+            assert scroll.max_scroll_y == 0
+            await pilot.resize_terminal(102, 30)
+            await pilot.pause()
+            assert all(sparkline.size.height == 2 for sparkline in sparklines)
+            assert ui.query_one("#dashboard-scroll", VerticalScroll).max_scroll_y == 0
             high = GPUStat(
                 "GPU-high",
                 "A100",

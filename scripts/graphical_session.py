@@ -38,7 +38,8 @@ def _write_config(directory: Path) -> Path:
         encoding="utf-8",
     )
     (lxterminal / "lxterminal.conf").write_text(
-        "[general]\nfontname=DejaVu Sans Mono 12\nscrollback=0\n",
+        "[general]\nfontname=DejaVu Sans Mono 12\nscrollback=0\n"
+        "hidemenubar=true\nhidescrollbar=true\n",
         encoding="utf-8",
     )
     return labwc

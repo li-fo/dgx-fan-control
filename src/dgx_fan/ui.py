@@ -917,7 +917,10 @@ class FanAppUI(Static):
             if row < height - 1:
                 rendered.append("\n")
         panel.update(rendered)
-        plot_height = max(1, min(4, (self.screen.size.height - 21) // 4))
+        # The summary is already rendered above the four label/plot/axis cards.
+        # Allocate the remaining dashboard viewport evenly to their plots.
+        viewport_height = scroll.scrollable_content_region.height
+        plot_height = max(1, (viewport_height - height - 4 * 2) // 4)
         metric_height = plot_height + 2
         row_height = 4 * metric_height
         assert self.graph_two_metric_row is not None
