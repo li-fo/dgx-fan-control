@@ -1,4 +1,4 @@
-"""A zero-to-one-hundred-percent Sparkline for Graph #2 utilization."""
+"""A fixed-range Sparkline for Graph #2 dashboard metrics."""
 
 from __future__ import annotations
 
@@ -79,10 +79,11 @@ def time_axis(width: int) -> str:
 
 
 class _FixedScaleRenderable(SparklineRenderable[float]):
-    """Use native Sparkline buckets and glyphs with absolute percentage bounds."""
+    """Use native Sparkline buckets and glyphs with configured display bounds."""
 
     columns: Sequence[float | None] | None = None
     background_color: RichColor | None = None
+    minimum: float = 0.0
     maximum: float = 100.0
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> Iterator[Segment]:
@@ -113,7 +114,7 @@ class _FixedScaleRenderable(SparklineRenderable[float]):
                 if value is None:
                     yield Segment(" ")
                     continue
-                ratio = max(0.0, min(1.0, value / self.maximum))
+                ratio = max(0.0, min(1.0, (value - self.minimum) / (self.maximum - self.minimum)))
                 level = int(ratio * max_level)
                 if level < row * bar_levels:
                     yield Segment(" ")
@@ -127,11 +128,12 @@ class _FixedScaleRenderable(SparklineRenderable[float]):
 
 
 class FixedScaleSparkline(Sparkline):
-    """Textual Sparkline with a fixed 0–100% scale and blank absent data."""
+    """Textual Sparkline with fixed display bounds and blank absent data."""
 
     sample_times: tuple[float, ...] = ()
     window_end: float = 0.0
     collection_interval_seconds: float = 0.0
+    minimum: float = 0.0
     maximum: float = 100.0
 
     def render(self) -> RenderResult:
@@ -157,6 +159,7 @@ class FixedScaleSparkline(Sparkline):
             collection_interval_seconds=self.collection_interval_seconds,
         )
         renderable.background_color = base.rich_color
+        renderable.minimum = self.minimum
         renderable.maximum = self.maximum
         return renderable
 

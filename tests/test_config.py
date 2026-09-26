@@ -2,7 +2,14 @@ from pathlib import Path
 
 import pytest
 
-from dgx_fan.config import ConfigError, DashboardColors, load_config, resolve_config_path
+from dgx_fan.config import (
+    ConfigError,
+    DashboardColors,
+    DashboardRanges,
+    MetricRange,
+    load_config,
+    resolve_config_path,
+)
 
 
 def _config() -> str:
@@ -77,6 +84,65 @@ def test_load_valid_config(tmp_path: Path) -> None:
     assert config.web.allow_control is False
     assert config.web.socket_path == (path.parent / ".dgx-fan-monitor.sock").resolve()
     assert config.graph_view == "graph-1"
+    assert config.dashboard_ranges == DashboardRanges()
+
+
+def test_dashboard_ranges_partial_and_all_metrics(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config() + "\n[dashboard.ranges.power]\nmin = 0\nmax = 120\n")
+    ranges = load_config(path).dashboard_ranges
+    assert ranges.power == MetricRange(0, 120)
+    assert ranges.for_metric("temp", 150) == MetricRange(0, 150)
+    assert ranges.for_metric("mem", 150) == MetricRange(0, 100)
+    path.write_text(_config() + """
+[dashboard.ranges.utilization]
+min = 20
+max = 80
+[dashboard.ranges.memory]
+min = 10
+max = 90
+[dashboard.ranges.temperature]
+min = -20.5
+max = 80.25
+[dashboard.ranges.power]
+min = 20
+max = 120
+""")
+    ranges = load_config(path).dashboard_ranges
+    assert ranges == DashboardRanges(
+        MetricRange(20, 80), MetricRange(10, 90),
+        MetricRange(-20.5, 80.25), MetricRange(20, 120),
+    )
+    assert ranges.for_metric("temp", 150) == MetricRange(-20.5, 80.25)
+
+
+@pytest.mark.parametrize("section", [
+    "[dashboard.ranges.other]\nmin = 0\nmax = 1",
+    "[dashboard.ranges.power]\nmin = 0\nmax = 120\nother = 1",
+    "[dashboard.ranges.power]\nmin = 0",
+    "[dashboard.ranges.power]\nmin = true\nmax = 120",
+    "[dashboard.ranges.power]\nmin = 0\nmax = nan",
+    "[dashboard.ranges.power]\nmin = 0\nmax = 0",
+    "[dashboard.ranges.power]\nmin = 120\nmax = 0",
+    "[dashboard.ranges.temperature]\nmin = -1e308\nmax = 1e308",
+    "[dashboard.ranges.memory]\nmin = -1\nmax = 50",
+    "[dashboard.ranges.utilization]\nmin = 0\nmax = 101",
+    "[dashboard.ranges.power]\nmin = -1\nmax = 120",
+])
+def test_dashboard_ranges_reject_invalid_values(tmp_path: Path, section: str) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config() + "\n" + section + "\n")
+    with pytest.raises(ConfigError, match="dashboard.ranges"):
+        load_config(path)
+
+
+def test_dashboard_ranges_excessively_long_integer_is_config_error(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        _config() + "\n[dashboard.ranges.power]\nmin = " + "9" * 4301 + "\nmax = 120\n"
+    )
+    with pytest.raises(ConfigError, match="invalid numeric value"):
+        load_config(path)
 
 
 @pytest.mark.parametrize("view", ["graph-0", "Graph-2", 2, ["graph-2"]])

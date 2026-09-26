@@ -2,7 +2,7 @@
 
 [한국어 README](../README.md) · [English configuration guide](configuration.en.md) · [사용 안내](usage.md) · [Raspberry Pi 배선 안내](raspberry-pi-wiring.md)
 
-`config.example.toml`을 `config.toml`로 복사한 뒤 실제 DGX 주소와 배선에 맞게 수정하세요. 설정은 schema v2이며 잘못된 설정값은 거부됩니다. 알 수 없는 키를 명시적으로 거부하는 표는 `[dashboard]`, `[dashboard.colors]`, `[web]`이며 다른 표의 추가 키에는 같은 규칙이 일괄 적용되지 않습니다. 아래의 **기본값**은 키를 생략했을 때의 동작이고, 예제 파일에 적힌 값과 다를 수 있습니다. 앱은 `--config`, `DGX_FAN_CONFIG`, 현재 디렉터리의 `config.toml` 순서로 파일을 찾습니다.
+`config.example.toml`을 `config.toml`로 복사한 뒤 실제 DGX 주소와 배선에 맞게 수정하세요. 설정은 schema v2이며 잘못된 설정값은 거부됩니다. 알 수 없는 키를 명시적으로 거부하는 표는 `[dashboard]`, `[dashboard.colors]`, `[dashboard.ranges]`, 각 `[dashboard.ranges.<metric>]`, `[web]`이며 다른 표의 추가 키에는 같은 규칙이 일괄 적용되지 않습니다. 아래의 **기본값**은 키를 생략했을 때의 동작이고, 예제 파일에 적힌 값과 다를 수 있습니다. 앱은 `--config`, `DGX_FAN_CONFIG`, 현재 디렉터리의 `config.toml` 순서로 파일을 찾습니다.
 
 ```bash
 cp config.example.toml config.toml
@@ -18,8 +18,17 @@ cp config.example.toml config.toml
 | `dgx.node_exporter_url` | `memory_source = "node-exporter"`일 때 필수 `http(s)` 주소입니다. `"dcgm"`에는 지정할 수 없습니다. 메모리 표시용이며 GPU 온도·사용률과 팬 제어에는 계속 DCGM이 필요합니다. |
 | `dashboard.graph_view` | 생략 시 `"graph-1"`; `"graph-2"`는 두 DGX 열의 compact 화면입니다. Setting → UI에서도 선택할 수 있습니다. |
 | `dashboard.colors.memory`, `utilization`, `temperature`, `power` | 선택 전경색입니다. Rich 색 이름 또는 정확한 `#RRGGBB`를 사용합니다. 키를 생략하면 MEM·UTIL·TEMP는 터미널 기본색, POWER는 `ansi_green`입니다. 문자열 `"default"`는 유효한 설정값이 아닙니다. |
+| `dashboard.ranges.utilization`, `memory`, `temperature`, `power` | 선택적인 Graph #2 표시 범위입니다. 각 표에 유한한 숫자 `min`과 `max`를 모두 넣고 `min < max`로 설정하세요. UTIL·MEM은 0–100% 안, POWER의 최솟값은 0 이상이며 TEMP는 음수도 허용합니다. 알 수 없는 범위 이름·키와 무한대가 되는 폭은 거부됩니다. |
 
-Graph #2 요약과 차트는 **UTIL, MEM, TEMP, POWER** 순서입니다. 각 차트의 시간축은 최근 120초이며, UTIL·MEM은 0–100%, TEMP는 0–100°C 또는 더 높은 비상 온도까지, POWER는 0–240W를 표시합니다. 밝기는 값에 따라 다섯 단계이고 높이는 실제 값에 따라 변합니다. 이전 관측값은 수집 간격의 최대 1.5배까지만 잠깐 표시하며, 더 긴 공백과 실제 0은 구별됩니다. POWER는 모든 physical GPU의 DCGM power 값이 유효할 때만 합계를 표시합니다. 설정한 `graph_view`와 색상은 웹 화면에도 전달됩니다.
+Graph #2 요약과 차트는 **UTIL, MEM, TEMP, POWER** 순서입니다. 각 차트의 시간축은 최근 120초이며, 기본 표시 범위는 UTIL·MEM 0–100%, TEMP 0–100°C 또는 더 높은 비상 온도까지, POWER 0–240W입니다. 밝기는 값에 따라 다섯 단계이고 높이는 실제 값에 따라 변합니다. 이전 관측값은 수집 간격의 최대 1.5배까지만 잠깐 표시하며, 더 긴 공백과 실제 0은 구별됩니다. POWER는 모든 physical GPU의 DCGM power 값이 유효할 때만 합계를 표시합니다. 설정한 `graph_view`와 색상은 웹 화면에도 전달됩니다.
+
+범위를 생략하면 위 기본값을 사용합니다. 예를 들어 POWER 차트를 0–120W로 확대하려면 아래 내용을 `config.toml`에 추가하세요. MEM 차트의 범위와 현재값은 계속 **퍼센트**이고, 위쪽 메모리 요약은 GiB입니다. 범위는 두 DGX와 웹 Graph #2에 동일하게 적용되며 Graph #1·History·팬 제어·저장값은 바꾸지 않습니다. 높이와 다섯 단계 밝기는 `(값 - min) / (max - min)`의 20% 구간을 기준으로 하며 화면만 범위 안으로 제한합니다. 레이블의 실제 관측값은 잘라내지 않습니다. 파일 변경 후 primary controller와 웹 renderer를 다시 시작하세요. Setting 화면에는 범위 편집기가 없지만 다른 설정을 저장해도 이 표는 유지됩니다.
+
+```toml
+[dashboard.ranges.power]
+min = 0
+max = 120
+```
 
 Colors 편집기는 Default와 표준 ANSI 색을 제공합니다. 기존의 유효한 custom 이름이나 `#RRGGBB`는 명시적으로 바꾸기 전까지 유지됩니다. 실제 HDMI의 글꼴·색은 화면에서 확인하세요.
 

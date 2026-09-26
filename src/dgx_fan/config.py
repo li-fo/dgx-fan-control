@@ -75,6 +75,35 @@ class DashboardColors:
 
 
 @dataclass(frozen=True)
+class MetricRange:
+    minimum: float
+    maximum: float
+
+
+@dataclass(frozen=True)
+class DashboardRanges:
+    """Optional Graph #2 display overrides; omitted metrics keep source defaults."""
+
+    utilization: MetricRange | None = None
+    memory: MetricRange | None = None
+    temperature: MetricRange | None = None
+    power: MetricRange | None = None
+
+    def for_metric(self, metric: str, emergency_temperature: float) -> MetricRange:
+        overrides = {
+            "util": self.utilization,
+            "mem": self.memory,
+            "temp": self.temperature,
+            "power": self.power,
+        }
+        configured = overrides[metric]
+        if configured is not None:
+            return configured
+        maximum = max(100.0, emergency_temperature) if metric == "temp" else (240.0 if metric == "power" else 100.0)
+        return MetricRange(0.0, maximum)
+
+
+@dataclass(frozen=True)
 class WebConfig:
     """Optional browser monitor transport settings for loopback or a trusted LAN."""
 
@@ -95,6 +124,7 @@ class AppConfig:
     dashboard_colors: DashboardColors = field(default_factory=DashboardColors)
     graph_view: str = "graph-1"
     web: WebConfig = field(default_factory=WebConfig)
+    dashboard_ranges: DashboardRanges = field(default_factory=DashboardRanges)
 
 
 def resolve_config_path(explicit: str | None) -> Path:
@@ -158,23 +188,60 @@ def _dashboard_color(value: object, name: str) -> str:
     return normalized
 
 
-def _dashboard_settings(raw: dict[str, object]) -> tuple[DashboardColors, str]:
+def parse_dashboard_ranges(value: object, name: str = "dashboard.ranges") -> DashboardRanges:
+    """Validate optional absolute display bounds for config and monitor frames."""
+    ranges = _mapping(value, name)
+    allowed = {"utilization", "memory", "temperature", "power"}
+    _reject_unknown_keys(ranges, name, allowed)
+    parsed: dict[str, MetricRange] = {}
+    for metric, raw_bounds in ranges.items():
+        field = f"{name}.{metric}"
+        bounds = _mapping(raw_bounds, field)
+        _reject_unknown_keys(bounds, field, {"min", "max"})
+        if set(bounds) != {"min", "max"}:
+            raise ConfigError(f"{field} requires min and max")
+        numbers: list[float] = []
+        for bound in ("min", "max"):
+            raw_number = bounds[bound]
+            if not isinstance(raw_number, (int, float)) or isinstance(raw_number, bool):
+                raise ConfigError(f"{field}.{bound} must be a finite number")
+            try:
+                number = float(raw_number)
+            except OverflowError as error:
+                raise ConfigError(f"{field}.{bound} must be a finite number") from error
+            if not isfinite(number):
+                raise ConfigError(f"{field}.{bound} must be a finite number")
+            numbers.append(number)
+        minimum, maximum = numbers
+        if not isfinite(maximum - minimum) or minimum >= maximum:
+            raise ConfigError(f"{field} requires a finite positive span")
+        if metric in {"utilization", "memory"} and (minimum < 0 or maximum > 100):
+            raise ConfigError(f"{field} must stay within 0..100 percent")
+        if metric == "power" and minimum < 0:
+            raise ConfigError(f"{field}.min must be >= 0")
+        parsed[metric] = MetricRange(minimum, maximum)
+    return DashboardRanges(**parsed)
+
+
+def _dashboard_settings(raw: dict[str, object]) -> tuple[DashboardColors, str, DashboardRanges]:
     dashboard_raw = raw.get("dashboard")
     if dashboard_raw is None:
-        return DashboardColors(), "graph-1"
+        return DashboardColors(), "graph-1", DashboardRanges()
     dashboard = _mapping(dashboard_raw, "dashboard")
-    _reject_unknown_keys(dashboard, "dashboard", {"colors", "graph_view"})
+    _reject_unknown_keys(dashboard, "dashboard", {"colors", "graph_view", "ranges"})
     graph_view = dashboard.get("graph_view", "graph-1")
     if not isinstance(graph_view, str) or graph_view not in {"graph-1", "graph-2"}:
         raise ConfigError("dashboard.graph_view must be graph-1 or graph-2")
+    ranges_raw = dashboard.get("ranges")
+    metric_ranges = DashboardRanges() if ranges_raw is None else parse_dashboard_ranges(ranges_raw)
     colors_raw = dashboard.get("colors")
     if colors_raw is None:
-        return DashboardColors(), graph_view
+        return DashboardColors(), graph_view, metric_ranges
     colors = _mapping(colors_raw, "dashboard.colors")
     _reject_unknown_keys(colors, "dashboard.colors", {"memory", "utilization", "temperature", "power"})
     return DashboardColors(
         **{key: _dashboard_color(value, f"dashboard.colors.{key}") for key, value in colors.items()}
-    ), graph_view
+    ), graph_view, metric_ranges
 
 
 def _web_config(raw: dict[str, object], config_path: Path) -> WebConfig:
@@ -220,6 +287,9 @@ def load_config(path: Path) -> AppConfig:
         raise ConfigError(f"configuration file not found: {path}") from error
     except tomllib.TOMLDecodeError as error:
         raise ConfigError(f"invalid TOML in {path}: {error}") from error
+    except ValueError as error:
+        # Python rejects excessively long integer literals before validation.
+        raise ConfigError(f"invalid numeric value in {path}: {error}") from error
     version = raw.get("version")
     if version != 2:
         if version == 1:
@@ -228,7 +298,7 @@ def load_config(path: Path) -> AppConfig:
                 "set hardware.pwm_gpio_bcm = [18, 19], and set control.fan_endpoint_ids"
             )
         raise ConfigError("version must be 2")
-    dashboard_colors, graph_view = _dashboard_settings(raw)
+    dashboard_colors, graph_view, dashboard_ranges = _dashboard_settings(raw)
     web_config = _web_config(raw, path)
     raw_endpoints = raw.get("dgx")
     if not isinstance(raw_endpoints, list) or not 1 <= len(raw_endpoints) <= 2:
@@ -402,4 +472,5 @@ def load_config(path: Path) -> AppConfig:
         dashboard_colors,
         graph_view,
         web_config,
+        dashboard_ranges,
     )

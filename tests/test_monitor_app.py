@@ -12,8 +12,8 @@ from typing import Any
 from test_monitor import _state
 from textual.widgets import Button, Static
 
-from dgx_fan.config import WebConfig, load_config
-from dgx_fan.monitor import MonitorPublisher
+from dgx_fan.config import DashboardRanges, MetricRange, WebConfig, load_config
+from dgx_fan.monitor import MonitorPublisher, decode_state, encode_state
 from dgx_fan.monitor_app import DGXFanMonitorApp
 from dgx_fan.ui import FanAppUI
 
@@ -62,7 +62,10 @@ def test_monitor_app_hydrates_read_only_ui_without_hardware(tmp_path: Path) -> N
                 assert app.query_one("#power-toggle", Button).disabled is True
                 assert app.query_one("#fan-settings", Button).disabled is True
                 assert ui.snapshot == state.snapshot
-                assert ui.history.last_seen == {("dgx-1", "gpu-0"): 100.0}
+                assert ui.history.last_seen == {
+                    ("dgx-1", "gpu-0"): 100.0,
+                    ("dgx-1", "__weighted__"): 100.0,
+                }
         finally:
             await publisher.close()
 
@@ -73,6 +76,44 @@ def test_monitor_app_has_no_controller_or_hardware_import() -> None:
     assert "from .hardware import" not in source
     assert "from .controller import" not in source
     assert "from .dcgm import" not in source
+
+
+def test_monitor_app_source_ranges_replace_local_and_reset_on_old_frame(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        config = load_config(Path("config.example.toml"))
+        config = replace(
+            config,
+            web=WebConfig(True, "127.0.0.1", 8000, tmp_path / "monitor.sock"),
+            graph_view="graph-2",
+            dashboard_ranges=DashboardRanges(power=MetricRange(0, 90)),
+        )
+        app = DGXFanMonitorApp(config)
+        source = replace(
+            _state(), dashboard_ranges=DashboardRanges(power=MetricRange(20, 120)),
+        )
+        async with app.run_test(size=(85, 25)) as pilot:
+            ui = app.query_one(FanAppUI)
+            assert app._accept_state(ui, decode_state(encode_state(source), 2), received_at=10)
+            await pilot.pause()
+            assert app.config.dashboard_ranges.power == MetricRange(20, 120)
+            assert ui.graph_two_sparklines[("dgx-1", "power")].maximum == 120
+
+            # An older publisher omits the additive field. Its source defaults
+            # override both the prior source and this web process's local file.
+            import json
+
+            payload = json.loads(encode_state(source))
+            del payload["dashboard_ranges"]
+            payload["source_id"] = "new-source"
+            payload["revision"] = 1
+            old_frame = decode_state((json.dumps(payload) + "\n").encode(), 2)
+            assert app._accept_state(ui, old_frame, received_at=11)
+            await pilot.pause()
+            assert app.config.dashboard_ranges == DashboardRanges()
+            assert ui.graph_two_sparklines[("dgx-1", "power")].maximum == 240
+            assert ui.graph_two_metric_labels[("dgx-1", "power")].render().plain.endswith("0–240 W")
+
+    asyncio.run(exercise())
 
 
 def test_monitor_app_accepts_rpm_only_updates_and_recovers_from_stall(tmp_path: Path) -> None:

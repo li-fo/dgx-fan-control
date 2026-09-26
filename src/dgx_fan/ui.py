@@ -20,7 +20,7 @@ from textual.renderables.digits import Digits
 from textual.widget import WidgetError
 from textual.widgets import Button, Footer, Header, Static, TabbedContent, TabPane
 
-from .config import DashboardColors, EndpointConfig
+from .config import DashboardColors, DashboardRanges, EndpointConfig
 from .history_ui import HistoryPanel, HistoryQuery
 from .models import ControlSnapshot, EndpointSnapshot, GPUStat, MemoryStat
 from .ui_sparkline import FixedScaleSparkline, UtilTimeAxis
@@ -565,6 +565,7 @@ class FanAppUI(Static):
         settings: Callable[[], None] | None = None,
         *,
         graph_view: str = "graph-1",
+        dashboard_ranges: DashboardRanges | None = None,
         read_only: bool = False,
         history_query: HistoryQuery | None = None,
         history_endpoints: tuple[EndpointConfig, ...] = (),
@@ -576,6 +577,7 @@ class FanAppUI(Static):
             emergency_temperature,
         )
         self.dashboard_colors = dashboard_colors or DashboardColors()
+        self.dashboard_ranges = dashboard_ranges or DashboardRanges()
         self.graph_view = graph_view
         self.collection_interval_seconds = collection_interval_seconds
         self.settings = settings
@@ -761,10 +763,12 @@ class FanAppUI(Static):
         collection_interval_seconds: float,
         dashboard_colors: DashboardColors,
         graph_view: str = "graph-1",
+        dashboard_ranges: DashboardRanges | None = None,
     ) -> None:
         """Apply effective presentation settings without discarding chart history."""
         self.emergency_temperature = emergency_temperature
         self.dashboard_colors = dashboard_colors
+        self.dashboard_ranges = dashboard_ranges or DashboardRanges()
         self.graph_view = graph_view
         self.history.collection_interval_seconds = collection_interval_seconds
         self.collection_interval_seconds = collection_interval_seconds
@@ -1066,17 +1070,17 @@ class FanAppUI(Static):
                 for gpu in gpus
             )
             metric_specs = (
-                ("util", 100.0, self.dashboard_colors.utilization, util, "%", bool(gpus)),
-                ("mem", 100.0, self.dashboard_colors.memory, "", "%", memory_ready and (
+                ("util", self.dashboard_colors.utilization, util, "%", bool(gpus)),
+                ("mem", self.dashboard_colors.memory, "", "%", memory_ready and (
                     (
                         endpoint.memory_source == "node-exporter"
                         and endpoint.uma_memory is not None and endpoint.uma_memory.total_mib > 0
                     ) or (endpoint.memory_source == "dcgm" and dcgm_memory_ready)
                 )),
-                ("temp", max(100.0, self.emergency_temperature), self.dashboard_colors.temperature, temp, " C", bool(gpus)),
-                ("power", 240.0, self.dashboard_colors.power, power, " W", bool(gpus) and power != "N/A"),
+                ("temp", self.dashboard_colors.temperature, temp, " C", bool(gpus)),
+                ("power", self.dashboard_colors.power, power, " W", bool(gpus) and power != "N/A"),
             )
-            for metric, maximum, configured_color, current, unit, available_metric in metric_specs:
+            for metric, configured_color, current, unit, available_metric in metric_specs:
                 samples = self.history.chart_samples(
                     endpoint.endpoint_id, metric, now, gpu_keys, endpoint.memory_source,
                 ) if available_metric else ()
@@ -1087,11 +1091,13 @@ class FanAppUI(Static):
                 sparkline.sample_times = tuple(sample.at for sample in samples)
                 sparkline.window_end = now
                 sparkline.data = tuple(sample.value for sample in samples)
-                sparkline.maximum = maximum
+                bounds = self.dashboard_ranges.for_metric(metric, self.emergency_temperature)
+                sparkline.minimum = bounds.minimum
+                sparkline.maximum = bounds.maximum
                 sparkline.min_color = self._sparkline_color(configured_color)
                 sparkline.max_color = self._sparkline_color(configured_color)
                 sparkline.refresh()
-                scale = f"0–{maximum:.0f}{unit}"
+                scale = f"{bounds.minimum:.15g}–{bounds.maximum:.15g}{unit}"
                 label = Text(_compact_display_text(f"{metric.upper()} {current} · {scale}", card_width))
                 if configured_color is not None:
                     label.stylize(Style(color=_rich_color(configured_color)), 0, len(metric))

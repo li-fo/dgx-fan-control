@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from dgx_fan.config import AppConfig, ConfigError, load_config
+from dgx_fan.config import AppConfig, ConfigError, MetricRange, load_config
 from dgx_fan.settings import (
     SettingsApplicationError,
     SettingsCommandServer,
@@ -95,6 +95,20 @@ def test_persists_comment_preserving_patch_backup_and_consecutive_saves(
         assert path.with_name("config.toml.bak").read_text() != original
         assert stat.S_IMODE(path.stat().st_mode) == 0o640
         assert stat.S_IMODE(path.with_name("config.toml.bak").stat().st_mode) == 0o640
+
+    asyncio.run(exercise())
+
+
+def test_settings_save_preserves_file_only_dashboard_ranges(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        path = _config_path(tmp_path)
+        path.write_text(path.read_text() + "\n[dashboard.ranges.power]\nmin = 0\nmax = 120\n")
+        service, _power = _service(path, [])
+        await service.save({"dashboard": {"graph_view": "graph-2"}}, 0)
+        await service.save({"dashboard": {"colors": {"power": "cyan"}}}, 1)
+        assert load_config(path).dashboard_ranges.power == MetricRange(0, 120)
+        assert "[dashboard.ranges.power]" in path.read_text()
+        assert service.effective.config.dashboard_ranges.power == MetricRange(0, 120)
 
     asyncio.run(exercise())
 

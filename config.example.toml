@@ -24,6 +24,17 @@ url = "http://192.168.1.10:9400/metrics"
 # unless DCGM reported a valid power value for every physical GPU.
 graph_view = "graph-1"
 
+# Optional Graph #2 display-only bounds, shared by both DGX columns and the
+# web view. Omitted metrics keep their defaults (UTIL/MEM 0..100%, TEMP 0 to
+# max(100 C, emergency temperature), POWER 0..240 W). MEM remains percent;
+# upper summary memory remains GiB. Example zoom: POWER 0..120 W.
+# [dashboard.ranges.power]
+# min = 0
+# max = 120
+# Add [dashboard.ranges.utilization], .memory, or .temperature similarly.
+# Each enabled table requires finite min < max; percentage bounds stay 0..100.
+# Edit config.toml and restart the primary controller and web renderer.
+
 [dashboard.colors]
 # Optional foreground colors for MEM, UTIL, TEMP, and POWER charts. Use a Rich
 # color name or exact #RRGGBB. Omitted MEM/UTIL/TEMP use the terminal default;

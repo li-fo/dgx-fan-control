@@ -13,11 +13,17 @@ import stat
 import uuid
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from socket import AF_UNIX, SOCK_STREAM, socket
 
-from .config import AppConfig, DashboardColors
+from .config import (
+    AppConfig,
+    ConfigError,
+    DashboardColors,
+    DashboardRanges,
+    parse_dashboard_ranges,
+)
 from .models import ControlSnapshot, EndpointSnapshot, FanReading, GPUStat, MemoryStat
 from .ui import DashboardHistory, HistoryPoint
 
@@ -56,6 +62,7 @@ class MonitorState:
     graph_view: str | None = None
     power_enabled: bool | None = None
     control_available: bool | None = None
+    dashboard_ranges: DashboardRanges = field(default_factory=DashboardRanges)
 
 
 @dataclass(frozen=True)
@@ -312,6 +319,11 @@ def encode_state(state: MonitorState) -> bytes:
             }
         ),
         "graph_view": state.graph_view,
+        "dashboard_ranges": {
+            metric: {"min": bounds.minimum, "max": bounds.maximum}
+            for metric in ("utilization", "memory", "temperature", "power")
+            if (bounds := getattr(state.dashboard_ranges, metric)) is not None
+        },
         "power_enabled": state.power_enabled,
         "control_available": state.control_available,
     }
@@ -331,7 +343,7 @@ def decode_state(encoded: bytes, collection_interval_seconds: float) -> MonitorS
         raise MonitorProtocolError("monitor message has an invalid size")
     try:
         raw = json.loads(encoded)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (UnicodeDecodeError, ValueError) as error:
         raise MonitorProtocolError("monitor message is not valid JSON") from error
     mapping = _mapping(raw, "message")
     if _integer(mapping.get("schema_version"), "schema_version") != SCHEMA_VERSION:
@@ -356,6 +368,10 @@ def decode_state(encoded: bytes, collection_interval_seconds: float) -> MonitorS
     graph_view = _optional_string(mapping.get("graph_view"), "graph_view")
     if graph_view is not None and graph_view not in {"graph-1", "graph-2"}:
         raise MonitorProtocolError("graph_view must be graph-1 or graph-2")
+    try:
+        ranges = parse_dashboard_ranges(mapping.get("dashboard_ranges", {}), "dashboard_ranges")
+    except ConfigError as error:
+        raise MonitorProtocolError(str(error)) from error
     settings_revision_raw = mapping.get("settings_revision")
     settings_revision = (
         None
@@ -397,6 +413,7 @@ def decode_state(encoded: bytes, collection_interval_seconds: float) -> MonitorS
         graph_view,
         power,
         control_available,
+        ranges,
     )
 
 
@@ -428,6 +445,7 @@ class MonitorPublisher:
         self._emergency_temperature_celsius: float | None = None
         self._dashboard_colors: DashboardColors | None = None
         self._graph_view: str | None = None
+        self._dashboard_ranges = DashboardRanges()
         self._power_enabled: bool | None = None
         self._control_available: bool | None = None
 
@@ -448,6 +466,7 @@ class MonitorPublisher:
         self._emergency_temperature_celsius = config.control.emergency_temperature_celsius
         self._dashboard_colors = config.dashboard_colors
         self._graph_view = config.graph_view
+        self._dashboard_ranges = config.dashboard_ranges
         self._power_enabled = power_enabled
         self._control_available = control_available
         # Make the accepted effective state observable without waiting out the
@@ -549,6 +568,7 @@ class MonitorPublisher:
                     emergency_temperature_celsius=self._emergency_temperature_celsius,
                     dashboard_colors=self._dashboard_colors,
                     graph_view=self._graph_view,
+                    dashboard_ranges=self._dashboard_ranges,
                     power_enabled=self._power_enabled,
                     control_available=self._control_available,
                 )

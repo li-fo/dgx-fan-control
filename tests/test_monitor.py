@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import stat
 import threading
 from dataclasses import replace
 from itertools import pairwise
+from pathlib import Path
 
 import pytest
 
+from dgx_fan.config import DashboardRanges, MetricRange, load_config
 from dgx_fan.models import ControlSnapshot, EndpointSnapshot, FanReading, GPUStat, MemoryStat
 from dgx_fan.monitor import (
     MAX_HISTORY_POINTS,
@@ -16,6 +19,7 @@ from dgx_fan.monitor import (
     MonitorProtocolError,
     MonitorPublisher,
     MonitorState,
+    _MonitorInput,
     decode_state,
     encode_state,
 )
@@ -76,6 +80,60 @@ def test_monitor_wire_keeps_optional_power_and_graph_view_compatible() -> None:
     assert decoded.snapshot is not None
     # Older frames omit these optional keys without losing the existing GPU DTO.
     assert decoded.snapshot.endpoint_snapshots[0].gpus[0].power_watts is None
+
+
+def test_monitor_wire_ranges_are_additive_and_reset_when_missing_or_empty() -> None:
+    state = replace(_state(), dashboard_ranges=DashboardRanges(
+        power=MetricRange(20, 120), temperature=MetricRange(-10.5, 80.25),
+    ))
+    payload = json.loads(encode_state(state))
+    assert payload["dashboard_ranges"]["power"] == {"min": 20, "max": 120}
+    assert decode_state(encode_state(state), 2).dashboard_ranges == state.dashboard_ranges
+    del payload["dashboard_ranges"]
+    legacy = decode_state((json.dumps(payload) + "\n").encode(), 2)
+    assert legacy.dashboard_ranges == DashboardRanges()
+    payload["dashboard_ranges"] = {}
+    assert decode_state((json.dumps(payload) + "\n").encode(), 2).dashboard_ranges == DashboardRanges()
+
+
+def test_monitor_publisher_uses_reconfigured_source_ranges(tmp_path) -> None:
+    publisher = MonitorPublisher(tmp_path / "monitor.sock")
+    config = replace(
+        load_config(Path("config.example.toml")),
+        dashboard_ranges=DashboardRanges(power=MetricRange(0, 120)),
+    )
+    publisher.reconfigure(config, "settings-source", 1, True, False)
+    snapshot = _state().snapshot
+    assert snapshot is not None
+    frame = publisher._build_frame(_MonitorInput(1, snapshot, 100.0), 1, True)
+    assert frame is not None
+    assert decode_state(frame.encoded, 2).dashboard_ranges.power == MetricRange(0, 120)
+
+
+@pytest.mark.parametrize("ranges", [
+    None, [], {"other": {"min": 0, "max": 1}},
+    {"power": {"min": 0, "max": 120, "other": 1}},
+    {"power": {"min": 0}}, {"power": {"min": True, "max": 120}},
+    {"power": {"min": 0, "max": 0}}, {"power": {"min": 120, "max": 0}},
+    {"power": {"min": -1, "max": 120}},
+    {"temperature": {"min": -1e308, "max": 1e308}},
+    {"memory": {"min": 0, "max": 101}},
+])
+def test_monitor_wire_rejects_invalid_ranges_as_protocol_error(ranges: object) -> None:
+    payload = json.loads(encode_state(_state()))
+    payload["dashboard_ranges"] = ranges
+    with pytest.raises(MonitorProtocolError):
+        decode_state((json.dumps(payload) + "\n").encode(), 2)
+
+
+def test_monitor_wire_excessively_long_integer_is_protocol_error() -> None:
+    encoded = encode_state(replace(
+        _state(), dashboard_ranges=DashboardRanges(power=MetricRange(0, 120)),
+    ))
+    assert b'"min":0' in encoded
+    oversized = encoded.replace(b'"min":0', b'"min":' + b'9' * 4301, 1)
+    with pytest.raises(MonitorProtocolError, match="not valid JSON"):
+        decode_state(oversized, 2)
 
 
 def test_monitor_state_supports_full_two_dgx_eight_gpu_minimum_interval_history() -> None:

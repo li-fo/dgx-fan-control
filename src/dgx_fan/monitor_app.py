@@ -71,6 +71,7 @@ class DGXFanMonitorApp(App[None]):
             self.config.dashboard_colors,
             self.open_settings,
             graph_view=self.config.graph_view,
+            dashboard_ranges=self.config.dashboard_ranges,
             history_query=self.query_history,
             history_endpoints=self.config.endpoints,
             # Opt-in alone is insufficient: a compatible, fresh controller
@@ -170,6 +171,7 @@ class DGXFanMonitorApp(App[None]):
         emergency = state.emergency_temperature_celsius
         colors = state.dashboard_colors
         graph_view = state.graph_view
+        ranges = state.dashboard_ranges
         if interval is not None:
             self.config = replace(
                 self.config,
@@ -189,11 +191,15 @@ class DGXFanMonitorApp(App[None]):
                 dashboard_colors=colors or self.config.dashboard_colors,
                 graph_view=graph_view or self.config.graph_view,
             )
+        # The primary's replacement frame owns Graph #2 scale. An old frame
+        # without this additive field decodes to defaults, never local overrides.
+        self.config = replace(self.config, dashboard_ranges=ranges)
         ui.reconfigure_display(
             self.config.control.emergency_temperature_celsius,
             self.config.collection.interval_seconds,
             self.config.dashboard_colors,
             self.config.graph_view,
+            self.config.dashboard_ranges,
         )
         ui.set_monitor_transport_status(None)
         ui.update_monitor_snapshot(state.snapshot, state.captured_at, state.history)

@@ -2,7 +2,7 @@
 
 [English README](../README.en.md) · [한국어 설정 안내](configuration.md) · [Usage guide](usage.en.md) · [Raspberry Pi wiring guide](raspberry-pi-wiring.en.md)
 
-Copy `config.example.toml` to `config.toml`, then edit it for your actual DGX addresses and wiring. The configuration uses schema v2 and rejects invalid setting values. Unknown keys are explicitly rejected in `[dashboard]`, `[dashboard.colors]`, and `[web]`; the same blanket rule does not apply to extra keys in other tables. The **defaults** below apply when a key is omitted and may differ from values written in the example file. The app looks for a file in this order: `--config`, `DGX_FAN_CONFIG`, then `config.toml` in the current directory.
+Copy `config.example.toml` to `config.toml`, then edit it for your actual DGX addresses and wiring. The configuration uses schema v2 and rejects invalid setting values. Unknown keys are explicitly rejected in `[dashboard]`, `[dashboard.colors]`, `[dashboard.ranges]`, each `[dashboard.ranges.<metric>]`, and `[web]`; the same blanket rule does not apply to extra keys in other tables. The **defaults** below apply when a key is omitted and may differ from values written in the example file. The app looks for a file in this order: `--config`, `DGX_FAN_CONFIG`, then `config.toml` in the current directory.
 
 ```bash
 cp config.example.toml config.toml
@@ -18,8 +18,17 @@ cp config.example.toml config.toml
 | `dgx.node_exporter_url` | Required `http(s)` address when `memory_source = "node-exporter"`; cannot be set for `"dcgm"`. It supplies the memory display only. GPU temperature, utilization, and fan control still require DCGM. |
 | `dashboard.graph_view` | Defaults to `"graph-1"`; `"graph-2"` is the compact two-DGX-column view. Also selectable under Setting → UI. |
 | `dashboard.colors.memory`, `utilization`, `temperature`, `power` | Optional foreground colors. Use a Rich color name or exact `#RRGGBB`. If omitted, MEM, UTIL, and TEMP use the terminal default; POWER uses `ansi_green`. The string `"default"` is not a valid configured value. |
+| `dashboard.ranges.utilization`, `memory`, `temperature`, `power` | Optional Graph #2 display ranges. Each table needs finite numeric `min` and `max` with `min < max`. UTIL/MEM must stay within 0–100%, POWER's minimum must be nonnegative, and TEMP may have a negative minimum. Unknown range names or keys and overflowing spans are rejected. |
 
-Graph #2 summaries and charts appear in **UTIL, MEM, TEMP, POWER** order. Each chart shows the last 120 seconds. UTIL and MEM range from 0–100%, TEMP from 0–100°C or a higher emergency temperature, and POWER from 0–240W. Brightness has five value-based levels, while height follows the actual value. A previous observation is displayed briefly for at most 1.5 times the collection interval; longer gaps remain blank and are distinct from a real zero. POWER is shown only when DCGM power values are valid for all physical GPUs. The configured `graph_view` and colors are also sent to the web view.
+Graph #2 summaries and charts appear in **UTIL, MEM, TEMP, POWER** order. Each chart shows the last 120 seconds. By default, UTIL and MEM range from 0–100%, TEMP from 0–100°C or a higher emergency temperature, and POWER from 0–240W. Brightness has five value-based levels, while height follows the actual value. A previous observation is displayed briefly for at most 1.5 times the collection interval; longer gaps remain blank and are distinct from a real zero. POWER is shown only when DCGM power values are valid for all physical GPUs. The configured `graph_view` and colors are also sent to the web view.
+
+Omitted ranges keep those defaults. To zoom the POWER chart to 0–120W, add this to `config.toml`. The MEM chart and its current value remain **percentages**, while the upper memory summary remains in GiB. Ranges apply to both DGX columns and web Graph #2; they do not change Graph #1, History, fan control, or stored values. Height and the five brightness bands use 20%-of-range intervals of `(value - min) / (max - min)`; only the drawing is clamped, not the actual value shown in the label. Restart the primary controller and web renderer after editing the file. The Setting UI has no range editor, but saving other settings preserves these tables.
+
+```toml
+[dashboard.ranges.power]
+min = 0
+max = 120
+```
 
 The Colors editor offers Default and standard ANSI colors. An existing valid custom name or `#RRGGBB` is retained until explicitly changed. Check the actual font and colors on the HDMI display.
 

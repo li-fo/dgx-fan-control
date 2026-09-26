@@ -257,6 +257,7 @@ class DGXFanApp(App[None]):
                     config.collection.interval_seconds,
                     config.dashboard_colors,
                     config.graph_view,
+                    config.dashboard_ranges,
                 )
             if self.monitor_publisher is not None:
                 self.monitor_publisher.reconfigure(
@@ -285,6 +286,7 @@ class DGXFanApp(App[None]):
             self.config.dashboard_colors,
             self.open_settings,
             graph_view=self.config.graph_view,
+            dashboard_ranges=self.config.dashboard_ranges,
             history_query=self._query_history,
             history_endpoints=self.config.endpoints,
         )

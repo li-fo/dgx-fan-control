@@ -17,7 +17,13 @@ from textual.widgets import Button, Sparkline, Static, TabbedContent
 
 import dgx_fan.ui as ui_module
 from dgx_fan.app import DGXFanApp
-from dgx_fan.config import DashboardColors, EndpointConfig, load_config
+from dgx_fan.config import (
+    DashboardColors,
+    DashboardRanges,
+    EndpointConfig,
+    MetricRange,
+    load_config,
+)
 from dgx_fan.controller import FanController
 from dgx_fan.models import (
     ControlSnapshot,
@@ -113,6 +119,39 @@ def test_graph_two_util_brightness_uses_absolute_20_percent_bands() -> None:
     assert rendered(30, 150) == rendered(20)
     assert rendered(241, 240) == rendered(100)
     assert _fixed_sparkline_rows(()) == ["     "]
+
+
+def test_graph_two_configured_range_drives_height_and_five_brightness_bands() -> None:
+    console = Console(width=1)
+
+    def rendered(value: float, minimum: float, maximum: float) -> tuple[str, str]:
+        renderable = _FixedScaleRenderable(
+            (value,), width=1, height=4,
+            min_color=RichColor.parse("#008000"), max_color=RichColor.parse("#008000"),
+        )
+        renderable.background_color = RichColor.parse("#000000")
+        renderable.minimum, renderable.maximum = minimum, maximum
+        lines = console.render_lines(renderable, options=console.options.update(width=1), pad=False)
+        glyphs = "".join(segment.text for line in lines for segment in line)
+        ink = {
+            segment.style.color.get_truecolor().hex
+            for line in lines for segment in line
+            if segment.text.strip() and segment.style is not None and segment.style.color is not None
+        }
+        assert len(ink) == 1
+        return glyphs, ink.pop()
+
+    assert rendered(60, 0, 120) == rendered(70, 20, 120)
+    assert rendered(20, 20, 120) == rendered(0, 0, 100)
+    assert rendered(120, 20, 120) == rendered(100, 0, 100)
+    assert rendered(-1, 20, 120) == rendered(20, 20, 120)
+    assert rendered(121, 20, 120) == rendered(120, 20, 120)
+    for lower, upper, color in (
+        (20, 39.99, "#003300"), (40, 59.99, "#004600"),
+        (60, 79.99, "#005900"), (80, 99.99, "#006c00"),
+        (100, 120, "#008000"),
+    ):
+        assert rendered(lower, 20, 120)[1] == rendered(upper, 20, 120)[1] == color
 
 
 def test_graph_two_timed_columns_and_axis_share_fixed_window() -> None:
@@ -1539,6 +1578,43 @@ def test_graph_two_metric_charts_keep_independent_sources_and_missing_power_blan
             assert all(ui.graph_two_sparklines[("one", metric)].data for metric in
                        ("util", "temp", "mem"))
             assert ui.graph_two_sparklines[("two", "mem")].data == (50,)
+
+    asyncio.run(exercise())
+
+
+def test_graph_two_configured_bounds_and_fractional_labels_reconfigure() -> None:
+    class GraphTwoApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FanAppUI(
+                "config.toml", lambda: None, 150, 2, graph_view="graph-2",
+                dashboard_ranges=DashboardRanges(
+                    power=MetricRange(20, 120), temperature=MetricRange(-10.5, 80.25),
+                ),
+            )
+
+    gpu = GPUStat("GPU-a", "A100", 80, 100, 60.25, 75.5, 70)
+    snapshot = _fan_snapshot(
+        20, "curve", "AUTO ON", 75.5, 0,
+        (FanReading(1, "RUNNING"), FanReading(1, "RUNNING")),
+        (EndpointSnapshot("one", "One", True, 0, gpus=(gpu,), sample_revision=1),),
+    )
+
+    async def exercise() -> None:
+        async with GraphTwoApp().run_test(size=(85, 25)) as pilot:
+            ui = pilot.app.query_one(FanAppUI)
+            ui.update_snapshot(snapshot, 120)
+            await pilot.pause()
+            assert ui.graph_two_sparklines[("one", "power")].minimum == 20
+            assert ui.graph_two_sparklines[("one", "power")].maximum == 120
+            assert ui.graph_two_metric_labels[("one", "power")].render().plain == "POWER 70 W · 20–120 W"
+            assert ui.graph_two_metric_labels[("one", "temp")].render().plain == "TEMP 76 C · -10.5–80.25 C"
+            assert ui.graph_two_metric_labels[("one", "util")].render().plain == "UTIL 60% · 0–100%"
+            assert ui.graph_two_metric_labels[("one", "mem")].render().plain == "MEM 80% · 0–100%"
+            ui.reconfigure_display(150, 2, DashboardColors(), "graph-2", DashboardRanges())
+            await pilot.pause()
+            assert ui.graph_two_metric_labels[("one", "power")].render().plain == "POWER 70 W · 0–240 W"
+            assert ui.graph_two_metric_labels[("one", "temp")].render().plain == "TEMP 76 C · 0–150 C"
+            assert ui.graph_two_sparklines[("one", "power")].data == (70,)
 
     asyncio.run(exercise())
 
