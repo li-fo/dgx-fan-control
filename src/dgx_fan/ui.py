@@ -331,6 +331,7 @@ class FanGauge(Static):
 
     def __init__(self, number: int) -> None:
         self.number = number
+        self._linux_vt: bool | None = None
         self.duty_percent: int | None = None
         self.stage: int | None = None
         self.rpm: float | None = None
@@ -372,7 +373,7 @@ class FanGauge(Static):
     def _content(
         cls, number: int, duty_percent: int | None, rpm: float | None, state: str,
         *, override: bool = False, stage: int | None = None,
-        overall_state: str | None = None,
+        overall_state: str | None = None, linux_vt: bool | None = None,
     ) -> Text:
         """Keep the original simple ring for a real Linux virtual console."""
         percentage = "--" if duty_percent is None else f"{duty_percent}%"
@@ -386,10 +387,11 @@ class FanGauge(Static):
             ring[row][column] = "●" if index < filled else "○"
         ring[2][5:10] = list(f"{percentage:^5}")
         rpm_text = "N/A" if rpm is None else f"{rpm:.0f} RPM"
-        linux_vt = _is_linux_virtual_console()
-        accent = cls._accent(duty_percent, state, linux_vt=linux_vt, stage=stage,
+        if linux_vt is None:
+            linux_vt = _is_linux_virtual_console()
+        accent = cls._accent(duty_percent, state, linux_vt=bool(linux_vt), stage=stage,
                              overall_state=overall_state or ("SAFETY OVERRIDE" if override else None))
-        track_color = cls._tone("bright_black", linux_vt=linux_vt)
+        track_color = cls._tone("bright_black", linux_vt=bool(linux_vt))
         result = Text(f"Fan {number}\n")
         for row_index, ring_row in enumerate(ring):
             for column, glyph in enumerate(ring_row):
@@ -403,7 +405,7 @@ class FanGauge(Static):
         result.append(f"\nRPM: {rpm_text} | ")
         result.append(state, style=Style(color=accent))
         if override:
-            result.append(" | OVERRIDE", style=Style(color=cls._tone("red", linux_vt=linux_vt)))
+            result.append(" | OVERRIDE", style=Style(color=cls._tone("red", linux_vt=bool(linux_vt))))
         return result
 
     @classmethod
@@ -428,14 +430,15 @@ class FanGauge(Static):
     def _dense_content(
         cls, number: int, duty_percent: int | None, rpm: float | None, state: str,
         *, override: bool = False, stage: int | None = None,
-        overall_state: str | None = None,
+        overall_state: str | None = None, linux_vt: bool | None = None,
     ) -> Text:
         """A nine-row ring with native digits, retaining separate measured RPM."""
+        linux_vt = bool(linux_vt)
         percentage = "--" if duty_percent is None else f"{duty_percent}%"
         level = None if duty_percent is None else max(0, min(100, duty_percent)) / 100
-        accent = cls._accent(duty_percent, state, stage=stage,
+        accent = cls._accent(duty_percent, state, linux_vt=linux_vt, stage=stage,
                              overall_state=overall_state or ("SAFETY OVERRIDE" if override else None))
-        track_color = cls._tone("bright_black")
+        track_color = cls._tone("bright_black", linux_vt=linux_vt)
         track = [[0] * cls.DENSE_WIDTH for _ in range(cls.DENSE_HEIGHT)]
         filled = [[False] * cls.DENSE_WIDTH for _ in range(cls.DENSE_HEIGHT)]
         center = [[False] * cls.DENSE_WIDTH for _ in range(cls.DENSE_HEIGHT)]
@@ -468,18 +471,19 @@ class FanGauge(Static):
         result.append(f"RPM: {rpm_text} | ")
         result.append(state, style=Style(color=accent))
         if override:
-            result.append(" | OVERRIDE", style=Style(color=cls._tone("red")))
+            result.append(" | OVERRIDE", style=Style(color=cls._tone("red", linux_vt=linux_vt)))
         return result
 
     @classmethod
     def _compact_content(
         cls, number: int, duty_percent: int | None, rpm: float | None, state: str,
         *, override: bool = False, stage: int | None = None,
-        overall_state: str | None = None,
+        overall_state: str | None = None, linux_vt: bool | None = None,
     ) -> Text:
         percentage = "--" if duty_percent is None else f"{duty_percent}%"
         rpm_text = "N/A" if rpm is None else f"{rpm:.0f} RPM"
-        linux_vt = _is_linux_virtual_console()
+        if linux_vt is None:
+            linux_vt = _is_linux_virtual_console()
         accent = cls._accent(duty_percent, state, linux_vt=linux_vt, stage=stage,
                              overall_state=overall_state or ("SAFETY OVERRIDE" if override else None))
         result = Text(f"F{number} PWM ")
@@ -492,10 +496,11 @@ class FanGauge(Static):
 
     def _refresh_display(self) -> None:
         override = self.overall_state == "SAFETY OVERRIDE"
+        linux_vt = self._linux_vt if self._linux_vt is not None else _is_linux_virtual_console()
         if self.content_size.width < self.RING_WIDTH or self.content_size.height < 7:
             content = self._compact_content
         elif (
-            _is_linux_virtual_console()
+            linux_vt
             or self.content_size.width < self.DENSE_WIDTH
             or self.content_size.height < self.DENSE_HEIGHT + 2
         ):
@@ -504,9 +509,10 @@ class FanGauge(Static):
             content = self._dense_content
         self.update(content(self.number, self.duty_percent, self.rpm, self.fan_state,
                             override=override, stage=self.stage,
-                            overall_state=self.overall_state))
+                            overall_state=self.overall_state, linux_vt=linux_vt))
 
     def on_mount(self) -> None:
+        self._linux_vt = not self.app.is_web and _is_linux_virtual_console()
         self._refresh_display()
 
     def on_resize(self) -> None:
@@ -595,6 +601,7 @@ class FanAppUI(Static):
         self.graph_two_sparklines: dict[tuple[str, str], FixedScaleSparkline] = {}
         self.graph_two_endpoint_ids: tuple[str, ...] = ()
         self._fan_gauge_height = 9
+        self._fan_layout_passes = 0
         self.last_render_time: float | None = None
         self.last_signature: tuple[tuple[object, ...], ...] | None = None
         self.monitor_transport_status: str | None = None
@@ -812,6 +819,7 @@ class FanAppUI(Static):
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         """Load history only while its pane is selected; cancel it on other tabs."""
         if event.pane.id == "fan-control":
+            self._fan_layout_passes = 0
             self.call_after_refresh(self._size_fan_gauges)
         try:
             panel = self.query_one(HistoryPanel)
@@ -848,7 +856,7 @@ class FanAppUI(Static):
         if len(gauges) != 2:
             return
         height = 13 if (
-            not _is_linux_virtual_console()
+            not gauges[0]._linux_vt
             and pane.content_size.height - top.size.height >= 13
             and all(gauge.content_size.width >= FanGauge.DENSE_WIDTH for gauge in gauges)
         ) else 9
@@ -857,6 +865,9 @@ class FanAppUI(Static):
             row.styles.height = height
             for gauge in gauges:
                 gauge.styles.height = height
+        if self._fan_layout_passes < 2:
+            self._fan_layout_passes += 1
+            self.call_after_refresh(self._size_fan_gauges)
         self.call_after_refresh(self._refresh_fan_gauges)
 
     def _refresh_fan_gauges(self) -> None:
@@ -1379,6 +1390,7 @@ class FanAppUI(Static):
             rendered.append(value, style=Style(color=_rich_color(color)))
 
     def on_resize(self) -> None:
+        self._fan_layout_passes = 0
         self._size_fan_gauges()
         if self.snapshot is None or self.last_render_time is None:
             return

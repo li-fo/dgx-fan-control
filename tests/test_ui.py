@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.style import Style
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, VerticalScroll
+from textual.geometry import Size
 from textual.renderables.digits import Digits
 from textual.widgets import Button, Sparkline, Static, TabbedContent
 
@@ -826,6 +827,128 @@ def test_fan_control_two_row_geometry_survives_resize() -> None:
             _assert_complete_fan_panel_borders(status, one, two)
             _assert_gauge_content_fits(one)
             _assert_gauge_content_fits(two)
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("previous_tab", ("dashboard", "history"))
+@pytest.mark.parametrize("graph_view", ("graph-1", "graph-2"))
+def test_fan_gauge_recovers_after_transient_tab_geometry(
+    previous_tab: str, graph_view: str, monkeypatch,
+) -> None:
+    """A first unsettled tab measurement must not strand the simple ring."""
+    class GaugeApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FanAppUI("config.toml", lambda: None, 75, 2, graph_view=graph_view)
+
+    app = GaugeApp()
+
+    async def exercise() -> None:
+        async with app.run_test(size=(102, 30)) as pilot:
+            tabs = app.query_one(TabbedContent)
+            ui = app.query_one(FanAppUI)
+            snapshot = _fan_snapshot(
+                100, "curve", "AUTO ON", 75, 3,
+                (FanReading(1200, "RUNNING"), FanReading(1200, "RUNNING")), (),
+            )
+            ui.update_snapshot(snapshot, 1)
+            tabs.active = "fan-control"
+            await pilot.pause()
+            assert app.query_one("#fan-gauge-row").size.height == 13
+            tabs.active = previous_tab
+            await pilot.pause()
+            original_query = ui.query_one
+            unsettled = True
+
+            def query_with_unsettled_pane(selector, *args, **kwargs):
+                nonlocal unsettled
+                if selector == "#fan-control" and unsettled:
+                    unsettled = False
+                    pane = original_query(selector, *args, **kwargs)
+                    return type("UnsettledPane", (), {"content_size": Size(pane.content_size.width, 0)})()
+                return original_query(selector, *args, **kwargs)
+
+            monkeypatch.setattr(ui, "query_one", query_with_unsettled_pane)
+            tabs.active = "fan-control"
+            await pilot.pause()
+            assert not unsettled
+            assert app.query_one("#fan-gauge-row").size.height == 13
+            assert "PWM 100%" in app.query_one("#fan-1-gauge", FanGauge).render().plain
+            ui.update_snapshot(snapshot, 1)
+            await pilot.pause()
+            assert "PWM 100%" in app.query_one("#fan-1-gauge", FanGauge).render().plain
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("web_consumer", (False, True))
+def test_fan_gauge_consumer_profile_stays_fixed_across_tabs(monkeypatch, web_consumer: bool) -> None:
+    """A web renderer is not forced to VT style by its host's tty."""
+    monkeypatch.setattr(ui_module, "_is_linux_virtual_console", lambda: True)
+
+    class ProfileApp(App[None]):
+        @property
+        def is_web(self) -> bool:
+            return web_consumer
+
+        def compose(self) -> ComposeResult:
+            yield FanAppUI("config.toml", lambda: None, 75, 2)
+
+    app = ProfileApp()
+
+    async def exercise() -> None:
+        async with app.run_test(size=(102, 30)) as pilot:
+            tabs = app.query_one(TabbedContent)
+            tabs.active = "fan-control"
+            await pilot.pause()
+            gauge = app.query_one("#fan-1-gauge", FanGauge)
+            assert gauge._linux_vt is not web_consumer
+            for previous_tab in ("history", "dashboard", "history"):
+                tabs.active = previous_tab
+                await pilot.pause()
+                monkeypatch.setattr(ui_module, "_is_linux_virtual_console", lambda: False)
+                tabs.active = "fan-control"
+                await pilot.pause()
+                assert ("PWM" in gauge.render().plain) is web_consumer
+                assert app.query_one("#fan-gauge-row").size.height == (13 if web_consumer else 9)
+
+    asyncio.run(exercise())
+
+
+def test_fan_gauge_unchanged_readings_keep_settled_geometry() -> None:
+    app = _DashboardApp()
+
+    async def exercise() -> None:
+        async with app.run_test(size=(102, 30)) as pilot:
+            tabs = app.query_one(TabbedContent)
+            ui = app.query_one(FanAppUI)
+            tabs.active = "fan-control"
+            for index, (state, stage) in enumerate((
+                ("AUTO ON", 3), ("USER OFF", None), ("SAFETY OVERRIDE", None),
+            )):
+                snapshot = _fan_snapshot(
+                    100, "curve", state, 75, stage,
+                    (FanReading(1200, "RUNNING"), FanReading(1200, "RUNNING")), (),
+                )
+                ui.update_snapshot(snapshot, index + 1)
+                await pilot.pause()
+                for previous_tab in ("dashboard", "history"):
+                    tabs.active = previous_tab
+                    await pilot.pause()
+                    tabs.active = "fan-control"
+                    ui.update_snapshot(snapshot, index + 1)
+                    await pilot.pause()
+                    gauge = app.query_one("#fan-1-gauge", FanGauge)
+                    assert app.query_one("#fan-gauge-row").size.height == 13
+                    assert "PWM 100%" in gauge.render().plain
+                    assert ("OVERRIDE" in gauge.render().plain) is (state == "SAFETY OVERRIDE")
+            await pilot.resize_terminal(79, 20)
+            await pilot.pause()
+            assert app.query_one("#fan-gauge-row").size.height == 9
+            await pilot.resize_terminal(102, 30)
+            await pilot.pause()
+            assert app.query_one("#fan-gauge-row").size.height == 13
+            assert "PWM 100%" in app.query_one("#fan-1-gauge", FanGauge).render().plain
 
     asyncio.run(exercise())
 

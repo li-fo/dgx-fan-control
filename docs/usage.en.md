@@ -66,7 +66,7 @@ If graphical HDMI fails to start, check that `labwc` and `lxterminal` are instal
 
 If managed tty8 cleanup reports busy, first update the helper for this clone, inspect the result of `./scripts/display.sh stop`, and try `./scripts/display.sh start-console` if needed. Cleanup targets only the owned VT; it does not indiscriminately terminate other tty holders. If a failure remains, inspect the logs and active tty rather than forcibly deleting console processes.
 
-Console mode uses the managed tty8 font and falls back to ordinary text values when Graph #2's large numerals cannot be drawn. Graphical mode uses a separate terminal font. On Linux VT, the fan gauge retains a simple ring; graphical and browser displays show a denser ring and larger PWM numerals when space permits. Switching display modes alone does not change fan settings.
+Console mode uses the managed tty8 font and falls back to ordinary text values when Graph #2's large numerals cannot be drawn. Graphical mode uses a separate terminal font. On Linux VT, the fan gauge retains a simple ring; graphical and browser displays show a denser ring and larger PWM numerals when space permits. This display choice is independent of Graph #1/#2 and visits to History; a narrow screen may use a smaller gauge. Switching display modes alone does not change fan settings.
 
 Run only one hardware-owning app at a time. If Display is running, the ownership lock rejects a second `scripts/start.sh` invocation. For direct development execution, prepare and activate a virtual environment:
 
