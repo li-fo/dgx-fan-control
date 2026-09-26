@@ -1240,7 +1240,15 @@ def test_area_renderer_keeps_missing_blank_zero_baseline_and_clamps_bounds() -> 
 
 class _DashboardApp(App[None]):
     def compose(self) -> ComposeResult:
-        yield FanAppUI("config.toml", lambda: None, 75, 2)
+        yield FanAppUI("config.toml", lambda: None, 75, 2, graph_view="graph-1")
+
+
+def test_ui_default_graph_view_and_reconfigure_fallback() -> None:
+    ui = FanAppUI("config.toml", lambda: None, 75, 2)
+    assert ui.graph_view == "graph-2"
+    ui.graph_view = "graph-1"
+    ui.reconfigure_display(75, 2, DashboardColors())
+    assert ui.graph_view == "graph-2"
 
 
 def test_graph_two_headless_two_endpoint_power_and_resize() -> None:
@@ -2673,7 +2681,8 @@ def test_dashboard_color_spans_cover_complete_boxes_only() -> None:
     class ColoredDashboardApp(App[None]):
         def compose(self) -> ComposeResult:
             yield FanAppUI(
-                "config.toml", lambda: None, 75, 2, DashboardColors("yellow", "cyan", "#ff0000")
+                "config.toml", lambda: None, 75, 2, DashboardColors("yellow", "cyan", "#ff0000"),
+                graph_view="graph-1",
             )
 
     app = ColoredDashboardApp()

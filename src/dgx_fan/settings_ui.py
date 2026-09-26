@@ -163,7 +163,7 @@ class SettingsScreen(ModalScreen[bool]):
         control = self._section("control")
         hardware = self._section("hardware")
         colors = self._section("dashboard").get("colors", {})
-        graph_view = self._section("dashboard").get("graph_view", "graph-1")
+        graph_view = self._section("dashboard").get("graph_view", "graph-2")
         if not isinstance(colors, dict):
             colors = {}
         stages = control.get("stages", [])
@@ -279,7 +279,7 @@ class SettingsScreen(ModalScreen[bool]):
                         "Dashboard view",
                         Select(
                             [("Graph #1 (classic)", "graph-1"), ("Graph #2 (two DGX)", "graph-2")],
-                            value=graph_view if graph_view in {"graph-1", "graph-2"} else "graph-1",
+                            value=graph_view if graph_view in {"graph-1", "graph-2"} else "graph-2",
                             id="setting-dashboard-graph-view",
                             classes="setting-input",
                         ),

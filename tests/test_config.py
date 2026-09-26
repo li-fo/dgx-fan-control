@@ -83,7 +83,7 @@ def test_load_valid_config(tmp_path: Path) -> None:
     assert config.web.port == 8000
     assert config.web.allow_control is False
     assert config.web.socket_path == (path.parent / ".dgx-fan-monitor.sock").resolve()
-    assert config.graph_view == "graph-1"
+    assert config.graph_view == "graph-2"
     assert config.dashboard_ranges == DashboardRanges()
 
 
@@ -158,6 +158,15 @@ def test_loads_graph_two(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text(_config() + '\n[dashboard]\ngraph_view = "graph-2"\n')
     assert load_config(path).graph_view == "graph-2"
+
+
+def test_graph_view_defaults_with_dashboard_section_and_explicit_classic(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config() + "\n[dashboard]\n")
+    assert load_config(path).graph_view == "graph-2"
+    path.write_text(_config() + '\n[dashboard]\ngraph_view = "graph-1"\n')
+    assert load_config(path).graph_view == "graph-1"
+    assert load_config(Path("config.example.toml")).graph_view == "graph-2"
 
 
 def test_loads_opt_in_web_monitor_settings(tmp_path: Path) -> None:

@@ -16,7 +16,7 @@ cp config.example.toml config.toml
 | `[[dgx]]` | One or two entries. Each `id` and `name` must be nonempty and unique. `url` is the DCGM exporter's `http(s)` address. |
 | `dgx.memory_source` | Defaults to `"dcgm"` framebuffer memory. Use `"node-exporter"` to display DGX Spark host UMA memory. |
 | `dgx.node_exporter_url` | Required `http(s)` address when `memory_source = "node-exporter"`; cannot be set for `"dcgm"`. It supplies the memory display only. GPU temperature, utilization, and fan control still require DCGM. |
-| `dashboard.graph_view` | Defaults to `"graph-1"`; `"graph-2"` is the compact two-DGX-column view. Also selectable under Setting → UI. |
+| `dashboard.graph_view` | Defaults to `"graph-2"`, the compact two-DGX-column view. Explicitly set `"graph-1"` for the classic view or select it under Setting → UI. |
 | `dashboard.colors.memory`, `utilization`, `temperature`, `power` | Optional foreground colors. Use a Rich color name or exact `#RRGGBB`. If omitted, MEM, UTIL, and TEMP use the terminal default; POWER uses `ansi_green`. The string `"default"` is not a valid configured value. |
 | `dashboard.ranges.utilization`, `memory`, `temperature`, `power` | Optional Graph #2 display ranges. Each table needs finite numeric `min` and `max` with `min < max`. UTIL/MEM must stay within 0–100%, POWER's minimum must be nonnegative, and TEMP may have a negative minimum. Unknown range names or keys and overflowing spans are rejected. |
 

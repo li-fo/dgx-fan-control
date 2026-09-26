@@ -564,7 +564,7 @@ class FanAppUI(Static):
         dashboard_colors: DashboardColors | None = None,
         settings: Callable[[], None] | None = None,
         *,
-        graph_view: str = "graph-1",
+        graph_view: str = "graph-2",
         dashboard_ranges: DashboardRanges | None = None,
         read_only: bool = False,
         history_query: HistoryQuery | None = None,
@@ -762,7 +762,7 @@ class FanAppUI(Static):
         emergency_temperature: float,
         collection_interval_seconds: float,
         dashboard_colors: DashboardColors,
-        graph_view: str = "graph-1",
+        graph_view: str = "graph-2",
         dashboard_ranges: DashboardRanges | None = None,
     ) -> None:
         """Apply effective presentation settings without discarding chart history."""

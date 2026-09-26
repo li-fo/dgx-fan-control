@@ -69,6 +69,29 @@ def _editor(app: App[None]) -> Screen[bool]:
     return cast(Screen[bool], app.screen)
 
 
+@pytest.mark.parametrize(("graph_view", "expected"), [
+    (None, "graph-2"), ("graph-1", "graph-1"), ("unsupported", "graph-2"),
+])
+def test_settings_graph_view_default_and_explicit_classic(
+    graph_view: str | None, expected: str,
+) -> None:
+    initial = _initial()
+    if graph_view is not None:
+        initial["settings"]["dashboard"]["graph_view"] = graph_view
+
+    async def save(*_args: Any) -> dict[str, Any]:
+        return initial
+
+    app = _ModalApp(SettingsScreen(initial, save), [])
+
+    async def exercise() -> None:
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            assert app.screen.query_one("#setting-dashboard-graph-view", Select).value == expected
+
+    asyncio.run(exercise())
+
+
 def test_settings_cancel_never_calls_save_at_small_terminal_size() -> None:
     calls: list[dict[str, Any]] = []
 

@@ -19,10 +19,10 @@ url = "http://192.168.1.10:9400/metrics"
 # node_exporter_url = "http://192.168.1.11:9100/metrics"
 
 [dashboard]
-# "graph-1" preserves the classic dashboard. Select "graph-2" in Fan
-# Control > Setting > UI for the compact two-DGX summary; its POWER is N/A
-# unless DCGM reported a valid power value for every physical GPU.
-graph_view = "graph-1"
+# "graph-2" is the compact two-DGX dashboard. Select "graph-1" in Fan
+# Control > Setting > UI for the classic view. Graph #2 POWER is N/A unless
+# DCGM reported a valid power value for every physical GPU.
+graph_view = "graph-2"
 
 # Optional Graph #2 display-only bounds, shared by both DGX columns and the
 # web view. Uncomment a whole desired block, including its table header and

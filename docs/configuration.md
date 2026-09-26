@@ -16,7 +16,7 @@ cp config.example.toml config.toml
 | `[[dgx]]` | 1~2개입니다. 각 `id`와 `name`은 비어 있지 않고 서로 중복되지 않아야 합니다. `url`은 DCGM exporter의 `http(s)` 주소입니다. |
 | `dgx.memory_source` | 생략 시 `"dcgm"` framebuffer 메모리입니다. DGX Spark의 host UMA 메모리를 표시하려면 `"node-exporter"`를 사용합니다. |
 | `dgx.node_exporter_url` | `memory_source = "node-exporter"`일 때 필수 `http(s)` 주소입니다. `"dcgm"`에는 지정할 수 없습니다. 메모리 표시용이며 GPU 온도·사용률과 팬 제어에는 계속 DCGM이 필요합니다. |
-| `dashboard.graph_view` | 생략 시 `"graph-1"`; `"graph-2"`는 두 DGX 열의 compact 화면입니다. Setting → UI에서도 선택할 수 있습니다. |
+| `dashboard.graph_view` | 생략 시 `"graph-2"`(두 DGX 열 화면)입니다. 기존 클래식 화면은 `"graph-1"`로 명시하거나 Setting → UI에서 선택할 수 있습니다. |
 | `dashboard.colors.memory`, `utilization`, `temperature`, `power` | 선택 전경색입니다. Rich 색 이름 또는 정확한 `#RRGGBB`를 사용합니다. 키를 생략하면 MEM·UTIL·TEMP는 터미널 기본색, POWER는 `ansi_green`입니다. 문자열 `"default"`는 유효한 설정값이 아닙니다. |
 | `dashboard.ranges.utilization`, `memory`, `temperature`, `power` | 선택적인 Graph #2 표시 범위입니다. 각 표에 유한한 숫자 `min`과 `max`를 모두 넣고 `min < max`로 설정하세요. UTIL·MEM은 0–100% 안, POWER의 최솟값은 0 이상이며 TEMP는 음수도 허용합니다. 알 수 없는 범위 이름·키와 무한대가 되는 폭은 거부됩니다. |
 

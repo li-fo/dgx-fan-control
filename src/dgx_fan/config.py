@@ -122,7 +122,7 @@ class AppConfig:
     control: ControlConfig
     hardware: HardwareConfig
     dashboard_colors: DashboardColors = field(default_factory=DashboardColors)
-    graph_view: str = "graph-1"
+    graph_view: str = "graph-2"
     web: WebConfig = field(default_factory=WebConfig)
     dashboard_ranges: DashboardRanges = field(default_factory=DashboardRanges)
 
@@ -226,10 +226,10 @@ def parse_dashboard_ranges(value: object, name: str = "dashboard.ranges") -> Das
 def _dashboard_settings(raw: dict[str, object]) -> tuple[DashboardColors, str, DashboardRanges]:
     dashboard_raw = raw.get("dashboard")
     if dashboard_raw is None:
-        return DashboardColors(), "graph-1", DashboardRanges()
+        return DashboardColors(), "graph-2", DashboardRanges()
     dashboard = _mapping(dashboard_raw, "dashboard")
     _reject_unknown_keys(dashboard, "dashboard", {"colors", "graph_view", "ranges"})
-    graph_view = dashboard.get("graph_view", "graph-1")
+    graph_view = dashboard.get("graph_view", "graph-2")
     if not isinstance(graph_view, str) or graph_view not in {"graph-1", "graph-2"}:
         raise ConfigError("dashboard.graph_view must be graph-1 or graph-2")
     ranges_raw = dashboard.get("ranges")
