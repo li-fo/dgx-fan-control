@@ -25,13 +25,26 @@ url = "http://192.168.1.10:9400/metrics"
 graph_view = "graph-1"
 
 # Optional Graph #2 display-only bounds, shared by both DGX columns and the
-# web view. Omitted metrics keep their defaults (UTIL/MEM 0..100%, TEMP 0 to
-# max(100 C, emergency temperature), POWER 0..240 W). MEM remains percent;
-# upper summary memory remains GiB. Example zoom: POWER 0..120 W.
+# web view. Uncomment a whole desired block, including its table header and
+# both min/max lines. Omitted metrics keep their defaults. MEM stays percent;
+# the upper memory summary stays GiB. Explicit TEMP max = 100 pins the scale
+# at 100 C; omitting TEMP instead uses max(100 C, emergency temperature).
+# To zoom POWER to 0..120 W, change its max below from 240 to 120.
+# [dashboard.ranges.utilization]
+# min = 0
+# max = 100
+#
+# [dashboard.ranges.memory]
+# min = 0
+# max = 100
+#
+# [dashboard.ranges.temperature]
+# min = 0
+# max = 100
+#
 # [dashboard.ranges.power]
 # min = 0
-# max = 120
-# Add [dashboard.ranges.utilization], .memory, or .temperature similarly.
+# max = 240
 # Each enabled table requires finite min < max; percentage bounds stay 0..100.
 # Edit config.toml and restart the primary controller and web renderer.
 
